@@ -68,7 +68,7 @@ impl Key {
     }
 
     /// Group label for a message given every occurrence of the header, first first.
-    fn group(&self, values: Option<&Vec<String>>) -> String {
+    pub fn group(&self, values: Option<&Vec<String>>) -> String {
         let Some(values) = values else {
             return NONE.to_string();
         };

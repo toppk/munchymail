@@ -163,6 +163,34 @@ munchymail show ID --raw        # exact stored bytes
 munchymail show ID --where      # every origin/path/offset it was found at
 ```
 
+### diff: before/after check of one mbox (no database)
+
+```
+munchymail diff BEFORE AFTER [--moved-to MBOX ...] [--by KEY ...] [-n N] [--list]
+```
+
+Reads both files (shared lock, read-only), splits them and pairs every
+message: **unchanged** (identical bytes), **headers changed** (same body and
+Message-ID, e.g. Dovecot rewrote `Status`; shows which headers), **removed,
+moved** (found in a `--moved-to` file, matched by body and Message-ID since
+the new copy gets new Dovecot headers), **removed, NOT FOUND**, and
+**added** (new mail since). Each section is broken down by `--by` keys as in
+`report`; `--list` prints every message.
+
+```
+$ munchymail diff ~/inbox-before-backfill-2026-10-06.mbox /var/mail/me \
+    --moved-to ~/mail/lists/github-project --by from:addr --by list-id
+before   81835  ~/inbox-before-backfill-2026-10-06.mbox
+after    62655  /var/mail/me
+  unchanged          62638
+  headers changed       16
+  removed, moved     19181
+  removed, NOT FOUND     0
+  added                  1
+  in --moved-to but not from before: 3
+...
+```
+
 ### sql, scan
 
 ```

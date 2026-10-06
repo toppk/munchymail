@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -127,6 +128,29 @@ enum Cmd {
     Sql {
         /// One SQL statement; see docs/index.md for the schema.
         query: String,
+    },
+    /// Compare two snapshots of an mbox message by message; no database.
+    ///
+    /// Messages pair up as unchanged (identical bytes), headers changed (same
+    /// body and Message-ID), removed (moved if found in a --moved-to file,
+    /// otherwise not found) or added.
+    Diff {
+        /// The older copy.
+        before: PathBuf,
+        /// The newer copy.
+        after: PathBuf,
+        /// Where removed messages may have gone; repeatable.
+        #[arg(long = "moved-to", value_name = "MBOX")]
+        moved_to: Vec<PathBuf>,
+        /// Group key for the breakdowns, as in `report`; repeatable.
+        #[arg(long = "by", value_name = "KEY", default_value = "from:addr")]
+        by: Vec<String>,
+        /// Groups shown per section.
+        #[arg(short = 'n', long, default_value_t = 15)]
+        limit: usize,
+        /// Also list every message in each section.
+        #[arg(long)]
+        list: bool,
     },
     /// Split mbox files and check they reproduce byte-for-byte; no database.
     Scan {
@@ -671,6 +695,118 @@ async fn stats(store: &Store, out: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
+fn diff(
+    before: &Path,
+    after: &Path,
+    moved_to: &[PathBuf],
+    by: &[String],
+    limit: usize,
+    list: bool,
+    out: &mut impl Write,
+) -> Result<()> {
+    use munchymail::diff::{self, Msg};
+    let keys = by
+        .iter()
+        .map(|k| Key::parse(k))
+        .collect::<Result<Vec<_>>>()?;
+    let a = diff::load(before)?;
+    let b = diff::load(after)?;
+    let mut elsewhere = Vec::new();
+    for p in moved_to {
+        elsewhere.extend(diff::load(p)?);
+    }
+    let d = diff::compare(&a, &b, &elsewhere);
+
+    writeln!(out, "before {:>7}  {}", a.len(), before.display())?;
+    writeln!(out, "after  {:>7}  {}", b.len(), after.display())?;
+    writeln!(out, "  unchanged        {:>7}", d.unchanged)?;
+    writeln!(out, "  headers changed  {:>7}", d.changed.len())?;
+    writeln!(out, "  removed, moved   {:>7}", d.moved.len())?;
+    writeln!(out, "  removed, NOT FOUND {:>5}", d.lost.len())?;
+    writeln!(out, "  added            {:>7}", d.added.len())?;
+    if !moved_to.is_empty() {
+        writeln!(
+            out,
+            "  in --moved-to but not from before: {}",
+            d.moved_to_extra
+        )?;
+    }
+
+    let line = |m: &Msg| {
+        let get = |n: &str| {
+            m.values(n)
+                .and_then(|v| v.into_iter().next())
+                .unwrap_or_default()
+        };
+        format!(
+            "    {}  {}  {}",
+            truncate(&get("date"), 31),
+            truncate(&get("from"), 40),
+            truncate(&get("subject"), 70)
+        )
+    };
+    let section = |title: &str, msgs: Vec<&Msg>, out: &mut dyn Write| -> Result<()> {
+        if msgs.is_empty() {
+            return Ok(());
+        }
+        writeln!(out, "\n== {title} ({}) by {} ==", msgs.len(), by.join(", "))?;
+        let mut groups: HashMap<Vec<String>, u64> = HashMap::new();
+        for m in &msgs {
+            let g = keys
+                .iter()
+                .map(|k| k.group(m.values(&k.header).as_ref()))
+                .collect();
+            *groups.entry(g).or_default() += 1;
+        }
+        let mut rows: Vec<_> = groups.into_iter().collect();
+        rows.sort_by(|x, y| y.1.cmp(&x.1).then_with(|| x.0.cmp(&y.0)));
+        for (g, n) in rows.iter().take(limit) {
+            writeln!(out, "  {n:>7}  {}", g.join("  "))?;
+        }
+        if rows.len() > limit {
+            let rest: u64 = rows[limit..].iter().map(|(_, n)| n).sum();
+            writeln!(out, "  {rest:>7}  ({} more groups)", rows.len() - limit)?;
+        }
+        if list {
+            for m in &msgs {
+                writeln!(out, "{}", line(m))?;
+            }
+        }
+        Ok(())
+    };
+    section(
+        "removed, NOT FOUND",
+        d.lost.iter().map(|&i| &a[i]).collect(),
+        out,
+    )?;
+    section(
+        "removed, moved",
+        d.moved.iter().map(|&i| &a[i]).collect(),
+        out,
+    )?;
+    section("added", d.added.iter().map(|&i| &b[i]).collect(), out)?;
+
+    if !d.changed.is_empty() {
+        let mut by_names: HashMap<String, u64> = HashMap::new();
+        for &(i, j) in &d.changed {
+            *by_names
+                .entry(diff::changed_headers(&a[i], &b[j]).join(", "))
+                .or_default() += 1;
+        }
+        let mut rows: Vec<_> = by_names.into_iter().collect();
+        rows.sort_by(|x, y| y.1.cmp(&x.1).then_with(|| x.0.cmp(&y.0)));
+        writeln!(
+            out,
+            "\n== headers changed ({}) by which headers differ ==",
+            d.changed.len()
+        )?;
+        for (names, n) in rows.iter().take(limit) {
+            writeln!(out, "  {n:>7}  {names}")?;
+        }
+    }
+    Ok(())
+}
+
 fn scan(path: &Path, list: bool, out: &mut impl Write) -> Result<()> {
     let snap = source::read_locked(path, Duration::from_secs(30))?;
     let buf = &snap.bytes;
@@ -717,6 +853,18 @@ fn scan(path: &Path, list: bool, out: &mut impl Write) -> Result<()> {
 async fn run(cli: Cli) -> Result<()> {
     let stdout = io::stdout();
     let mut out = io::BufWriter::new(stdout.lock());
+    if let Cmd::Diff {
+        before,
+        after,
+        moved_to,
+        by,
+        limit,
+        list,
+    } = &cli.cmd
+    {
+        diff(before, after, moved_to, by, *limit, *list, &mut out)?;
+        return Ok(out.flush()?);
+    }
     if let Cmd::Scan { list, paths } = &cli.cmd {
         for p in paths {
             scan(p, *list, &mut out).with_context(|| p.display().to_string())?;
@@ -844,7 +992,7 @@ async fn run(cli: Cli) -> Result<()> {
                 writeln!(out, "{}", r.iter().map(text).collect::<Vec<_>>().join("\t"))?;
             }
         }
-        Cmd::Scan { .. } => unreachable!(),
+        Cmd::Scan { .. } | Cmd::Diff { .. } => unreachable!(),
     }
     if read_txn {
         store.commit().await?;
