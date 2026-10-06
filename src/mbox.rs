@@ -5,6 +5,8 @@
 
 use std::ops::Range;
 
+use crate::util::days_from_civil;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FromLine {
     pub sender: Vec<u8>,
@@ -96,16 +98,6 @@ fn numeric_tz(s: &[u8], i: usize) -> Option<i32> {
     let hh = digits(s, i + 1, 2)? as i32;
     let mm = digits(s, i + 3, 2)? as i32;
     Some(sign * (hh * 60 + mm))
-}
-
-fn days_from_civil(y: i64, m: u32, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (i64::from(m) + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
 }
 
 /// Port of Dovecot's `mbox_from_parse`; `s` is the line after `From `, without its line ending.

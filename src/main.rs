@@ -1,81 +1,575 @@
-use std::path::Path;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
+use anyhow::{Context, Result, bail};
+use clap::{Args, Parser, Subcommand};
+use turso::Value;
+
+use munchymail::import::Importer;
+use munchymail::query::Filter;
+use munchymail::store::{Store, now};
+use munchymail::util::{hex, ymd};
 use munchymail::{mbox, source};
-use sha2::{Digest, Sha256};
 
-const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
-
-fn short_hash(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .take(6)
-        .map(|b| format!("{b:02x}"))
-        .collect()
+#[derive(Parser)]
+#[command(about = "Offline mail corpus: import, dedupe, search")]
+struct Cli {
+    /// Data directory holding email.sqlite and content/.
+    #[arg(long, env = "MUNCHYMAIL_DATA", default_value = "data", global = true)]
+    data: PathBuf,
+    #[command(subcommand)]
+    cmd: Cmd,
 }
 
-fn scan(path: &Path, list: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let snap = source::read_locked(path, LOCK_TIMEOUT)?;
+#[derive(Subcommand)]
+enum Cmd {
+    /// Manage origins: places mail is found (live trees, backups, exports).
+    #[command(subcommand)]
+    Origin(OriginCmd),
+    /// Import every mbox under one or more origins.
+    Import { labels: Vec<String> },
+    /// List matching messages, newest first.
+    Search {
+        #[command(flatten)]
+        filter: FilterArgs,
+        /// Print each message's raw header block instead of a summary line.
+        #[arg(long, conflicts_with_all = ["raw", "count"])]
+        headers: bool,
+        /// Print each full raw message.
+        #[arg(long, conflicts_with = "count")]
+        raw: bool,
+        /// Print only the number of matches.
+        #[arg(long)]
+        count: bool,
+        #[arg(short = 'n', long, default_value_t = 50)]
+        limit: i64,
+    },
+    /// Most common values of a header among matching messages.
+    Top {
+        name: String,
+        #[command(flatten)]
+        filter: FilterArgs,
+        #[arg(short = 'n', long, default_value_t = 30)]
+        limit: i64,
+    },
+    /// Header names and how many matching messages carry each.
+    Names {
+        #[command(flatten)]
+        filter: FilterArgs,
+        #[arg(short = 'n', long, default_value_t = 100)]
+        limit: i64,
+    },
+    /// Show one message: headers by default.
+    Show {
+        id: i64,
+        /// Exact raw message bytes (pipe into sieve-test).
+        #[arg(long)]
+        raw: bool,
+        /// Where this message was found.
+        #[arg(long = "where")]
+        provenance: bool,
+    },
+    /// Corpus counts.
+    Stats,
+    /// Run SQL against the index and print rows tab-separated.
+    Sql { query: String },
+    /// Split mbox files without touching the database.
+    Scan {
+        #[arg(long)]
+        list: bool,
+        paths: Vec<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum OriginCmd {
+    Add {
+        label: String,
+        /// Directory tree or single mbox file.
+        root: PathBuf,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    List,
+}
+
+/// Patterns use Sieve `:matches` (`*`, `?`, case-insensitive); with no wildcard they mean `:contains`.
+#[derive(Args, Clone, Default)]
+struct FilterArgs {
+    /// NAME:PATTERN on decoded header values; repeatable, all must match.
+    #[arg(short = 'H', long = "header", value_name = "NAME:PATTERN")]
+    header: Vec<String>,
+    /// Header must be present; repeatable.
+    #[arg(long, value_name = "NAME")]
+    has: Vec<String>,
+    #[arg(long, value_name = "PATTERN")]
+    from: Option<String>,
+    #[arg(long, value_name = "PATTERN")]
+    to: Option<String>,
+    #[arg(long, value_name = "PATTERN")]
+    subject: Option<String>,
+    /// Sighting path within an origin, e.g. 'lists/*'.
+    #[arg(long, value_name = "PATTERN")]
+    folder: Option<String>,
+    #[arg(long, value_name = "LABEL")]
+    origin: Option<String>,
+    /// Date header on or after YYYY-MM-DD (UTC).
+    #[arg(long)]
+    since: Option<String>,
+    /// Date header before YYYY-MM-DD (UTC).
+    #[arg(long)]
+    before: Option<String>,
+}
+
+impl FilterArgs {
+    fn build(self) -> Result<Filter> {
+        let mut headers = Vec::new();
+        for h in self.header {
+            let Some((name, pat)) = h.split_once(':') else {
+                bail!("--header wants NAME:PATTERN, got {h:?}");
+            };
+            headers.push((name.trim().to_string(), pat.to_string()));
+        }
+        for (name, pat) in [
+            ("from", self.from),
+            ("to", self.to),
+            ("subject", self.subject),
+        ] {
+            if let Some(p) = pat {
+                headers.push((name.to_string(), p));
+            }
+        }
+        Ok(Filter {
+            headers,
+            has: self.has,
+            folder: self.folder,
+            origin: self.origin,
+            since: self.since,
+            before: self.before,
+        })
+    }
+}
+
+fn text(v: &Value) -> String {
+    match v {
+        Value::Null => String::new(),
+        Value::Integer(i) => i.to_string(),
+        Value::Real(r) => r.to_string(),
+        Value::Text(s) => s.clone(),
+        Value::Blob(b) if b.len() <= 32 => hex(b),
+        Value::Blob(b) => format!("<{} bytes>", b.len()),
+    }
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        s.chars().take(n - 1).chain(['…']).collect()
+    }
+}
+
+async fn query_rows(store: &Store, sql: &str, params: Vec<Value>) -> Result<Vec<Vec<Value>>> {
+    let mut stmt = store.conn.prepare(sql).await?;
+    let n = stmt.column_count();
+    let mut rows = stmt.query(params).await?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next().await? {
+        out.push(
+            (0..n)
+                .map(|i| r.get_value(i))
+                .collect::<turso::Result<_>>()?,
+        );
+    }
+    Ok(out)
+}
+
+async fn origin(store: &Store, cmd: OriginCmd, out: &mut impl Write) -> Result<()> {
+    match cmd {
+        OriginCmd::Add {
+            label,
+            root,
+            host,
+            note,
+        } => {
+            let root = root
+                .canonicalize()
+                .with_context(|| format!("resolving {}", root.display()))?;
+            if root.starts_with(store.data_dir.canonicalize()?) {
+                bail!("origin {} is inside the data directory", root.display());
+            }
+            store.begin().await?;
+            store
+                .conn
+                .execute(
+                    "INSERT INTO origin (label, root, host, note, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    (label.as_str(), root.to_string_lossy().as_ref(), host, note, now()),
+                )
+                .await
+                .with_context(|| format!("adding origin {label:?}"))?;
+            store.commit().await?;
+            writeln!(out, "added origin {label} -> {}", root.display())?;
+        }
+        OriginCmd::List => {
+            let rows = query_rows(
+                store,
+                "SELECT g.label, g.root, g.host, g.note,
+                        (SELECT max(started_at) FROM import_run r WHERE r.origin_id = g.origin_id)
+                 FROM origin g ORDER BY g.label",
+                vec![],
+            )
+            .await?;
+            for r in rows {
+                let last = match r[4] {
+                    Value::Integer(t) => ymd(t),
+                    _ => "never".into(),
+                };
+                writeln!(
+                    out,
+                    "{}\t{}\t{}\t{}\tlast import {last}",
+                    text(&r[0]),
+                    text(&r[1]),
+                    text(&r[2]),
+                    text(&r[3])
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn search(
+    store: &Store,
+    filter: Filter,
+    headers: bool,
+    raw: bool,
+    count: bool,
+    limit: i64,
+    out: &mut impl Write,
+) -> Result<()> {
+    let set = filter.materialize(&store.conn).await?;
+    if count {
+        let rows = query_rows(store, &format!("SELECT count(*) FROM {set}"), vec![]).await?;
+        writeln!(out, "{}", text(&rows[0][0]))?;
+        return Ok(());
+    }
+    let from = match set {
+        "hit" => "hit JOIN artifact a ON a.artifact_id = hit.artifact_id",
+        _ => "artifact a",
+    };
+    let rows = query_rows(
+        store,
+        &format!(
+            "SELECT a.artifact_id, a.date, a.sender, a.subject, a.header_hash, a.body_hash
+             FROM {from} ORDER BY a.date DESC LIMIT ?"
+        ),
+        vec![limit.into()],
+    )
+    .await?;
+    for r in rows {
+        if headers || raw {
+            writeln!(out, "==> {} <==", text(&r[0]))?;
+            if let (Value::Blob(h), Value::Blob(b)) = (&r[4], &r[5]) {
+                out.write_all(&store.object(h).await?)?;
+                if raw {
+                    out.write_all(&store.object(b).await?)?;
+                    writeln!(out)?;
+                }
+            }
+        } else {
+            let date = match r[1] {
+                Value::Integer(t) => ymd(t),
+                _ => "----------".into(),
+            };
+            writeln!(
+                out,
+                "{:>7}  {date}  {:<32}  {}",
+                text(&r[0]),
+                truncate(&text(&r[2]), 32),
+                text(&r[3])
+            )?;
+        }
+    }
+    Ok(())
+}
+
+async fn top(
+    store: &Store,
+    column: &str,
+    name: Option<&str>,
+    filter: Filter,
+    limit: i64,
+    out: &mut impl Write,
+) -> Result<()> {
+    let from = match filter.materialize(&store.conn).await? {
+        // Per-name counts scan hits first; per-value counts let the planner start from the name index.
+        "hit" if name.is_none() => "hit CROSS JOIN header h ON h.artifact_id = hit.artifact_id",
+        "hit" => "hit JOIN header h ON h.artifact_id = hit.artifact_id",
+        _ => "header h",
+    };
+    // Per-name counts use nth = 0 so each message counts once without DISTINCT.
+    let counter = if name.is_some() {
+        "count(DISTINCT h.artifact_id)"
+    } else {
+        "count(*)"
+    };
+    let mut params = Vec::new();
+    let cond = match name {
+        Some(n) => {
+            params.push(n.to_ascii_lowercase().into());
+            "h.name = ?"
+        }
+        None => "h.nth = 0",
+    };
+    params.push(limit.into());
+    let rows = query_rows(
+        store,
+        &format!(
+            "SELECT h.{column}, {counter} AS n FROM {from}
+             WHERE {cond} GROUP BY h.{column} ORDER BY n DESC LIMIT ?"
+        ),
+        params,
+    )
+    .await?;
+    for r in rows {
+        writeln!(out, "{:>7}  {}", text(&r[1]), text(&r[0]))?;
+    }
+    Ok(())
+}
+
+async fn show(
+    store: &Store,
+    id: i64,
+    raw: bool,
+    provenance: bool,
+    out: &mut impl Write,
+) -> Result<()> {
+    let rows = query_rows(
+        store,
+        "SELECT header_hash, body_hash FROM artifact WHERE artifact_id = ?",
+        vec![id.into()],
+    )
+    .await?;
+    let Some(r) = rows.first() else {
+        bail!("no message {id}")
+    };
+    let (Value::Blob(h), Value::Blob(b)) = (&r[0], &r[1]) else {
+        bail!("bad hashes for {id}")
+    };
+    if provenance {
+        let rows = query_rows(
+            store,
+            "SELECT g.label, s.path, o.offset, count(*), max(r.started_at)
+             FROM observation o
+             JOIN file_sighting s ON s.content_id = o.content_id
+             JOIN origin g ON g.origin_id = s.origin_id
+             JOIN import_run r ON r.run_id = s.run_id
+             WHERE o.artifact_id = ?
+             GROUP BY g.label, s.path, o.offset ORDER BY g.label, s.path",
+            vec![id.into()],
+        )
+        .await?;
+        for r in rows {
+            let seen = match r[4] {
+                Value::Integer(t) => ymd(t),
+                _ => String::new(),
+            };
+            writeln!(
+                out,
+                "{}:{} @{}  seen {}x, last {seen}",
+                text(&r[0]),
+                text(&r[1]),
+                text(&r[2]),
+                text(&r[3])
+            )?;
+        }
+        return Ok(());
+    }
+    out.write_all(&store.object(h).await?)?;
+    if raw {
+        out.write_all(&store.object(b).await?)?;
+    }
+    Ok(())
+}
+
+async fn stats(store: &Store, out: &mut impl Write) -> Result<()> {
+    for (label, sql) in [
+        ("origins", "SELECT count(*) FROM origin"),
+        ("import runs", "SELECT count(*) FROM import_run"),
+        ("file sightings", "SELECT count(*) FROM file_sighting"),
+        ("file contents", "SELECT count(*) FROM file_content"),
+        ("observations", "SELECT count(*) FROM observation"),
+        ("artifacts", "SELECT count(*) FROM artifact"),
+        (
+            "distinct bodies",
+            "SELECT count(DISTINCT body_hash) FROM artifact",
+        ),
+        (
+            "distinct message-ids",
+            "SELECT count(DISTINCT message_id) FROM artifact",
+        ),
+        ("header rows", "SELECT count(*) FROM header"),
+        (
+            "objects inline",
+            "SELECT count(*) || ' / ' || coalesce(sum(length), 0) || ' bytes' FROM object WHERE inline_bytes IS NOT NULL",
+        ),
+        (
+            "objects external",
+            "SELECT count(*) || ' / ' || coalesce(sum(length), 0) || ' bytes' FROM object WHERE inline_bytes IS NULL",
+        ),
+    ] {
+        let rows = query_rows(store, sql, vec![]).await?;
+        writeln!(out, "{label:>22}: {}", text(&rows[0][0]))?;
+    }
+    Ok(())
+}
+
+fn scan(path: &Path, list: bool, out: &mut impl Write) -> Result<()> {
+    let snap = source::read_locked(path, Duration::from_secs(30))?;
     let buf = &snap.bytes;
     let parsed = mbox::split(buf)?;
     if !parsed.covers(buf.len()) {
-        return Err("split does not reproduce the file byte-for-byte".into());
+        bail!("split does not reproduce the file byte-for-byte");
     }
     let cl = parsed
         .messages
         .iter()
         .filter(|m| m.used_content_length)
         .count();
-    println!(
-        "{}: {} bytes, {} messages, {} via Content-Length, preamble {} bytes{}",
+    writeln!(
+        out,
+        "{}: {} bytes, {} messages, {cl} via Content-Length, preamble {} bytes{}",
         path.display(),
         buf.len(),
         parsed.messages.len(),
-        cl,
         parsed.preamble.len(),
         if snap.changed_during_read {
             ", CHANGED DURING READ"
         } else {
             ""
         },
-    );
+    )?;
     if list {
         for (i, m) in parsed.messages.iter().enumerate() {
-            println!(
-                "  {i:>6} @{:<10} hdr {:>7} {} body {:>9} {} sep {} t={} tz={:?} {}",
+            writeln!(
+                out,
+                "  {i:>6} @{:<10} hdr {:>7} body {:>9} sep {} t={} tz={:?} {}",
                 m.from_line.start,
                 m.header.len(),
-                short_hash(&buf[m.header.clone()]),
                 m.body.len(),
-                short_hash(&buf[m.body.clone()]),
                 m.separator.len(),
                 m.from.time,
                 m.from.tz_offset_min,
                 String::from_utf8_lossy(&m.from.sender),
-            );
+            )?;
         }
     }
     Ok(())
 }
 
-fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let Some((cmd, rest)) = args.split_first() else {
-        eprintln!("usage: munchymail scan [--list] <mbox>...");
-        return ExitCode::FAILURE;
-    };
-    if cmd != "scan" {
-        eprintln!("unknown command: {cmd}");
-        return ExitCode::FAILURE;
+async fn run(cli: Cli) -> Result<()> {
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::new(stdout.lock());
+    if let Cmd::Scan { list, paths } = &cli.cmd {
+        for p in paths {
+            scan(p, *list, &mut out).with_context(|| p.display().to_string())?;
+        }
+        return Ok(out.flush()?);
     }
-    let list = rest.iter().any(|a| a == "--list");
-    let mut status = ExitCode::SUCCESS;
-    for p in rest.iter().filter(|a| *a != "--list") {
-        if let Err(e) = scan(Path::new(p), list) {
-            eprintln!("{p}: {e}");
-            status = ExitCode::FAILURE;
+    let store = Store::open(&cli.data).await?;
+    let read_txn = matches!(
+        cli.cmd,
+        Cmd::Search { .. } | Cmd::Top { .. } | Cmd::Names { .. } | Cmd::Show { .. } | Cmd::Stats
+    );
+    if read_txn {
+        store.begin().await?;
+    }
+    match cli.cmd {
+        Cmd::Origin(cmd) => origin(&store, cmd, &mut out).await?,
+        Cmd::Import { labels } => {
+            for label in labels {
+                let mut imp = Importer::new(&store, &label).await?;
+                imp.run().await?;
+                let s = &imp.stats;
+                writeln!(
+                    out,
+                    "{label}: {} files read ({} unchanged, {} not mbox), {} messages, {} new artifacts, {} bytes",
+                    s.files, s.known_files, s.skipped, s.messages, s.new_artifacts, s.bytes
+                )?;
+            }
+            store.checkpoint().await?;
+        }
+        Cmd::Search {
+            filter,
+            headers,
+            raw,
+            count,
+            limit,
+        } => {
+            search(
+                &store,
+                filter.build()?,
+                headers,
+                raw,
+                count,
+                limit,
+                &mut out,
+            )
+            .await?
+        }
+        Cmd::Top {
+            name,
+            filter,
+            limit,
+        } => {
+            top(
+                &store,
+                "value",
+                Some(&name),
+                filter.build()?,
+                limit,
+                &mut out,
+            )
+            .await?
+        }
+        Cmd::Names { filter, limit } => {
+            top(&store, "name", None, filter.build()?, limit, &mut out).await?
+        }
+        Cmd::Show {
+            id,
+            raw,
+            provenance,
+        } => show(&store, id, raw, provenance, &mut out).await?,
+        Cmd::Stats => stats(&store, &mut out).await?,
+        Cmd::Sql { query } => {
+            for r in query_rows(&store, &query, vec![]).await? {
+                writeln!(out, "{}", r.iter().map(text).collect::<Vec<_>>().join("\t"))?;
+            }
+        }
+        Cmd::Scan { .. } => unreachable!(),
+    }
+    if read_txn {
+        store.commit().await?;
+    }
+    Ok(out.flush()?)
+}
+
+fn main() -> ExitCode {
+    match pollster::block_on(run(Cli::parse())) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e)
+            if e.downcast_ref::<io::Error>()
+                .is_some_and(|e| e.kind() == io::ErrorKind::BrokenPipe) =>
+        {
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            ExitCode::FAILURE
         }
     }
-    status
 }

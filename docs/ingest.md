@@ -58,15 +58,16 @@ Dovecot-written mboxes carry its own headers (`X-UID`, `Status`, `X-Keywords`,
 header object; copies from other sources will share the body hash but not the
 header hash.
 
-## Origins (next)
+## Origins
 
 Many backups will hold the same files, so provenance is tracked in layers:
 
 - **origin**: a backup set or live location you register (label, host, date, notes).
 - **file sighting**: a path within an origin plus dev/ino/size/mtime/ctime,
   pointing at a **file content** row keyed by SHA-256 of the whole file.
-  Identical files are parsed once; a file whose bytes are a prefix of
-  another's records a lineage edge (older snapshot of a growing mbox) and lets
-  re-imports read only the appended tail.
+  Identical files are parsed once; a file whose bytes extend an earlier
+  content (>64 KiB prefix match) records it as `parent_content_id`. The whole
+  file is still parsed; reading only the appended tail is a possible later
+  optimisation.
 - **observation**: an artifact at a byte offset within a file content, with
   its `From ` line and separator.

@@ -111,3 +111,10 @@ pub fn read_locked(path: &Path, timeout: Duration) -> io::Result<Snapshot> {
         });
     }
 }
+
+/// Unlocked peek at the first `n` bytes, used only to decide whether to read a file at all.
+pub fn read_head(path: &Path, n: usize) -> io::Result<Vec<u8>> {
+    let mut buf = Vec::with_capacity(n);
+    open_readonly(path)?.take(n as u64).read_to_end(&mut buf)?;
+    Ok(buf)
+}
