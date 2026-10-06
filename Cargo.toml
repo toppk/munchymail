@@ -1,0 +1,8 @@
+[package]
+name = "munchymail"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+libc = "0.2.190"
+sha2 = "0.11.0"
