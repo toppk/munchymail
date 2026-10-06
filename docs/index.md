@@ -42,6 +42,9 @@ munchymail import LABEL...
 munchymail search [FILTERS] [--headers | --raw | --count] [-n N]
 munchymail report --by KEY... [FILTERS] [-n N] [--tsv]
                                             grouped counts, % of scope and of matches
+munchymail profile [--like PAT] [FILTERS] [-k N]
+                                            every header's value distribution:
+                                            categorical, constant, then identifiers
 munchymail top HEADER [FILTERS] [-n N]      most common values
 munchymail names [--like PAT] [FILTERS] [-n N]
                                             header names, by messages carrying them
@@ -78,7 +81,7 @@ all origins, `""` leaves a date bound open):
 
 ```
 just senders 2026-01-01                       # who sends most, % of all mail
-just sender-headers '*@substack.com' 2026-01-01   # which X-headers they carry
+just sender-headers '*@github.com' 2026-01-01     # each X-header's top values
 just sender-by '*@github.com' x-github-reason 2026-01-01
 just by list-id 2026-09-01 2026-10-01
 ```

@@ -144,6 +144,90 @@ pub async fn run(conn: &Connection, filter: &Filter, keys: &[Key]) -> Result<Rep
     })
 }
 
+pub struct HeaderProfile {
+    pub name: String,
+    /// Messages carrying the header.
+    pub carried: u64,
+    /// (value, messages), most common first.
+    pub values: Vec<(String, u64)>,
+}
+
+impl HeaderProfile {
+    pub fn distinct(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn all_unique(&self) -> bool {
+        self.carried > 1 && self.distinct() as u64 == self.carried
+    }
+
+    /// Sort rank and section label.
+    pub fn kind(&self) -> (u8, &'static str) {
+        match self.distinct() {
+            1 => (1, "constant"),
+            d if d <= CATEGORY_MAX && !self.all_unique() => (0, "categorical"),
+            _ => (2, "high-cardinality / identifiers"),
+        }
+    }
+}
+
+/// Above this many distinct values a header is treated as an identifier, not a category.
+pub const CATEGORY_MAX: usize = 50;
+
+/// Every header (first occurrence per message) among matching messages, with its value
+/// distribution. Categorical headers first, then constants, then near-unique ones.
+pub async fn profile(
+    conn: &Connection,
+    filter: &Filter,
+    like: Option<&str>,
+) -> Result<(u64, Vec<HeaderProfile>)> {
+    let table = filter.materialize(conn).await?;
+    let matched = count(conn, table).await?;
+    let (from, mut params): (String, Vec<turso::Value>) = if table == "artifact" {
+        ("header h".into(), vec![])
+    } else {
+        (
+            format!("{table} t CROSS JOIN header h ON h.artifact_id = t.artifact_id"),
+            vec![],
+        )
+    };
+    let mut sql = format!("SELECT h.name, h.value FROM {from} WHERE h.nth = 0");
+    if let Some(l) = like {
+        sql.push_str(" AND h.name LIKE ? ESCAPE '\\'");
+        params.push(crate::query::sieve_to_like(l).into());
+    }
+    let mut stmt = conn.prepare(&sql).await?;
+    let mut rows = stmt.query(params).await?;
+    let mut by_name: HashMap<String, HashMap<String, u64>> = HashMap::new();
+    while let Some(r) = rows.next().await? {
+        let name: String = r.get(0)?;
+        let value: String = r.get(1)?;
+        *by_name.entry(name).or_default().entry(value).or_default() += 1;
+    }
+    let mut out: Vec<HeaderProfile> = by_name
+        .into_iter()
+        .map(|(name, vals)| {
+            let carried = vals.values().sum();
+            let mut values: Vec<_> = vals.into_iter().collect();
+            values.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            HeaderProfile {
+                name,
+                carried,
+                values,
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        a.kind()
+            .0
+            .cmp(&b.kind().0)
+            .then_with(|| a.distinct().cmp(&b.distinct()))
+            .then_with(|| b.carried.cmp(&a.carried))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    Ok((matched, out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

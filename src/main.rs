@@ -86,6 +86,18 @@ enum Cmd {
         #[arg(long)]
         tsv: bool,
     },
+    /// Every header among matching messages with its value distribution:
+    /// categorical headers first, then constants, then near-unique identifiers.
+    Profile {
+        /// Only header names matching this Sieve pattern, e.g. 'x-*'.
+        #[arg(long, value_name = "PATTERN")]
+        like: Option<String>,
+        #[command(flatten)]
+        filter: FilterArgs,
+        /// Values shown per header.
+        #[arg(short = 'k', long, default_value_t = 6)]
+        values: usize,
+    },
     /// Show one message: headers by default.
     Show {
         id: i64,
@@ -393,6 +405,54 @@ async fn top(
     Ok(())
 }
 
+async fn profile(
+    store: &Store,
+    like: Option<&str>,
+    filter: Filter,
+    k: usize,
+    out: &mut impl Write,
+) -> Result<()> {
+    let (matched, headers) = report::profile(&store.conn, &filter, like).await?;
+    writeln!(
+        out,
+        "{matched} matching messages, {} headers (first occurrence per message)",
+        headers.len()
+    )?;
+    let mut section = None;
+    for h in &headers {
+        let s = h.kind().1;
+        if section != Some(s) {
+            writeln!(out, "\n== {s} ==")?;
+            section = Some(s);
+        }
+        let unique = h.all_unique();
+        writeln!(
+            out,
+            "{}  {} msgs ({}), {} distinct{}",
+            h.name,
+            h.carried,
+            pct(h.carried, matched),
+            h.distinct(),
+            if unique { ", all unique" } else { "" }
+        )?;
+        let shown = if unique { 1 } else { k };
+        for (v, n) in h.values.iter().take(shown) {
+            let v = if v.is_empty() { "(empty)" } else { v.as_str() };
+            writeln!(out, "  {n:>7} {:>6}  {}", pct(*n, matched), truncate(v, 90))?;
+        }
+        if h.distinct() > shown {
+            let rest: u64 = h.values[shown..].iter().map(|(_, n)| n).sum();
+            writeln!(
+                out,
+                "  {rest:>7} {:>6}  ({} more values)",
+                pct(rest, matched),
+                h.distinct() - shown
+            )?;
+        }
+    }
+    Ok(())
+}
+
 async fn report(
     store: &Store,
     by: &[String],
@@ -633,6 +693,7 @@ async fn run(cli: Cli) -> Result<()> {
             | Cmd::Top { .. }
             | Cmd::Names { .. }
             | Cmd::Report { .. }
+            | Cmd::Profile { .. }
             | Cmd::Show { .. }
             | Cmd::Stats
     );
@@ -730,6 +791,11 @@ async fn run(cli: Cli) -> Result<()> {
             limit,
             tsv,
         } => report(&store, &by, filter.build()?, limit, tsv, &mut out).await?,
+        Cmd::Profile {
+            like,
+            filter,
+            values,
+        } => profile(&store, like.as_deref(), filter.build()?, values, &mut out).await?,
         Cmd::Show {
             id,
             raw,

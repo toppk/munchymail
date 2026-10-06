@@ -39,12 +39,19 @@ domains since="" before="" n="40": build
     o='{{origin}}'
     {{bin}} report --by from:domain ${o:+--origin "$o"} ${1:+--since "$1"} ${2:+--before "$2"} -n "$3"
 
-# Header names one sender's mail carries (default only X-headers), with % of that sender's mail.
-sender-headers from since="" before="" like="x-*" n="80": build
+# Every header one sender's mail carries (default X-headers) with its top values; useful ones sort first.
+sender-headers from since="" before="" like="x-*" k="6": build
     #!/usr/bin/env bash
     set -euo pipefail
     o='{{origin}}'
-    {{bin}} names --from "$1" --like "$4" ${o:+--origin "$o"} ${2:+--since "$2"} ${3:+--before "$3"} -n "$5"
+    {{bin}} profile --from "$1" --like "$4" ${o:+--origin "$o"} ${2:+--since "$2"} ${3:+--before "$3"} -k "$5"
+
+# Free-form profile, e.g. `just profile --like 'list-*' --since 2026-01-01`.
+profile *args: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    o='{{origin}}'
+    {{bin}} profile ${o:+--origin "$o"} "$@"
 
 # Group every sender by a header's value; % is of all mail in range.
 by header since="" before="" n="40": build
