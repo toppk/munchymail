@@ -35,7 +35,13 @@ enum Cmd {
     #[command(subcommand)]
     Origin(OriginCmd),
     /// Import every mbox under the given origins, or all origins if none given.
-    Import { labels: Vec<String> },
+    ///
+    /// Each file is read under a shared fcntl lock (as Dovecot readers do) and
+    /// never written. Re-importing unchanged files only records a new sighting.
+    Import {
+        /// Origin labels; default all.
+        labels: Vec<String>,
+    },
     /// List matching messages, newest first.
     Search {
         #[command(flatten)]
@@ -49,14 +55,17 @@ enum Cmd {
         /// Print only the number of matches.
         #[arg(long)]
         count: bool,
+        /// Maximum messages listed.
         #[arg(short = 'n', long, default_value_t = 50)]
         limit: i64,
     },
-    /// Most common values of a header among matching messages.
+    /// Most common values of a header among matching messages (any occurrence).
     Top {
+        /// Header name, e.g. list-id.
         name: String,
         #[command(flatten)]
         filter: FilterArgs,
+        /// Maximum values listed.
         #[arg(short = 'n', long, default_value_t = 30)]
         limit: i64,
     },
@@ -67,6 +76,7 @@ enum Cmd {
         like: Option<String>,
         #[command(flatten)]
         filter: FilterArgs,
+        /// Maximum names listed.
         #[arg(short = 'n', long, default_value_t = 100)]
         limit: i64,
     },
@@ -81,6 +91,7 @@ enum Cmd {
         by: Vec<String>,
         #[command(flatten)]
         filter: FilterArgs,
+        /// Maximum groups listed; the rest are summed on one line.
         #[arg(short = 'n', long, default_value_t = 40)]
         limit: usize,
         /// Tab-separated output without truncation.
@@ -99,8 +110,9 @@ enum Cmd {
         #[arg(short = 'k', long, default_value_t = 6)]
         values: usize,
     },
-    /// Show one message: headers by default.
+    /// Show one message: its raw header block by default.
     Show {
+        /// Message id, the first column of `search`.
         id: i64,
         /// Exact raw message bytes (pipe into sieve-test).
         #[arg(long)]
@@ -112,33 +124,44 @@ enum Cmd {
     /// Corpus counts.
     Stats,
     /// Run SQL against the index and print rows tab-separated.
-    Sql { query: String },
-    /// Split mbox files without touching the database.
+    Sql {
+        /// One SQL statement; see docs/index.md for the schema.
+        query: String,
+    },
+    /// Split mbox files and check they reproduce byte-for-byte; no database.
     Scan {
+        /// Also list every message's offset, sizes and From_ line.
         #[arg(long)]
         list: bool,
+        /// Mbox files to split.
         paths: Vec<PathBuf>,
     },
 }
 
 #[derive(Subcommand)]
 enum OriginCmd {
+    /// Register a place mail is found; nothing is read until `import`.
     Add {
+        /// Short unique name used by --origin and import.
         label: String,
-        /// Directory tree or single mbox file.
+        /// Directory tree (walked, dot-entries skipped) or a single mbox file.
         root: PathBuf,
+        /// Machine the origin lives on or came from.
         #[arg(long)]
         host: Option<String>,
+        /// Free text, e.g. "2019 laptop backup".
         #[arg(long)]
         note: Option<String>,
     },
+    /// List origins and when each was last imported.
     List,
 }
 
-/// Patterns use Sieve `:matches` (`*`, `?`, case-insensitive); with no wildcard they mean `:contains`.
+/// Filters; all given must match. PATTERNs use Sieve `:matches` (`*`, `?`, ASCII
+/// case-insensitive) and mean `:contains` when they have no wildcard.
 #[derive(Args, Clone, Default)]
 struct FilterArgs {
-    /// NAME:PATTERN on decoded header values; repeatable, all must match.
+    /// NAME:PATTERN on decoded header values (Sieve `header`); repeatable.
     #[arg(short = 'H', long = "header", value_name = "NAME:PATTERN")]
     header: Vec<String>,
     /// NAME:REGEX on decoded header values, case-insensitive (Sieve `header :regex`); repeatable.
@@ -153,11 +176,13 @@ struct FilterArgs {
     /// Any address in To.
     #[arg(long, value_name = "PATTERN")]
     to: Option<String>,
+    /// Decoded Subject, same as -H subject:PATTERN.
     #[arg(long, value_name = "PATTERN")]
     subject: Option<String>,
-    /// Sighting path within an origin, e.g. 'lists/*'.
+    /// Path within an origin where a copy was ever found, e.g. 'lists/*'.
     #[arg(long, value_name = "PATTERN")]
     folder: Option<String>,
+    /// Only messages found in this origin.
     #[arg(long, value_name = "LABEL")]
     origin: Option<String>,
     /// Date header on or after YYYY-MM-DD (UTC).

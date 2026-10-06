@@ -5,8 +5,9 @@ mailboxes and backups: ingest every surviving copy, keep exact bytes and
 where each copy was found, then query, classify and re-export without the
 historical folder tree being the source of truth.
 
-`docs/ingest.md` covers how sources are read and split; `docs/index.md`
-covers the schema and query tools as built.
+`README.md` is the command reference; `docs/ingest.md` covers how sources
+are read and split; `docs/index.md` covers the schema and performance;
+`docs/TODO.md` lists what is not built.
 
 ## Thesis
 
@@ -85,6 +86,14 @@ values dominate, and inspect full header blocks.
 4. **Live (optional)**: investigate Dovecot `lib-storage`/`lib-index` seams,
    or an IMAP layer over the corpus. Any writing of mail formats starts by
    studying Dovecot's storage drivers.
+
+## Status
+
+Phase 1 is built for mbox: origins, Dovecot-compatible locked reads,
+byte-exact splitting, file- and message-level dedupe with provenance, a
+decoded header index, and the Sieve-oriented query tools (`search`,
+`report`, `profile`, `top`, `names`, `show`). Not yet: Maildir, logical
+grouping, and everything from phase 2 on (see `docs/TODO.md`).
 
 ## Open questions
 

@@ -1,5 +1,20 @@
 # TODO
 
+Roughly in priority order within each section. Phases refer to
+`docs/design.md`.
+
+## Sieve rule work (current use)
+
+- [ ] Negated filters (`--not-header`, `--not-from`, …) so a profile can be
+      "subscribed minus the repos I keep".
+- [ ] Run a Sieve script over the corpus and report which action each message
+      gets (via Pigeonhole `sieve-test` or `sieve-filter`), so a whole rule
+      set can be checked against a date range before deploying it.
+- [ ] `report` keys over any occurrence for plain values (today plain `NAME`
+      keys use the first occurrence; tests already use all).
+- [ ] An `address` table filled at import so `--from/--to` and `:addr` keys
+      don't parse addresses at query time.
+
 ## Import speed
 
 Cold import of the 3.3 GB inbox: lock held 0.89 s, split 1.0 s, hash/parse
@@ -8,25 +23,47 @@ statements reused per run; the cost is ~3M executions, mostly 2.7M header
 rows each updating four B-trees (table, PK, `header_name_nth_value`,
 `header_artifact_nth_name`). Unprofiled; measure each against the inbox:
 
+- [ ] Profile (`perf`) to confirm where the 30 s goes before tuning.
 - [ ] Drop the two header indexes before a large import and rebuild them
       after (one sorted build instead of random-order maintenance).
-- [ ] Multi-row `INSERT` for headers (e.g. 50 rows per statement) to cut
-      per-execute overhead.
+- [ ] Multi-row `INSERT` for headers (e.g. 50 rows per statement).
 - [ ] Avoid copying hashes/inline bytes into owned `Value`s per execute
       where turso allows borrowing.
-- [ ] Profile (`perf`) to confirm where the 30 s goes before tuning further.
 
-## Corpus
+## Corpus (phase 1 remainder)
 
 - [ ] Record lock wait/hold per `file_sighting` (schema migration), not just in logs.
-- [ ] Read only the appended tail when a file extends its `parent_content_id`.
+- [ ] Schema migrations (today a version mismatch refuses to open).
 - [ ] Maildir import.
-- [ ] Garbage-collect unreferenced `data/content` objects and `.tmp.*` leftovers.
+- [ ] Read only the appended tail when a file extends its `parent_content_id`.
+- [ ] Detect lineage for files under 64 KiB and across differing heads.
 - [ ] `--folder` matches any historical sighting; add "current location only".
-- [ ] Logical-message grouping (ignore Dovecot `X-UID`/`Status`/`X-Keywords`
-      etc. when comparing copies).
+- [ ] Garbage-collect unreferenced `data/content` objects and `.tmp.*` leftovers.
+- [ ] Measure the 16 KiB inline threshold against real size distributions.
 
-## Search
+## Surgery (phase 2)
+
+- [ ] Logical-message grouping: link artifacts that are the same email
+      (ignore Dovecot `X-UID`/`Status`/`X-Keywords`/`Content-Length`,
+      transport headers; use Message-ID, body hash, DKIM-signed headers).
+      Explicit and reversible; prefer false negatives.
+- [ ] Rule engine with versioned rules and recorded classifications (rule
+      language still open: SQL, DSL, or Sieve itself).
+- [ ] Previewable views (e.g. `Sent/YYYY/MM`) and anomaly reports
+      (unclassified mail, classification vs historical folder conflicts).
+- [ ] Export views to Maildir and mbox. Before writing any mail format,
+      study Dovecot's storage drivers for how they write safely.
+
+## Search and MIME (phase 3)
 
 - [ ] Full-text search over bodies.
-- [ ] An `address` table at import so `--from/--to` and `:addr` keys don't parse at query time.
+- [ ] Threading.
+- [ ] MIME structure and attachment indexing; duplicate-attachment reports.
+- [ ] Optional reversible MIME extraction (bodies as extents of literals and
+      objects), declining anything malformed, signed or unusual.
+- [ ] IMAP import and export.
+
+## Live (phase 4, optional)
+
+- [ ] Investigate Dovecot `lib-storage`/`lib-index` seams for a
+      corpus-backed storage driver, or an IMAP layer over the corpus.

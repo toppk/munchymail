@@ -1,6 +1,7 @@
-# Index and tools
+# Index internals
 
-Schema in `src/store.rs`; everything lives in `data/` (`MUNCHYMAIL_DATA` or `--data`).
+Schema in `src/store.rs`; everything lives in `data/` (`MUNCHYMAIL_DATA` or
+`--data`). Command usage is in `README.md`.
 
 ## Tables
 
@@ -28,76 +29,13 @@ Schema in `src/store.rs`; everything lives in `data/` (`MUNCHYMAIL_DATA` or `--d
   materialised into `TEMP` tables keyed by `artifact_id` and intersected by
   primary-key joins (`query.rs`). `CROSS JOIN` forces join order where the
   planner, lacking statistics, picks the wrong side.
+- Address (`--from/--to`) and regex (`-R`) filters can't be expressed in
+  SQL: candidates are narrowed by header name (and a LIKE on the longest
+  literal run of the pattern), then decided in Rust.
+- `report` and `profile` fetch per-message header values and aggregate in
+  Rust rather than relying on `count(DISTINCT)`.
 
 Measured on this machine (176k messages, 5.2 GB of mbox, 5.8M header rows):
-full import 79 s; re-import of unchanged files ~1 s; searches 0.04–0.3 s;
+full import 76–79 s (30 s of it inserting the inbox, see TODO); re-import of
+unchanged files ~1 s; `search` 0.04–0.3 s; `report`/`profile` 0.1–0.35 s;
 `names`/`top` 0.1–0.6 s.
-
-## Commands
-
-```
-munchymail origin add LABEL ROOT [--host H] [--note N]
-munchymail origin list
-munchymail import LABEL...
-munchymail search [FILTERS] [--headers | --raw | --count] [-n N]
-munchymail report --by KEY... [FILTERS] [-n N] [--tsv]
-                                            grouped counts, % of scope and of matches
-munchymail profile [--like PAT] [FILTERS] [-k N]
-                                            every header's value distribution:
-                                            categorical, constant, then identifiers
-munchymail top HEADER [FILTERS] [-n N]      most common values
-munchymail names [--like PAT] [FILTERS] [-n N]
-                                            header names, by messages carrying them
-munchymail show ID [--raw | --where]
-munchymail stats
-munchymail sql 'SELECT ...'
-munchymail scan [--list] MBOX...            split only, no database
-```
-
-Filters (all must match):
-
-```
--H, --header NAME:PATTERN   decoded header value (Sieve `header`); repeatable
--R, --regex NAME:REGEX      decoded value, case-insensitive (Sieve `header :regex`)
---from/--to PATTERN         any address in From/To (Sieve `address :all`)
---subject PATTERN
---has NAME                  header present
---folder PATTERN            sighting path, e.g. 'lists/*'
---origin LABEL
---since/--before YYYY-MM-DD Date: header, UTC
-```
-
-Report keys are `NAME`, `NAME:addr` (first address, lowercased),
-`NAME:domain`, or a test that groups into `match`/`no match`: `NAME~REGEX`
-(Sieve `:regex`) or `NAME=PATTERN` (Sieve `:matches`); tests check every
-occurrence of the header, as Sieve does. A message lacking the header groups
-under `(none)`, which Sieve treats as no match. `%scope`
-is against every message in the `--origin/--folder/--since/--before` scope;
-`%match` is against those also passing the header/address filters.
-
-Patterns follow Sieve `:matches` with `i;ascii-casemap`: `*`, `?`, `\`
-escapes, ASCII case-insensitive. A pattern with no wildcard means `:contains`.
-
-## Developing Sieve rules
-
-The `justfile` wraps the common reports (`just` lists them; `ORIGIN=` for
-all origins, `""` leaves a date bound open):
-
-```
-just senders 2026-01-01                       # who sends most, % of all mail
-just sender-headers '*@github.com' 2026-01-01     # each X-header's top values
-just sender-by '*@github.com' x-github-reason 2026-01-01
-just by list-id 2026-09-01 2026-10-01
-```
-
-```
-munchymail names --origin inbox                    # what headers exist
-munchymail top list-id --origin inbox              # who dominates
-munchymail search -H 'list-id:*gear*' --count     # size of a candidate rule
-munchymail search -H 'list-id:*gear*' --headers -n 3
-munchymail show ID --raw > m.eml && sieve-test rules.sieve m.eml
-```
-
-`show --raw` emits the exact stored bytes, so `sieve-test` sees what
-Dovecot delivered (including Dovecot's own `X-UID`/`Status` headers when the
-copy came from a Dovecot mbox).
