@@ -10,7 +10,8 @@ use tracing_subscriber::EnvFilter;
 use turso::Value;
 
 use munchymail::import::Importer;
-use munchymail::query::Filter;
+use munchymail::query::{Filter, sieve_to_like};
+use munchymail::report::{self, Key};
 use munchymail::store::{Store, now};
 use munchymail::util::{hex, ymd};
 use munchymail::{mbox, source};
@@ -33,7 +34,7 @@ enum Cmd {
     /// Manage origins: places mail is found (live trees, backups, exports).
     #[command(subcommand)]
     Origin(OriginCmd),
-    /// Import every mbox under one or more origins.
+    /// Import every mbox under the given origins, or all origins if none given.
     Import { labels: Vec<String> },
     /// List matching messages, newest first.
     Search {
@@ -61,10 +62,29 @@ enum Cmd {
     },
     /// Header names and how many matching messages carry each.
     Names {
+        /// Only header names matching this Sieve pattern, e.g. 'x-*'.
+        #[arg(long, value_name = "PATTERN")]
+        like: Option<String>,
         #[command(flatten)]
         filter: FilterArgs,
         #[arg(short = 'n', long, default_value_t = 100)]
         limit: i64,
+    },
+    /// Count matching messages grouped by one or more header keys.
+    ///
+    /// %scope is against every message in the --origin/--folder/--since/--before
+    /// scope; %match is against those also passing the header filters.
+    Report {
+        /// Header to group by: NAME, NAME:addr or NAME:domain; repeatable.
+        #[arg(long = "by", value_name = "KEY", required = true)]
+        by: Vec<String>,
+        #[command(flatten)]
+        filter: FilterArgs,
+        #[arg(short = 'n', long, default_value_t = 40)]
+        limit: usize,
+        /// Tab-separated output without truncation.
+        #[arg(long)]
+        tsv: bool,
     },
     /// Show one message: headers by default.
     Show {
@@ -111,8 +131,10 @@ struct FilterArgs {
     /// Header must be present; repeatable.
     #[arg(long, value_name = "NAME")]
     has: Vec<String>,
+    /// Any address in From (Sieve `address :all`), e.g. '*@github.com'.
     #[arg(long, value_name = "PATTERN")]
     from: Option<String>,
+    /// Any address in To.
     #[arg(long, value_name = "PATTERN")]
     to: Option<String>,
     #[arg(long, value_name = "PATTERN")]
@@ -139,17 +161,18 @@ impl FilterArgs {
             };
             headers.push((name.trim().to_string(), pat.to_string()));
         }
-        for (name, pat) in [
-            ("from", self.from),
-            ("to", self.to),
-            ("subject", self.subject),
-        ] {
+        if let Some(p) = self.subject {
+            headers.push(("subject".to_string(), p));
+        }
+        let mut addresses = Vec::new();
+        for (name, pat) in [("from", self.from), ("to", self.to)] {
             if let Some(p) = pat {
-                headers.push((name.to_string(), p));
+                addresses.push((name.to_string(), p));
             }
         }
         Ok(Filter {
             headers,
+            addresses,
             has: self.has,
             folder: self.folder,
             origin: self.origin,
@@ -302,15 +325,30 @@ async fn search(
     Ok(())
 }
 
+fn pct(n: u64, of: u64) -> String {
+    if of == 0 {
+        "-".into()
+    } else {
+        format!("{:.1}%", n as f64 * 100.0 / of as f64)
+    }
+}
+
 async fn top(
     store: &Store,
     column: &str,
     name: Option<&str>,
+    like: Option<&str>,
     filter: Filter,
     limit: i64,
     out: &mut impl Write,
 ) -> Result<()> {
-    let from = match filter.materialize(&store.conn).await? {
+    let table = filter.materialize(&store.conn).await?;
+    let matched = query_rows(store, &format!("SELECT count(*) FROM {table}"), vec![]).await?;
+    let matched = match matched[0][0] {
+        Value::Integer(n) => n as u64,
+        _ => 0,
+    };
+    let from = match table {
         // Per-name counts scan hits first; per-value counts let the planner start from the name index.
         "hit" if name.is_none() => "hit CROSS JOIN header h ON h.artifact_id = hit.artifact_id",
         "hit" => "hit JOIN header h ON h.artifact_id = hit.artifact_id",
@@ -323,13 +361,17 @@ async fn top(
         "count(*)"
     };
     let mut params = Vec::new();
-    let cond = match name {
+    let mut cond = match name {
         Some(n) => {
             params.push(n.to_ascii_lowercase().into());
-            "h.name = ?"
+            "h.name = ?".to_string()
         }
-        None => "h.nth = 0",
+        None => "h.nth = 0".to_string(),
     };
+    if let Some(l) = like {
+        cond.push_str(" AND h.name LIKE ? ESCAPE '\\'");
+        params.push(sieve_to_like(l).into());
+    }
     params.push(limit.into());
     let rows = query_rows(
         store,
@@ -340,8 +382,107 @@ async fn top(
         params,
     )
     .await?;
+    writeln!(out, "{matched} matching messages")?;
     for r in rows {
-        writeln!(out, "{:>7}  {}", text(&r[1]), text(&r[0]))?;
+        let n = match r[1] {
+            Value::Integer(n) => n as u64,
+            _ => 0,
+        };
+        writeln!(out, "{n:>7} {:>6}  {}", pct(n, matched), text(&r[0]))?;
+    }
+    Ok(())
+}
+
+async fn report(
+    store: &Store,
+    by: &[String],
+    filter: Filter,
+    limit: usize,
+    tsv: bool,
+    out: &mut impl Write,
+) -> Result<()> {
+    let keys = by
+        .iter()
+        .map(|k| Key::parse(k))
+        .collect::<Result<Vec<_>>>()?;
+    let r = report::run(&store.conn, &filter, &keys).await?;
+    let labels: Vec<String> = keys.iter().map(Key::label).collect();
+    if tsv {
+        writeln!(out, "count\tpct_scope\tpct_match\t{}", labels.join("\t"))?;
+        for (group, n) in &r.rows {
+            writeln!(
+                out,
+                "{n}\t{:.4}\t{:.4}\t{}",
+                *n as f64 * 100.0 / r.scope.max(1) as f64,
+                *n as f64 * 100.0 / r.matched.max(1) as f64,
+                group.join("\t")
+            )?;
+        }
+        return Ok(());
+    }
+    writeln!(
+        out,
+        "scope {} messages, matched {} ({}), {} groups",
+        r.scope,
+        r.matched,
+        pct(r.matched, r.scope),
+        r.rows.len()
+    )?;
+    const W: usize = 48;
+    let widths: Vec<usize> = (0..keys.len())
+        .map(|i| {
+            r.rows
+                .iter()
+                .take(limit)
+                .map(|(g, _)| g[i].chars().count().min(W))
+                .chain([labels[i].len()])
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let line = |cells: Vec<String>| {
+        cells
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let c = truncate(c, W);
+                if i + 1 == cells.len() {
+                    c
+                } else {
+                    format!("{c:<w$}", w = widths[i])
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("  ")
+    };
+    writeln!(
+        out,
+        "{:>7} {:>6} {:>6}  {}",
+        "count",
+        "%scope",
+        "%match",
+        line(labels.clone())
+    )?;
+    let mut shown = 0;
+    for (group, n) in r.rows.iter().take(limit) {
+        writeln!(
+            out,
+            "{n:>7} {:>6} {:>6}  {}",
+            pct(*n, r.scope),
+            pct(*n, r.matched),
+            line(group.clone())
+        )?;
+        shown += n;
+    }
+    if r.rows.len() > limit {
+        let rest = r.matched - shown;
+        writeln!(
+            out,
+            "{rest:>7} {:>6} {:>6}  ({} more groups)",
+            pct(rest, r.scope),
+            pct(rest, r.matched),
+            r.rows.len() - limit
+        )?;
     }
     Ok(())
 }
@@ -488,14 +629,30 @@ async fn run(cli: Cli) -> Result<()> {
     let store = Store::open(&cli.data).await?;
     let read_txn = matches!(
         cli.cmd,
-        Cmd::Search { .. } | Cmd::Top { .. } | Cmd::Names { .. } | Cmd::Show { .. } | Cmd::Stats
+        Cmd::Search { .. }
+            | Cmd::Top { .. }
+            | Cmd::Names { .. }
+            | Cmd::Report { .. }
+            | Cmd::Show { .. }
+            | Cmd::Stats
     );
     if read_txn {
         store.begin().await?;
     }
     match cli.cmd {
         Cmd::Origin(cmd) => origin(&store, cmd, &mut out).await?,
-        Cmd::Import { labels } => {
+        Cmd::Import { mut labels } => {
+            if labels.is_empty() {
+                for r in query_rows(
+                    &store,
+                    "SELECT label FROM origin ORDER BY origin_id",
+                    vec![],
+                )
+                .await?
+                {
+                    labels.push(text(&r[0]));
+                }
+            }
             for label in labels {
                 let t = Instant::now();
                 let mut imp = Importer::new(&store, &label).await?;
@@ -544,15 +701,35 @@ async fn run(cli: Cli) -> Result<()> {
                 &store,
                 "value",
                 Some(&name),
+                None,
                 filter.build()?,
                 limit,
                 &mut out,
             )
             .await?
         }
-        Cmd::Names { filter, limit } => {
-            top(&store, "name", None, filter.build()?, limit, &mut out).await?
+        Cmd::Names {
+            like,
+            filter,
+            limit,
+        } => {
+            top(
+                &store,
+                "name",
+                None,
+                like.as_deref(),
+                filter.build()?,
+                limit,
+                &mut out,
+            )
+            .await?
         }
+        Cmd::Report {
+            by,
+            filter,
+            limit,
+            tsv,
+        } => report(&store, &by, filter.build()?, limit, tsv, &mut out).await?,
         Cmd::Show {
             id,
             raw,

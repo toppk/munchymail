@@ -40,8 +40,11 @@ munchymail origin add LABEL ROOT [--host H] [--note N]
 munchymail origin list
 munchymail import LABEL...
 munchymail search [FILTERS] [--headers | --raw | --count] [-n N]
+munchymail report --by KEY... [FILTERS] [-n N] [--tsv]
+                                            grouped counts, % of scope and of matches
 munchymail top HEADER [FILTERS] [-n N]      most common values
-munchymail names [FILTERS] [-n N]           header names, by messages carrying them
+munchymail names [--like PAT] [FILTERS] [-n N]
+                                            header names, by messages carrying them
 munchymail show ID [--raw | --where]
 munchymail stats
 munchymail sql 'SELECT ...'
@@ -51,18 +54,34 @@ munchymail scan [--list] MBOX...            split only, no database
 Filters (all must match):
 
 ```
--H, --header NAME:PATTERN   decoded header value; repeatable
---from/--to/--subject PATTERN
+-H, --header NAME:PATTERN   decoded header value (Sieve `header`); repeatable
+--from/--to PATTERN         any address in From/To (Sieve `address :all`)
+--subject PATTERN
 --has NAME                  header present
 --folder PATTERN            sighting path, e.g. 'lists/*'
 --origin LABEL
 --since/--before YYYY-MM-DD Date: header, UTC
 ```
 
+Report keys are `NAME`, `NAME:addr` (first address, lowercased) or
+`NAME:domain`; a message lacking the header groups under `(none)`. `%scope`
+is against every message in the `--origin/--folder/--since/--before` scope;
+`%match` is against those also passing the header/address filters.
+
 Patterns follow Sieve `:matches` with `i;ascii-casemap`: `*`, `?`, `\`
 escapes, ASCII case-insensitive. A pattern with no wildcard means `:contains`.
 
 ## Developing Sieve rules
+
+The `justfile` wraps the common reports (`just` lists them; `ORIGIN=` for
+all origins, `""` leaves a date bound open):
+
+```
+just senders 2026-01-01                       # who sends most, % of all mail
+just sender-headers '*@substack.com' 2026-01-01   # which X-headers they carry
+just sender-by '*@github.com' x-github-reason 2026-01-01
+just by list-id 2026-09-01 2026-10-01
+```
 
 ```
 munchymail names --origin inbox                    # what headers exist

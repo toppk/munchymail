@@ -45,10 +45,123 @@ fn push_literal(out: &mut String, c: char) {
     out.push(c);
 }
 
+/// Sieve `:matches` (or `:contains` without wildcards), ASCII case-insensitive.
+pub fn sieve_match(pattern: &str, text: &str) -> bool {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Tok {
+        Any,
+        One,
+        Lit(char),
+    }
+    let mut toks = Vec::new();
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        toks.push(match c {
+            '*' => Tok::Any,
+            '?' => Tok::One,
+            '\\' => Tok::Lit(chars.next().unwrap_or('\\')),
+            c => Tok::Lit(c),
+        });
+    }
+    if !toks.iter().any(|t| matches!(t, Tok::Any | Tok::One)) {
+        toks.insert(0, Tok::Any);
+        toks.push(Tok::Any);
+    }
+    let text: Vec<char> = text.chars().collect();
+    // Classic glob matching with single-star backtracking.
+    let (mut p, mut t, mut star, mut mark) = (0, 0, None, 0);
+    while t < text.len() {
+        match toks.get(p) {
+            Some(Tok::Any) => {
+                star = Some(p);
+                mark = t;
+                p += 1;
+            }
+            Some(Tok::One) => {
+                p += 1;
+                t += 1;
+            }
+            Some(Tok::Lit(c)) if c.eq_ignore_ascii_case(&text[t]) => {
+                p += 1;
+                t += 1;
+            }
+            _ => match star {
+                Some(s) => {
+                    p = s + 1;
+                    mark += 1;
+                    t = mark;
+                }
+                None => return false,
+            },
+        }
+    }
+    toks[p..].iter().all(|t| *t == Tok::Any)
+}
+
+/// The longest wildcard-free run of a pattern as a `%run%` LIKE, to narrow candidates.
+fn like_hint(pattern: &str) -> String {
+    let mut best = String::new();
+    let mut cur = String::new();
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '*' | '?' => {
+                if cur.len() > best.len() {
+                    best = std::mem::take(&mut cur);
+                }
+                cur.clear();
+            }
+            '\\' => push_literal(&mut cur, chars.next().unwrap_or('\\')),
+            c => push_literal(&mut cur, c),
+        }
+    }
+    if cur.len() > best.len() {
+        best = cur;
+    }
+    format!("%{best}%")
+}
+
+enum Set {
+    Sql(String, Vec<Value>),
+    /// Needs address parsing, so it is narrowed in SQL and decided here.
+    Address(String, String),
+}
+
+async fn address_set(conn: &Connection, table: &str, name: &str, pattern: &str) -> Result<u64> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT artifact_id, value FROM header WHERE name = ?1 AND value LIKE ?2 ESCAPE '\\'",
+        )
+        .await?;
+    let mut rows = stmt.query((name, like_hint(pattern))).await?;
+    let mut ids = Vec::new();
+    while let Some(r) = rows.next().await? {
+        let value: String = r.get(1)?;
+        if crate::headers::addresses(&value)
+            .iter()
+            .any(|a| sieve_match(pattern, a))
+        {
+            ids.push(r.get::<i64>(0)?);
+        }
+    }
+    let mut ins = conn
+        .prepare(&format!(
+            "INSERT OR IGNORE INTO {table} (artifact_id) VALUES (?1)"
+        ))
+        .await?;
+    let mut n = 0;
+    for id in ids {
+        n += ins.execute((id,)).await?;
+    }
+    Ok(n)
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct Filter {
-    /// (lowercased header name, Sieve pattern)
+    /// (header name, Sieve pattern) on decoded values, like Sieve `header`.
     pub headers: Vec<(String, String)>,
+    /// (header name, Sieve pattern) on any address in it, like Sieve `address :all`.
+    pub addresses: Vec<(String, String)>,
     pub has: Vec<String>,
     pub folder: Option<String>,
     pub origin: Option<String>,
@@ -58,10 +171,13 @@ pub struct Filter {
 
 impl Filter {
     /// One `SELECT artifact_id ...` per condition, with its bind values.
-    fn sets(&self) -> Result<Vec<(String, Vec<Value>)>> {
+    fn sets(&self) -> Result<Vec<Set>> {
         let mut sets = Vec::new();
+        for (name, pattern) in &self.addresses {
+            sets.push(Set::Address(name.to_ascii_lowercase(), pattern.clone()));
+        }
         for (name, pattern) in &self.headers {
-            sets.push((
+            sets.push(Set::Sql(
                 "SELECT artifact_id FROM header WHERE name = ? AND value LIKE ? ESCAPE '\\'"
                     .to_string(),
                 vec![
@@ -71,7 +187,7 @@ impl Filter {
             ));
         }
         for name in &self.has {
-            sets.push((
+            sets.push(Set::Sql(
                 "SELECT artifact_id FROM header WHERE name = ?".to_string(),
                 vec![name.to_ascii_lowercase().into()],
             ));
@@ -91,7 +207,7 @@ impl Filter {
                 sql.push_str(" AND g.label = ?");
                 params.push(o.clone().into());
             }
-            sets.push((sql, params));
+            sets.push(Set::Sql(sql, params));
         }
         if self.since.is_some() || self.before.is_some() {
             let mut sql = String::from("SELECT artifact_id FROM artifact WHERE 1");
@@ -105,22 +221,44 @@ impl Filter {
                     params.push(t.into());
                 }
             }
-            sets.push((sql, params));
+            sets.push(Set::Sql(sql, params));
         }
         Ok(sets)
     }
 
+    /// Only the conditions that define the population (where and when), not
+    /// which messages within it; percentages are taken against this.
+    pub fn scope(&self) -> Filter {
+        Filter {
+            folder: self.folder.clone(),
+            origin: self.origin.clone(),
+            since: self.since.clone(),
+            before: self.before.clone(),
+            ..Filter::default()
+        }
+    }
+
     /// Fill TEMP TABLE `hit` with matching artifact ids and return the table to
-    /// select from: `hit`, or `artifact` when there is no filter. Each condition
-    /// is materialised and intersected by primary-key joins, because turso
-    /// scans `IN (subquery-with-join)` lists linearly.
+    /// select from: `hit`, or `artifact` when there is no filter.
     pub async fn materialize(&self, conn: &Connection) -> Result<&'static str> {
+        Ok(if self.materialize_into(conn, "hit").await? {
+            "hit"
+        } else {
+            "artifact"
+        })
+    }
+
+    /// Fill TEMP TABLE `table` with matching artifact ids; false when there is
+    /// no filter (the table is left untouched). Each condition is materialised
+    /// and intersected by primary-key joins, because turso scans
+    /// `IN (subquery-with-join)` lists linearly.
+    pub async fn materialize_into(&self, conn: &Connection, table: &str) -> Result<bool> {
         let sets = self.sets()?;
         if sets.is_empty() {
-            return Ok("artifact");
+            return Ok(false);
         }
         let mut sized = Vec::new();
-        for (i, (sql, params)) in sets.into_iter().enumerate() {
+        for (i, set) in sets.into_iter().enumerate() {
             let t = format!("c{i}");
             conn.execute(
                 &format!("CREATE TEMP TABLE IF NOT EXISTS {t} (artifact_id INTEGER PRIMARY KEY)"),
@@ -128,27 +266,31 @@ impl Filter {
             )
             .await?;
             conn.execute(&format!("DELETE FROM {t}"), ()).await?;
-            let n = conn
-                .execute(&format!("INSERT OR IGNORE INTO {t} {sql}"), params)
-                .await?;
+            let n = match set {
+                Set::Sql(sql, params) => {
+                    conn.execute(&format!("INSERT OR IGNORE INTO {t} {sql}"), params)
+                        .await?
+                }
+                Set::Address(name, pattern) => address_set(conn, &t, &name, &pattern).await?,
+            };
             sized.push((n, t));
         }
         sized.sort();
         let (_, first) = &sized[0];
-        let mut sql = format!("INSERT INTO hit SELECT {first}.artifact_id FROM {first}");
+        let mut sql = format!("INSERT INTO {table} SELECT {first}.artifact_id FROM {first}");
         for (_, t) in &sized[1..] {
             sql.push_str(&format!(
                 " JOIN {t} ON {t}.artifact_id = {first}.artifact_id"
             ));
         }
         conn.execute(
-            "CREATE TEMP TABLE IF NOT EXISTS hit (artifact_id INTEGER PRIMARY KEY)",
+            &format!("CREATE TEMP TABLE IF NOT EXISTS {table} (artifact_id INTEGER PRIMARY KEY)"),
             (),
         )
         .await?;
-        conn.execute("DELETE FROM hit", ()).await?;
+        conn.execute(&format!("DELETE FROM {table}"), ()).await?;
         conn.execute(&sql, ()).await?;
-        Ok("hit")
+        Ok(true)
     }
 }
 
@@ -164,5 +306,12 @@ mod tests {
         assert_eq!(sieve_to_like("100%_off*"), "100\\%\\_off%");
         assert_eq!(sieve_to_like("lit\\*eral"), "%lit*eral%");
         assert_eq!(sieve_to_like("x\\*y*"), "x*y%");
+        assert!(sieve_match("*@substack.com", "News@SubStack.com"));
+        assert!(!sieve_match("*@substack.com", "a@substack.com.evil"));
+        assert!(sieve_match("github", "notifications@github.com"));
+        assert!(sieve_match("a?c", "abc"));
+        assert!(!sieve_match("a?c", "abbc"));
+        assert!(sieve_match("*", ""));
+        assert_eq!(like_hint("*@sub*stack.com"), "%stack.com%");
     }
 }

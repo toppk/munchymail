@@ -73,6 +73,22 @@ pub fn first<'a>(fields: &'a [Field], name: &str) -> Option<&'a str> {
         .map(|f| f.value.as_str())
 }
 
+/// Every address in a header value, lowercased; empty if it doesn't parse.
+pub fn addresses(value: &str) -> Vec<String> {
+    use mailparse::MailAddr;
+    let Ok(list) = mailparse::addrparse(value) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for a in list.iter() {
+        match a {
+            MailAddr::Single(s) => out.push(s.addr.trim().to_lowercase()),
+            MailAddr::Group(g) => out.extend(g.addrs.iter().map(|s| s.addr.trim().to_lowercase())),
+        }
+    }
+    out
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct Summary {
     pub date: Option<i64>,
