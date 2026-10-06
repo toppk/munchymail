@@ -58,6 +58,7 @@ Filters (all must match):
 
 ```
 -H, --header NAME:PATTERN   decoded header value (Sieve `header`); repeatable
+-R, --regex NAME:REGEX      decoded value, case-insensitive (Sieve `header :regex`)
 --from/--to PATTERN         any address in From/To (Sieve `address :all`)
 --subject PATTERN
 --has NAME                  header present
@@ -66,8 +67,11 @@ Filters (all must match):
 --since/--before YYYY-MM-DD Date: header, UTC
 ```
 
-Report keys are `NAME`, `NAME:addr` (first address, lowercased) or
-`NAME:domain`; a message lacking the header groups under `(none)`. `%scope`
+Report keys are `NAME`, `NAME:addr` (first address, lowercased),
+`NAME:domain`, or a test that groups into `match`/`no match`: `NAME~REGEX`
+(Sieve `:regex`) or `NAME=PATTERN` (Sieve `:matches`); tests check every
+occurrence of the header, as Sieve does. A message lacking the header groups
+under `(none)`, which Sieve treats as no match. `%scope`
 is against every message in the `--origin/--folder/--since/--before` scope;
 `%match` is against those also passing the header/address filters.
 

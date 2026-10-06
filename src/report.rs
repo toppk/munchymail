@@ -2,59 +2,96 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use turso::Connection;
 
 use crate::headers;
-use crate::query::Filter;
+use crate::query::{Filter, sieve_match};
 
 pub const NONE: &str = "(none)";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub const MATCH: &str = "match";
+pub const NO_MATCH: &str = "no match";
+
+#[derive(Debug, Clone)]
 pub enum Part {
     Value,
     /// Lowercased first address, like Sieve `address :all`.
     Addr,
     /// Lowercased domain of the first address, like Sieve `address :domain`.
     Domain,
+    /// Any occurrence matches, case-insensitive, like Sieve `header :regex`.
+    Regex(regex::Regex),
+    /// Any occurrence matches, like Sieve `header :matches`.
+    Matches(String),
 }
 
 #[derive(Debug, Clone)]
 pub struct Key {
     pub header: String,
     pub part: Part,
+    label: String,
 }
 
 impl Key {
-    /// `NAME`, `NAME:addr` or `NAME:domain`.
+    /// `NAME`, `NAME:addr`, `NAME:domain`, `NAME~REGEX` or `NAME=SIEVE-PATTERN`.
     pub fn parse(s: &str) -> Result<Key> {
-        let (header, part) = match s.rsplit_once(':') {
-            Some((h, "addr")) => (h, Part::Addr),
-            Some((h, "domain")) => (h, Part::Domain),
-            Some((_, p)) => bail!("unknown key part {p:?} in {s:?}; use :addr or :domain"),
-            None => (s, Part::Value),
+        let (header, part) = if let Some((h, re)) = s.split_once('~') {
+            let re = regex::RegexBuilder::new(re)
+                .case_insensitive(true)
+                .build()
+                .with_context(|| format!("bad regex in {s:?}"))?;
+            (h, Part::Regex(re))
+        } else if let Some((h, pat)) = s.split_once('=') {
+            (h, Part::Matches(pat.to_string()))
+        } else {
+            match s.rsplit_once(':') {
+                Some((h, "addr")) => (h, Part::Addr),
+                Some((h, "domain")) => (h, Part::Domain),
+                Some((_, p)) => bail!("unknown key part {p:?} in {s:?}; use :addr or :domain"),
+                None => (s, Part::Value),
+            }
         };
         Ok(Key {
             header: header.trim().to_ascii_lowercase(),
             part,
+            label: s.trim().to_string(),
         })
     }
 
     pub fn label(&self) -> String {
-        match self.part {
-            Part::Value => self.header.clone(),
-            Part::Addr => format!("{}:addr", self.header),
-            Part::Domain => format!("{}:domain", self.header),
-        }
+        self.label.clone()
     }
 
-    fn apply(&self, value: &str) -> String {
+    fn is_test(&self) -> bool {
+        matches!(self.part, Part::Regex(_) | Part::Matches(_))
+    }
+
+    /// Group label for a message given every occurrence of the header, first first.
+    fn group(&self, values: Option<&Vec<String>>) -> String {
+        let Some(values) = values else {
+            return NONE.to_string();
+        };
+        let hit = |v: &String| match &self.part {
+            Part::Regex(re) => re.is_match(v),
+            Part::Matches(p) => sieve_match(p, v),
+            _ => false,
+        };
+        if self.is_test() {
+            return if values.iter().any(hit) {
+                MATCH
+            } else {
+                NO_MATCH
+            }
+            .to_string();
+        }
+        let value = &values[0];
         match self.part {
-            Part::Value => value.to_string(),
             Part::Addr => first_addr(value).unwrap_or_else(|| value.to_lowercase()),
             Part::Domain => first_addr(value)
                 .and_then(|a| a.rsplit_once('@').map(|(_, d)| d.to_string()))
                 .unwrap_or_else(|| NONE.to_string()),
+            _ => value.clone(),
         }
     }
 }
@@ -89,22 +126,30 @@ async fn ids(conn: &Connection, table: &str) -> Result<Vec<i64>> {
     Ok(out)
 }
 
-/// First occurrence of `name` for each message in `table`.
-async fn first_values(conn: &Connection, table: &str, name: &str) -> Result<HashMap<i64, String>> {
+/// Values of `name` for each message in `table`, in header order; only the first if `first_only`.
+async fn values(
+    conn: &Connection,
+    table: &str,
+    name: &str,
+    first_only: bool,
+) -> Result<HashMap<i64, Vec<String>>> {
+    let nth = if first_only { " AND h.nth = 0" } else { "" };
     let sql = if table == "artifact" {
-        "SELECT artifact_id, value FROM header WHERE name = ?1 AND nth = 0".to_string()
+        format!(
+            "SELECT h.artifact_id, h.value FROM header h WHERE h.name = ?1{nth} ORDER BY h.artifact_id, h.nth"
+        )
     } else {
         format!(
             "SELECT h.artifact_id, h.value FROM {table} t
              CROSS JOIN header h ON h.artifact_id = t.artifact_id
-             WHERE h.name = ?1 AND h.nth = 0"
+             WHERE h.name = ?1{nth} ORDER BY h.artifact_id, h.nth"
         )
     };
     let mut stmt = conn.prepare(&sql).await?;
     let mut rows = stmt.query((name,)).await?;
-    let mut out = HashMap::new();
+    let mut out: HashMap<i64, Vec<String>> = HashMap::new();
     while let Some(r) = rows.next().await? {
-        out.insert(r.get(0)?, r.get(1)?);
+        out.entry(r.get(0)?).or_default().push(r.get(1)?);
     }
     Ok(out)
 }
@@ -121,17 +166,14 @@ pub async fn run(conn: &Connection, filter: &Filter, keys: &[Key]) -> Result<Rep
 
     let mut columns = Vec::new();
     for k in keys {
-        columns.push(first_values(conn, table, &k.header).await?);
+        columns.push(values(conn, table, &k.header, !k.is_test()).await?);
     }
     let mut groups: HashMap<Vec<String>, u64> = HashMap::new();
     for id in ids(conn, table).await? {
         let group = keys
             .iter()
             .zip(&columns)
-            .map(|(k, col)| {
-                col.get(&id)
-                    .map_or_else(|| NONE.to_string(), |v| k.apply(v))
-            })
+            .map(|(k, col)| k.group(col.get(&id)))
             .collect();
         *groups.entry(group).or_default() += 1;
     }
@@ -234,19 +276,24 @@ mod tests {
 
     #[test]
     fn keys_and_addresses() {
-        let k = Key::parse("From:addr").unwrap();
-        assert_eq!(k.header, "from");
+        let g = |k: &str, vs: &[&str]| {
+            Key::parse(k)
+                .unwrap()
+                .group(Some(&vs.iter().map(|v| v.to_string()).collect()))
+        };
+        assert_eq!(Key::parse("From:addr").unwrap().header, "from");
         assert_eq!(
-            k.apply("Alice Example <Alice@Example.COM>"),
+            g("from:addr", &["Alice Example <Alice@Example.COM>"]),
             "alice@example.com"
         );
-        assert_eq!(
-            Key::parse("from:domain")
-                .unwrap()
-                .apply("\"B, C\" <b@x.org>"),
-            "x.org"
-        );
-        assert_eq!(Key::parse("x-mailer").unwrap().apply("Foo 1.0"), "Foo 1.0");
+        assert_eq!(g("from:domain", &["\"B, C\" <b@x.org>"]), "x.org");
+        assert_eq!(g("x-mailer", &["Foo 1.0", "Bar"]), "Foo 1.0");
+        let re = "references~^<acme/(rocket|anvil)/";
+        assert_eq!(g(re, &["<acme/rocket/pull/1@github.com>"]), MATCH);
+        assert_eq!(g(re, &["<widgets/gear/pull/1@github.com>"]), NO_MATCH);
+        assert_eq!(g("received=*by b*", &["from a by c", "from x by b"]), MATCH);
+        assert_eq!(Key::parse(re).unwrap().group(None), NONE);
         assert!(Key::parse("from:bogus").is_err());
+        assert!(Key::parse("x~(").is_err());
     }
 }

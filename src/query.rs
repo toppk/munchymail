@@ -1,6 +1,6 @@
 //! Search filters over artifacts, mirroring Sieve's `:matches` with `i;ascii-casemap`.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use turso::{Connection, Value};
 
 use crate::util::parse_ymd;
@@ -123,24 +123,31 @@ fn like_hint(pattern: &str) -> String {
 
 enum Set {
     Sql(String, Vec<Value>),
-    /// Needs address parsing, so it is narrowed in SQL and decided here.
-    Address(String, String),
+    /// Header values narrowed in SQL by name and a LIKE hint, then decided in Rust.
+    Predicate {
+        name: String,
+        like: String,
+        test: Box<dyn Fn(&str) -> bool>,
+    },
 }
 
-async fn address_set(conn: &Connection, table: &str, name: &str, pattern: &str) -> Result<u64> {
+async fn predicate_set(
+    conn: &Connection,
+    table: &str,
+    name: &str,
+    like: &str,
+    test: &dyn Fn(&str) -> bool,
+) -> Result<u64> {
     let mut stmt = conn
         .prepare(
             "SELECT artifact_id, value FROM header WHERE name = ?1 AND value LIKE ?2 ESCAPE '\\'",
         )
         .await?;
-    let mut rows = stmt.query((name, like_hint(pattern))).await?;
+    let mut rows = stmt.query((name, like)).await?;
     let mut ids = Vec::new();
     while let Some(r) = rows.next().await? {
         let value: String = r.get(1)?;
-        if crate::headers::addresses(&value)
-            .iter()
-            .any(|a| sieve_match(pattern, a))
-        {
+        if test(&value) {
             ids.push(r.get::<i64>(0)?);
         }
     }
@@ -162,6 +169,8 @@ pub struct Filter {
     pub headers: Vec<(String, String)>,
     /// (header name, Sieve pattern) on any address in it, like Sieve `address :all`.
     pub addresses: Vec<(String, String)>,
+    /// (header name, regex) on decoded values, case-insensitive, like Sieve `header :regex`.
+    pub regexes: Vec<(String, String)>,
     pub has: Vec<String>,
     pub folder: Option<String>,
     pub origin: Option<String>,
@@ -174,7 +183,27 @@ impl Filter {
     fn sets(&self) -> Result<Vec<Set>> {
         let mut sets = Vec::new();
         for (name, pattern) in &self.addresses {
-            sets.push(Set::Address(name.to_ascii_lowercase(), pattern.clone()));
+            let pattern = pattern.clone();
+            sets.push(Set::Predicate {
+                name: name.to_ascii_lowercase(),
+                like: like_hint(&pattern),
+                test: Box::new(move |v| {
+                    crate::headers::addresses(v)
+                        .iter()
+                        .any(|a| sieve_match(&pattern, a))
+                }),
+            });
+        }
+        for (name, re) in &self.regexes {
+            let re = regex::RegexBuilder::new(re)
+                .case_insensitive(true)
+                .build()
+                .with_context(|| format!("bad regex {re:?}"))?;
+            sets.push(Set::Predicate {
+                name: name.to_ascii_lowercase(),
+                like: "%".into(),
+                test: Box::new(move |v| re.is_match(v)),
+            });
         }
         for (name, pattern) in &self.headers {
             sets.push(Set::Sql(
@@ -271,7 +300,9 @@ impl Filter {
                     conn.execute(&format!("INSERT OR IGNORE INTO {t} {sql}"), params)
                         .await?
                 }
-                Set::Address(name, pattern) => address_set(conn, &t, &name, &pattern).await?,
+                Set::Predicate { name, like, test } => {
+                    predicate_set(conn, &t, &name, &like, &*test).await?
+                }
             };
             sized.push((n, t));
         }

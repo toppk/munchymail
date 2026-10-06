@@ -75,7 +75,8 @@ enum Cmd {
     /// %scope is against every message in the --origin/--folder/--since/--before
     /// scope; %match is against those also passing the header filters.
     Report {
-        /// Header to group by: NAME, NAME:addr or NAME:domain; repeatable.
+        /// Group key, repeatable: NAME, NAME:addr, NAME:domain, or a match/no-match test
+        /// NAME~REGEX (Sieve :regex) or NAME=PATTERN (Sieve :matches).
         #[arg(long = "by", value_name = "KEY", required = true)]
         by: Vec<String>,
         #[command(flatten)]
@@ -140,6 +141,9 @@ struct FilterArgs {
     /// NAME:PATTERN on decoded header values; repeatable, all must match.
     #[arg(short = 'H', long = "header", value_name = "NAME:PATTERN")]
     header: Vec<String>,
+    /// NAME:REGEX on decoded header values, case-insensitive (Sieve `header :regex`); repeatable.
+    #[arg(short = 'R', long = "regex", value_name = "NAME:REGEX")]
+    regex: Vec<String>,
     /// Header must be present; repeatable.
     #[arg(long, value_name = "NAME")]
     has: Vec<String>,
@@ -176,6 +180,13 @@ impl FilterArgs {
         if let Some(p) = self.subject {
             headers.push(("subject".to_string(), p));
         }
+        let mut regexes = Vec::new();
+        for r in self.regex {
+            let Some((name, re)) = r.split_once(':') else {
+                bail!("--regex wants NAME:REGEX, got {r:?}");
+            };
+            regexes.push((name.trim().to_string(), re.to_string()));
+        }
         let mut addresses = Vec::new();
         for (name, pat) in [("from", self.from), ("to", self.to)] {
             if let Some(p) = pat {
@@ -185,6 +196,7 @@ impl FilterArgs {
         Ok(Filter {
             headers,
             addresses,
+            regexes,
             has: self.has,
             folder: self.folder,
             origin: self.origin,
