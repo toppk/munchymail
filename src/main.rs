@@ -1,10 +1,12 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
+use tracing::{error, info};
+use tracing_subscriber::EnvFilter;
 use turso::Value;
 
 use munchymail::import::Importer;
@@ -14,7 +16,10 @@ use munchymail::util::{hex, ymd};
 use munchymail::{mbox, source};
 
 #[derive(Parser)]
-#[command(about = "Offline mail corpus: import, dedupe, search")]
+#[command(
+    about = "Offline mail corpus: import, dedupe, search",
+    after_help = "Logging goes to stderr; set MUNCHYMAIL_LOG (e.g. munchymail=debug) to change it."
+)]
 struct Cli {
     /// Data directory holding email.sqlite and content/.
     #[arg(long, env = "MUNCHYMAIL_DATA", default_value = "data", global = true)]
@@ -492,16 +497,25 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Origin(cmd) => origin(&store, cmd, &mut out).await?,
         Cmd::Import { labels } => {
             for label in labels {
+                let t = Instant::now();
                 let mut imp = Importer::new(&store, &label).await?;
                 imp.run().await?;
                 let s = &imp.stats;
-                writeln!(
-                    out,
-                    "{label}: {} files read ({} unchanged, {} not mbox), {} messages, {} new artifacts, {} bytes",
-                    s.files, s.known_files, s.skipped, s.messages, s.new_artifacts, s.bytes
-                )?;
+                info!(
+                    origin = label.as_str(),
+                    files = s.files,
+                    unchanged = s.known_files,
+                    not_mbox = s.skipped,
+                    messages = s.messages,
+                    new_artifacts = s.new_artifacts,
+                    bytes = s.bytes,
+                    elapsed = ?t.elapsed(),
+                    "import finished"
+                );
             }
+            let t = Instant::now();
             store.checkpoint().await?;
+            info!(elapsed = ?t.elapsed(), "wal checkpoint");
         }
         Cmd::Search {
             filter,
@@ -559,6 +573,13 @@ async fn run(cli: Cli) -> Result<()> {
 }
 
 fn main() -> ExitCode {
+    let filter = EnvFilter::try_from_env("MUNCHYMAIL_LOG")
+        .unwrap_or_else(|_| EnvFilter::new("munchymail=info,warn"));
+    tracing_subscriber::fmt()
+        .with_ansi(io::stderr().is_terminal())
+        .with_env_filter(filter)
+        .with_writer(io::stderr)
+        .init();
     match pollster::block_on(run(Cli::parse())) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e)
@@ -568,7 +589,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("error: {e:#}");
+            error!("{e:#}");
             ExitCode::FAILURE
         }
     }

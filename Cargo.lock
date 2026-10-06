@@ -1547,6 +1547,8 @@ dependencies = [
  "pollster",
  "rayon",
  "sha2",
+ "tracing",
+ "tracing-subscriber",
  "turso",
 ]
 

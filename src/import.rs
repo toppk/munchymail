@@ -2,11 +2,12 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
+use tracing::{debug, info};
 use turso::{Statement, Value};
 
 use crate::headers::{self, Field, Summary};
@@ -210,7 +211,11 @@ impl<'a> Importer<'a> {
             }
             self.store.begin().await?;
             match self.import_file(&path, &rel).await {
-                Ok(()) => self.store.commit().await?,
+                Ok(()) => {
+                    let t = Instant::now();
+                    self.store.commit().await?;
+                    debug!(file = rel.as_str(), commit = ?t.elapsed(), "committed");
+                }
                 Err(e) => {
                     self.store.rollback().await?;
                     return Err(e.context(format!("importing {}", path.display())));
@@ -266,7 +271,7 @@ impl<'a> Importer<'a> {
         let content_id = match known {
             Some(id) => {
                 self.stats.known_files += 1;
-                println!("{rel}: content already known, sighting recorded");
+                info!(file = rel, "content already known, sighting only");
                 id
             }
             None => self.import_content(buf, &file_hash, rel).await?,
@@ -286,14 +291,13 @@ impl<'a> Importer<'a> {
                 snap.changed_during_read,
             ))
             .await?;
-        if snap.changed_during_read {
-            eprintln!("warning: {rel} changed while locked for reading");
-        }
         Ok(())
     }
 
     async fn import_content(&mut self, buf: &[u8], file_hash: &Hash, rel: &str) -> Result<i64> {
+        let t0 = Instant::now();
         let parsed = mbox::split(buf)?;
+        let split = t0.elapsed();
         let head_hash = sha256(&buf[..buf.len().min(HEAD_LEN)]);
         let parent = self.find_parent(buf, &head_hash).await?;
         let prepared: Vec<Prepared> = parsed
@@ -301,6 +305,7 @@ impl<'a> Importer<'a> {
             .par_iter()
             .map(|m| prepare(buf, m))
             .collect();
+        let t1 = Instant::now();
 
         self.stmts
             .ins_content
@@ -371,10 +376,15 @@ impl<'a> Importer<'a> {
 
         self.stats.messages += parsed.messages.len() as u64;
         self.stats.new_artifacts += new_artifacts;
-        println!(
-            "{rel}: {} messages, {new_artifacts} new{}",
-            parsed.messages.len(),
-            parent.map_or(String::new(), |p| format!(", extends content {p}")),
+        info!(
+            file = rel,
+            messages = parsed.messages.len(),
+            new_artifacts,
+            parent_content = parent,
+            ?split,
+            hash_and_parse = ?(t1 - t0 - split),
+            insert = ?t1.elapsed(),
+            "imported content"
         );
         Ok(content_id)
     }
