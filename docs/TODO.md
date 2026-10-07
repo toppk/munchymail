@@ -15,6 +15,14 @@ Roughly in priority order within each section. Phases refer to
 - [ ] An `address` table filled at import so `--from/--to` and `:addr` keys
       don't parse addresses at query time.
 
+## mbox-sort
+
+- [ ] Merge mode: sort several mboxes into one new file (e.g. a backfill
+      folder plus the live one) instead of sorting after appending.
+- [ ] Zone-aware `--key received` (Dovecot writes local time without a zone;
+      the DST fall-back hour can tie or swap).
+- [ ] Run it for real on `lists/github-project` (procedure in docs/mbox-sort.md).
+
 ## Import speed
 
 Cold import of the 3.3 GB inbox: lock held 0.89 s, split 1.0 s, hash/parse
@@ -52,7 +60,9 @@ rows each updating four B-trees (table, PK, `header_name_nth_value`,
 - [ ] Previewable views (e.g. `Sent/YYYY/MM`) and anomaly reports
       (unclassified mail, classification vs historical folder conflicts).
 - [ ] Export views to Maildir and mbox. Before writing any mail format,
-      study Dovecot's storage drivers for how they write safely.
+      study Dovecot's storage drivers for how they write safely (done for
+      mbox UID headers in docs/mbox-sort.md; `mbox-sort`'s writer is the
+      starting point).
 
 ## Search and MIME (phase 3)
 

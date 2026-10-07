@@ -11,6 +11,7 @@ reader takes. Everything munchymail writes lives in `data/`.
 - `docs/design.md`: goals, data model and phases
 - `docs/ingest.md`: how mbox files are read, locked and split
 - `docs/index.md`: schema and performance notes
+- `docs/mbox-sort.md`: the `mbox-sort` binary and how to install its output
 - `docs/TODO.md`: what is not built yet
 
 ## Build
@@ -197,6 +198,21 @@ after    62655  /var/mail/me
 munchymail sql "SELECT name, count(*) FROM header WHERE nth = 0 GROUP BY name ORDER BY 2 DESC LIMIT 10"
 munchymail scan --list ~/mail/Drafts       # split only, verify byte-exact, no database
 ```
+
+## mbox-sort: date-sorted copy of an mbox
+
+A separate binary for fixing arrival order after mail surgery. It reads SRC
+(shared lock), writes a new OUT (never overwrites), drops only Dovecot's
+`X-UID`/`X-IMAPbase` headers and internal first message so Dovecot
+renumbers the folder, and verifies OUT before reporting success.
+
+```
+target/release/mbox-sort SRC --dry-run
+target/release/mbox-sort SRC OUT [--key received|date]
+```
+
+Installing OUT over a live folder needs Dovecot stopped and the folder's
+index removed; see `docs/mbox-sort.md`.
 
 ## Developing a Sieve rule
 
