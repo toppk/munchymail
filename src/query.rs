@@ -174,6 +174,8 @@ pub struct Filter {
     pub has: Vec<String>,
     pub folder: Option<String>,
     pub origin: Option<String>,
+    /// Restrict origin/folder to each origin's latest import instead of any sighting ever.
+    pub current: bool,
     pub since: Option<String>,
     pub before: Option<String>,
 }
@@ -221,12 +223,20 @@ impl Filter {
                 vec![name.to_ascii_lowercase().into()],
             ));
         }
-        if self.folder.is_some() || self.origin.is_some() {
+        if self.folder.is_some() || self.origin.is_some() || self.current {
             let mut sql = String::from(
                 "SELECT o.artifact_id FROM observation o
                  JOIN file_sighting s ON s.content_id = o.content_id
-                 JOIN origin g ON g.origin_id = s.origin_id WHERE 1",
+                 JOIN origin g ON g.origin_id = s.origin_id",
             );
+            if self.current {
+                // Only what each origin's latest finished import saw.
+                sql.push_str(
+                    " JOIN (SELECT max(run_id) AS run_id FROM import_run
+                      WHERE finished_at IS NOT NULL GROUP BY origin_id) cur ON cur.run_id = s.run_id",
+                );
+            }
+            sql.push_str(" WHERE 1");
             let mut params = Vec::new();
             if let Some(f) = &self.folder {
                 sql.push_str(" AND s.path LIKE ? ESCAPE '\\'");
@@ -261,6 +271,7 @@ impl Filter {
         Filter {
             folder: self.folder.clone(),
             origin: self.origin.clone(),
+            current: self.current,
             since: self.since.clone(),
             before: self.before.clone(),
             ..Filter::default()

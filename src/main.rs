@@ -209,6 +209,9 @@ struct FilterArgs {
     /// Only messages found in this origin.
     #[arg(long, value_name = "LABEL")]
     origin: Option<String>,
+    /// Only where mail is now: --origin/--folder match each origin's latest import, not any past one.
+    #[arg(long)]
+    current: bool,
     /// Date header on or after YYYY-MM-DD (UTC).
     #[arg(long)]
     since: Option<String>,
@@ -249,6 +252,7 @@ impl FilterArgs {
             has: self.has,
             folder: self.folder,
             origin: self.origin,
+            current: self.current,
             since: self.since,
             before: self.before,
         })

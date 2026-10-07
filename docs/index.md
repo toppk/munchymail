@@ -39,3 +39,27 @@ Measured on this machine (176k messages, 5.2 GB of mbox, 5.8M header rows):
 full import 76–79 s (30 s of it inserting the inbox, see TODO); re-import of
 unchanged files ~1 s; `search` 0.04–0.3 s; `report`/`profile` 0.1–0.35 s;
 `names`/`top` 0.1–0.6 s.
+
+## Comparing snapshots
+
+Each `import` adds a `file_sighting` per file per run, so earlier states
+stay queryable. Find the contents, then count each message (body hash +
+Message-ID, which survives Dovecot rewriting `X-UID`) across them:
+
+```
+munchymail sql "SELECT s.run_id, s.path, s.content_id, c.message_count
+  FROM file_sighting s JOIN file_content c ON c.content_id = s.content_id ORDER BY s.run_id"
+
+munchymail sql "SELECT o, i, d, count(*) FROM (
+    SELECT b, m, sum(src = 58) AS o, sum(src = 59) AS i, sum(src = 60) AS d FROM (
+      SELECT ob.content_id AS src, a.body_hash AS b, coalesce(a.message_id, '') AS m
+      FROM observation ob JOIN artifact a ON a.artifact_id = ob.artifact_id
+      WHERE ob.content_id IN (58, 59, 60))
+    GROUP BY b, m)
+  GROUP BY o, i, d ORDER BY 4 DESC"
+```
+
+(58 = INBOX before the GitHub surgery, 59 = INBOX after, 60 =
+`lists/github-project`.) A row with copies before and none after anywhere
+is lost mail.
+

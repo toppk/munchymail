@@ -63,6 +63,7 @@ match:
 | `--has NAME` | header present (repeatable) |
 | `--origin LABEL` | found in that origin |
 | `--folder PATTERN` | found at a matching path inside an origin, ever, e.g. `'lists/*'` |
+| `--current` | restrict `--origin`/`--folder` to each origin's latest import (where mail is now), not any past sighting |
 | `--since DATE`, `--before DATE` | `Date:` header, `YYYY-MM-DD`, UTC; `--before` is exclusive |
 
 PATTERN follows Sieve `:matches` with `i;ascii-casemap`: `*` and `?`
@@ -213,6 +214,22 @@ target/release/mbox-sort SRC OUT [--key received|date]
 
 Installing OUT over a live folder needs Dovecot stopped and the folder's
 index removed; see `docs/mbox-sort.md`.
+
+## Checking surgery from the index
+
+Re-import after moving mail; earlier imports stay as older runs, so the
+index can compare where mail was with where it is now:
+
+```
+munchymail import inbox home-mail
+munchymail search --origin inbox --current --count          # what's in INBOX now
+munchymail report --folder lists/github-project --current \
+  --by 'x-github-reason~^(subscribed|push|review_requested|team_mention)$' \
+  --by 'list-id~<[^.]+\.(acme|widgets)\.github\.com>$'      # every message should be match/match
+```
+
+For a before/after count of individual messages across snapshots, see the
+SQL in `docs/index.md`.
 
 ## Developing a Sieve rule
 
