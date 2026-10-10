@@ -168,7 +168,7 @@ impl<'a> Importer<'a> {
         let mut rows = store
             .conn
             .query(
-                "SELECT origin_id, root FROM origin WHERE label = ?1",
+                "SELECT origin_id, root, retired_at IS NOT NULL FROM origin WHERE label = ?1",
                 (label,),
             )
             .await?;
@@ -177,6 +177,11 @@ impl<'a> Importer<'a> {
         };
         let origin_id: i64 = row.get(0)?;
         let root: String = row.get(1)?;
+        if row.get::<i64>(2)? != 0 {
+            bail!(
+                "origin {label:?} is retired ({root} may now be another origin's); undo with `origin retire --undo {label}`"
+            );
+        }
         drop(rows);
         store.begin().await?;
         store

@@ -177,6 +177,14 @@ enum OriginCmd {
         #[arg(long)]
         note: Option<String>,
     },
+    /// Mark an origin finished (e.g. its path moved): `import` skips it and
+    /// `--current` ignores it unless named with `--origin`; its runs stay queryable.
+    Retire {
+        label: String,
+        /// Make it active again.
+        #[arg(long)]
+        undo: bool,
+    },
     /// List origins and when each was last imported.
     List,
 }
@@ -319,11 +327,28 @@ async fn origin(store: &Store, cmd: OriginCmd, out: &mut impl Write) -> Result<(
             store.commit().await?;
             writeln!(out, "added origin {label} -> {}", root.display())?;
         }
+        OriginCmd::Retire { label, undo } => {
+            store.begin().await?;
+            let n = store
+                .conn
+                .execute(
+                    "UPDATE origin SET retired_at = ?1 WHERE label = ?2",
+                    ((!undo).then(now), label.as_str()),
+                )
+                .await?;
+            store.commit().await?;
+            if n == 0 {
+                bail!("no origin labelled {label:?}");
+            }
+            let state = if undo { "active again" } else { "retired" };
+            writeln!(out, "origin {label} {state}")?;
+        }
         OriginCmd::List => {
             let rows = query_rows(
                 store,
                 "SELECT g.label, g.root, g.host, g.note,
-                        (SELECT max(started_at) FROM import_run r WHERE r.origin_id = g.origin_id)
+                        (SELECT max(started_at) FROM import_run r WHERE r.origin_id = g.origin_id),
+                        g.retired_at
                  FROM origin g ORDER BY g.label",
                 vec![],
             )
@@ -333,9 +358,13 @@ async fn origin(store: &Store, cmd: OriginCmd, out: &mut impl Write) -> Result<(
                     Value::Integer(t) => ymd(t),
                     _ => "never".into(),
                 };
+                let retired = match r[5] {
+                    Value::Integer(t) => format!("\tretired {}", ymd(t)),
+                    _ => String::new(),
+                };
                 writeln!(
                     out,
-                    "{}\t{}\t{}\t{}\tlast import {last}",
+                    "{}\t{}\t{}\t{}\tlast import {last}{retired}",
                     text(&r[0]),
                     text(&r[1]),
                     text(&r[2]),
@@ -895,7 +924,7 @@ async fn run(cli: Cli) -> Result<()> {
             if labels.is_empty() {
                 for r in query_rows(
                     &store,
-                    "SELECT label FROM origin ORDER BY origin_id",
+                    "SELECT label FROM origin WHERE retired_at IS NULL ORDER BY origin_id",
                     vec![],
                 )
                 .await?

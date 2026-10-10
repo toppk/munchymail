@@ -237,6 +237,10 @@ impl Filter {
                 );
             }
             sql.push_str(" WHERE 1");
+            if self.current && self.origin.is_none() {
+                // A retired origin's last run is history, not where mail is now.
+                sql.push_str(" AND g.retired_at IS NULL");
+            }
             let mut params = Vec::new();
             if let Some(f) = &self.folder {
                 sql.push_str(" AND s.path LIKE ? ESCAPE '\\'");

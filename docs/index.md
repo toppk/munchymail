@@ -10,11 +10,15 @@ Schema in `src/store.rs`; everything lives in `data/` (`MUNCHYMAIL_DATA` or
 | `object` | SHA-256 → bytes. `inline_bytes` NULL means `data/content/aa/<hash>` (objects > 16 KiB). |
 | `artifact` | One exact message: `header_hash`, `body_hash`, plus `date`, `sender`, `subject`, `message_id` for listing. |
 | `header` | Derived: per artifact, ordered fields; `name` lowercased, `value` unfolded and RFC 2047-decoded; `nth` = occurrence of that name in the message (0 = first, i.e. Sieve `:index` − 1). |
-| `origin` | Registered roots (directory tree or single mbox file). |
+| `origin` | Registered roots (directory tree or single mbox file); `retired_at` set by `origin retire`. |
 | `import_run` | One per origin per `import`. |
 | `file_content` | Whole-file SHA-256, `head_hash` (first 64 KiB), message count, and `parent_content_id` when an earlier content is a byte prefix (a growing mbox across backups). |
 | `file_sighting` | Content seen at `path` (relative to origin root) in a run, with dev/ino/mtime/ctime. |
 | `observation` | Artifact at byte `offset` in a content, with its `From ` line and separator bytes. |
+
+`meta.schema_version` is 2. Opening an older database upgrades it in the
+opening transaction (`MIGRATIONS` in `store.rs`, version 1 → 2 adds
+`origin.retired_at`); a newer or unknown version refuses to open.
 
 ## Performance rules
 

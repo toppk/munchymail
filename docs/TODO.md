@@ -41,10 +41,6 @@ rows each updating four B-trees (table, PK, `header_name_nth_value`,
 ## Corpus (phase 1 remainder)
 
 - [ ] Record lock wait/hold per `file_sighting` (schema migration), not just in logs.
-- [ ] Retire an origin whose path is gone (e.g. after the move to
-      `/var/mail/me/`) so `--current` and `import` skip it while its runs
-      stay queryable.
-- [ ] Schema migrations (today a version mismatch refuses to open).
 - [ ] Maildir import.
 - [ ] Read only the appended tail when a file extends its `parent_content_id`.
 - [ ] Detect lineage for files under 64 KiB and across differing heads.

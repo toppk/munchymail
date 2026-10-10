@@ -7,6 +7,7 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use tracing::info;
 use turso::{Builder, Connection, Database, Value};
 
 use crate::util::hex;
@@ -14,7 +15,10 @@ use crate::util::hex;
 /// Objects at most this size live inline in SQLite.
 pub const INLINE_MAX: usize = 16 * 1024;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+
+/// Upgrades from the previous version; index `i` brings version `i + 1` to `i + 2`.
+const MIGRATIONS: [&str; 1] = ["ALTER TABLE origin ADD COLUMN retired_at INTEGER"];
 
 const SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
@@ -59,7 +63,8 @@ CREATE TABLE IF NOT EXISTS origin (
     root TEXT NOT NULL,
     host TEXT,
     note TEXT,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    retired_at INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS import_run (
@@ -134,11 +139,27 @@ impl Store {
         match rows.next().await? {
             Some(r) => {
                 let v: String = r.get(0)?;
-                if v.parse::<i64>().ok() != Some(SCHEMA_VERSION) {
+                drop(rows);
+                let found = v
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|n| (1..=SCHEMA_VERSION).contains(n));
+                let Some(found) = found else {
                     bail!(
                         "schema version {v} in {}, expected {SCHEMA_VERSION}",
                         path.display()
                     );
+                };
+                for (i, sql) in MIGRATIONS.iter().enumerate().skip(found as usize - 1) {
+                    conn.execute(sql, ()).await?;
+                    info!(to = i + 2, "migrated schema");
+                }
+                if found != SCHEMA_VERSION {
+                    conn.execute(
+                        "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+                        (SCHEMA_VERSION.to_string(),),
+                    )
+                    .await?;
                 }
             }
             None => {

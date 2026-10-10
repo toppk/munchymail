@@ -45,10 +45,20 @@ latest run per origin; `docs/index.md` has SQL comparing two runs). Only new
 messages cost space; a header-only change (Dovecot writing `X-UID` or
 `Status`) shares the stored body.
 
-Origins are keyed by root path. When mail moves (on mailhost, from
-`/var/mail/me` + `~/mail` to `/var/mail/me/{INBOX,<folder>}`), add
-a new origin for the new root and keep the old ones for history; folder paths inside a tree (`lists/github-project`) stay the same,
-so `--folder` matches both. Don't import an old origin after its path is gone.
+Origins are keyed by root path. When mail moves, add a new origin for the
+new root and retire the old ones; their runs stay as history:
+
+```
+munchymail origin add mail /var/mail/me --host mailhost --note "INBOX + folders"
+munchymail origin retire inbox          # was /var/mail/me, a single file
+munchymail origin retire home-mail      # was ~/mail
+munchymail origin retire --undo inbox   # if needed
+```
+
+A retired origin is skipped by `import`, refused when named, and ignored by
+`--current` unless selected with `--origin`. Folder paths inside a tree
+(`lists/github-project`) stay the same across such a move, so `--folder`
+matches old and new runs; the old single-file INBOX was recorded as `me`.
 
 Global options: `--data DIR` (or `MUNCHYMAIL_DATA`, default `data`).
 Logs go to stderr; `MUNCHYMAIL_LOG=munchymail=debug` for more. Each file
@@ -73,7 +83,7 @@ match:
 | `--has NAME` | header present (repeatable) |
 | `--origin LABEL` | found in that origin |
 | `--folder PATTERN` | found at a matching path inside an origin, ever, e.g. `'lists/*'` |
-| `--current` | restrict `--origin`/`--folder` to each origin's latest import (where mail is now), not any past sighting |
+| `--current` | restrict `--origin`/`--folder` to each origin's latest import (where mail is now), not any past sighting; retired origins are left out unless named by `--origin` |
 | `--since DATE`, `--before DATE` | `Date:` header, `YYYY-MM-DD`, UTC; `--before` is exclusive |
 
 PATTERN follows Sieve `:matches` with `i;ascii-casemap`: `*` and `?`
