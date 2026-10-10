@@ -55,19 +55,26 @@ gets one newline if it is no longer last.
 
 ## Installing a sorted copy over a Dovecot folder
 
-Not automated on purpose. For `~/mail/lists/github-project`:
+Not automated on purpose. Mail lives in `/var/mail/me/` (`INBOX` and
+folders, `me:mail 0700`). For `lists/github-project`:
 
 ```
+cd /var/mail/me/lists
+doveadm mailbox path -u me -t index lists/github-project   # confirm the index dir below
 sudo systemctl stop dovecot          # no IMAP clients, no LMTP delivery (mail queues in postfix)
-mbox-sort ~/mail/lists/github-project ~/mail/lists/github-project.sorted
-munchymail diff ~/mail/lists/github-project ~/mail/lists/github-project.sorted
+mbox-sort github-project github-project.sorted
+munchymail diff github-project github-project.sorted
 #   expect: headers changed = every message (x-uid; one also x-imapbase),
 #           removed NOT FOUND = 1 (the internal message), added = 0
-mv ~/mail/lists/github-project ~/mail/lists/github-project.before-sort
-mv ~/mail/lists/github-project.sorted ~/mail/lists/github-project
-rm -r ~/mail/lists/.imap/github-project   # that folder's Dovecot index
+mv github-project github-project.before-sort
+mv github-project.sorted github-project
+rm -r .imap/github-project            # that folder's Dovecot index
 sudo systemctl start dovecot
 ```
+
+With Dovecot stopped nothing else writes, so the swap needs no locks. Dovecot
+now takes `dotlock fcntl flock` for writes; anything that writes these files
+while it runs must take all three.
 
 On first access Dovecot assigns UIDs 1..n in the new order, writes X-UID
 headers (a one-time rewrite of the file) and a new UIDVALIDITY; IMAP clients
@@ -75,5 +82,6 @@ headers (a one-time rewrite of the file) and a new UIDVALIDITY; IMAP clients
 listing. Flags survive because they live in `Status`/`X-Status`/
 `X-Keywords`. Keep `.before-sort` until you're satisfied.
 
-For a spool file (`/var/mail/USER`), also check owner and group after the
-move; mbox-sort copies the mode bits but not ownership.
+mbox-sort copies the mode bits but not ownership: OUT gets your primary
+group, while files in `/var/mail/me/` (`INBOX` especially) are group
+`mail`. Check with `ls -l` after the move and `chgrp mail` if needed.

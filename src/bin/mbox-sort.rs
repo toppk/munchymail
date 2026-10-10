@@ -79,7 +79,7 @@ fn write_new(
         .to_string_lossy();
     let tmp = dir.join(format!(".{name}.mbox-sort.{}", std::process::id()));
     let file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
-    // Same mode as SRC (e.g. 0660 for a spool file); ownership is left to the installer.
+    // Same mode as SRC (e.g. 0660 for INBOX); ownership is left to the installer.
     file.set_permissions(mode)?;
     let result = (|| -> Result<()> {
         let mut w = BufWriter::new(&file);

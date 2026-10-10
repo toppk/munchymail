@@ -41,6 +41,9 @@ rows each updating four B-trees (table, PK, `header_name_nth_value`,
 ## Corpus (phase 1 remainder)
 
 - [ ] Record lock wait/hold per `file_sighting` (schema migration), not just in logs.
+- [ ] Retire an origin whose path is gone (e.g. after the move to
+      `/var/mail/me/`) so `--current` and `import` skip it while its runs
+      stay queryable.
 - [ ] Schema migrations (today a version mismatch refuses to open).
 - [ ] Maildir import.
 - [ ] Read only the appended tail when a file extends its `parent_content_id`.
@@ -63,7 +66,8 @@ rows each updating four B-trees (table, PK, `header_name_nth_value`,
 - [ ] Export views to Maildir and mbox. Before writing any mail format,
       study Dovecot's storage drivers for how they write safely (done for
       mbox UID headers in docs/mbox-sort.md; `mbox-sort`'s writer is the
-      starting point).
+      starting point). Any write to a live mailbox outside a Dovecot-stopped
+      window must take Dovecot's write locks: `dotlock fcntl flock`.
 
 ## Search and MIME (phase 3)
 

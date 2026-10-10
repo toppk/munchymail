@@ -28,10 +28,9 @@ search --count`). The examples below call the binary directly.
 ## Getting mail in
 
 ```
-munchymail origin add home-mail ~/mail --host mailhost --note "live dovecot tree"
-munchymail origin add inbox /var/mail/me --host mailhost --note "live INBOX"
+munchymail origin add mail /var/mail/me --host mailhost --note "live dovecot tree: INBOX + folders"
 munchymail origin list
-munchymail import                     # all origins; or: munchymail import inbox
+munchymail import                     # all origins; or: munchymail import mail
 munchymail stats
 ```
 
@@ -40,12 +39,23 @@ are skipped) or a single mbox file. Files that don't start with a valid
 `From ` line are skipped. Import is idempotent: unchanged files are
 recognised by hash and only get a new sighting, so re-running is cheap.
 
+Every import is kept as a run, so each re-import adds a generation:
+earlier snapshots of a file stay queryable (`--current` selects only the
+latest run per origin; `docs/index.md` has SQL comparing two runs). Only new
+messages cost space; a header-only change (Dovecot writing `X-UID` or
+`Status`) shares the stored body.
+
+Origins are keyed by root path. When mail moves (on mailhost, from
+`/var/mail/me` + `~/mail` to `/var/mail/me/{INBOX,<folder>}`), add
+a new origin for the new root and keep the old ones for history; folder paths inside a tree (`lists/github-project`) stay the same,
+so `--folder` matches both. Don't import an old origin after its path is gone.
+
 Global options: `--data DIR` (or `MUNCHYMAIL_DATA`, default `data`).
 Logs go to stderr; `MUNCHYMAIL_LOG=munchymail=debug` for more. Each file
 read logs how long its lock was waited for and held:
 
 ```
-INFO munchymail::source: read under fcntl read lock path=/var/spool/mail/me
+INFO munchymail::source: read under fcntl read lock path=/var/mail/me/INBOX
      bytes=3330473224 lock_wait=4.598µs lock_held=888.296303ms ...
 ```
 
@@ -180,10 +190,10 @@ the new copy gets new Dovecot headers), **removed, NOT FOUND**, and
 `report`; `--list` prints every message.
 
 ```
-$ munchymail diff ~/inbox-before-backfill-2026-10-06.mbox /var/mail/me \
-    --moved-to ~/mail/lists/github-project --by from:addr --by list-id
+$ munchymail diff ~/inbox-before-backfill-2026-10-06.mbox /var/mail/me/INBOX \
+    --moved-to /var/mail/me/lists/github-project --by from:addr --by list-id
 before   81835  ~/inbox-before-backfill-2026-10-06.mbox
-after    62655  /var/mail/me
+after    62655  /var/mail/me/INBOX
   unchanged          62638
   headers changed       16
   removed, moved     19181
@@ -197,7 +207,7 @@ after    62655  /var/mail/me
 
 ```
 munchymail sql "SELECT name, count(*) FROM header WHERE nth = 0 GROUP BY name ORDER BY 2 DESC LIMIT 10"
-munchymail scan --list ~/mail/Drafts       # split only, verify byte-exact, no database
+munchymail scan --list /var/mail/me/Drafts       # split only, verify byte-exact, no database
 ```
 
 ## mbox-sort: date-sorted copy of an mbox
@@ -221,8 +231,8 @@ Re-import after moving mail; earlier imports stay as older runs, so the
 index can compare where mail was with where it is now:
 
 ```
-munchymail import inbox home-mail
-munchymail search --origin inbox --current --count          # what's in INBOX now
+munchymail import mail
+munchymail search --folder INBOX --current --count          # what's in INBOX now
 munchymail report --folder lists/github-project --current \
   --by 'x-github-reason~^(subscribed|push|review_requested|team_mention)$' \
   --by 'list-id~<[^.]+\.(acme|widgets)\.github\.com>$'      # every message should be match/match
