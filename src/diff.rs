@@ -32,7 +32,7 @@ impl Msg {
         (!v.is_empty()).then_some(v)
     }
 
-    fn same_message_key(&self) -> ([u8; 32], Option<String>) {
+    pub fn same_message_key(&self) -> ([u8; 32], Option<String>) {
         (self.body_hash, self.message_id.clone())
     }
 }

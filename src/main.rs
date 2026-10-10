@@ -10,6 +10,8 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 use turso::Value;
 
+use munchymail::changes;
+use munchymail::diff::{self, Msg};
 use munchymail::import::Importer;
 use munchymail::query::{Filter, sieve_to_like};
 use munchymail::report::{self, Key};
@@ -151,6 +153,46 @@ enum Cmd {
         /// Also list every message in each section.
         #[arg(long)]
         list: bool,
+    },
+    /// What changed between import runs, message by message, from the index.
+    ///
+    /// Within each path, messages pair up as in `diff`. A message gone from one
+    /// path and new at another is moved; gone and new nowhere is removed.
+    /// Files identical on both sides are skipped.
+    Changes {
+        /// Runs before, e.g. `6` or `6,7` (one per origin); default: --origin's second-latest run.
+        before: Option<String>,
+        /// Runs after; default: --origin's latest run.
+        after: Option<String>,
+        /// Compare this origin's last two runs.
+        #[arg(long)]
+        origin: Option<String>,
+        /// Compare recorded path OLD as NEW, e.g. `me=INBOX` across a move; repeatable.
+        #[arg(long, value_name = "OLD=NEW")]
+        rename: Vec<String>,
+        /// Group key for the breakdowns, as in `report`; repeatable.
+        #[arg(long = "by", value_name = "KEY", default_value = "from:addr")]
+        by: Vec<String>,
+        /// Groups shown per section.
+        #[arg(short = 'n', long, default_value_t = 15)]
+        limit: usize,
+        /// Also list every message in each section.
+        #[arg(long)]
+        list: bool,
+        /// Store removed and moved messages in the removal table (import does this per origin).
+        #[arg(long)]
+        record: bool,
+    },
+    /// Recorded removals: messages that left a path, newest first.
+    Removals {
+        /// Only paths matching this Sieve :matches pattern, e.g. INBOX.
+        #[arg(long)]
+        folder: Option<String>,
+        /// Only messages that were moved (true) or found nowhere (false).
+        #[arg(long)]
+        moved: Option<bool>,
+        #[arg(short = 'n', long, default_value_t = 50)]
+        limit: usize,
     },
     /// Split mbox files and check they reproduce byte-for-byte; no database.
     Scan {
@@ -687,6 +729,35 @@ async fn show(
                 text(&r[3])
             )?;
         }
+        let rows = query_rows(
+            store,
+            "SELECT g.label, r.path, lr.started_at, gr.started_at, r.moved_to
+             FROM removal r
+             JOIN import_run lr ON lr.run_id = r.last_seen_run
+             JOIN origin g ON g.origin_id = lr.origin_id
+             JOIN import_run gr ON gr.run_id = r.gone_run
+             WHERE r.artifact_id = ? ORDER BY r.gone_run",
+            vec![id.into()],
+        )
+        .await?;
+        for r in rows {
+            let when = |v: &Value| match v {
+                Value::Integer(t) => ymd(*t),
+                _ => "?".into(),
+            };
+            let dest = match &r[4] {
+                Value::Text(t) => format!("moved to {t}"),
+                _ => "found nowhere new".into(),
+            };
+            writeln!(
+                out,
+                "left {}:{} between {} and {}, {dest}",
+                text(&r[0]),
+                text(&r[1]),
+                when(&r[2]),
+                when(&r[3])
+            )?;
+        }
         return Ok(());
     }
     out.write_all(&store.object(h).await?)?;
@@ -737,7 +808,6 @@ fn diff(
     list: bool,
     out: &mut impl Write,
 ) -> Result<()> {
-    use munchymail::diff::{self, Msg};
     let keys = by
         .iter()
         .map(|k| Key::parse(k))
@@ -765,63 +835,108 @@ fn diff(
         )?;
     }
 
-    let line = |m: &Msg| {
-        let get = |n: &str| {
-            m.values(n)
-                .and_then(|v| v.into_iter().next())
-                .unwrap_or_default()
-        };
-        format!(
-            "    {}  {}  {}",
-            truncate(&get("date"), 31),
-            truncate(&get("from"), 40),
-            truncate(&get("subject"), 70)
-        )
+    let p = Printer {
+        keys: &keys,
+        by,
+        limit,
+        list,
     };
-    let section = |title: &str, msgs: Vec<&Msg>, out: &mut dyn Write| -> Result<()> {
-        if msgs.is_empty() {
+    let none = |i: &usize| (*i, None);
+    p.section(out, "removed, NOT FOUND", &a, d.lost.iter().map(none))?;
+    p.section(out, "removed, moved", &a, d.moved.iter().map(none))?;
+    p.section(out, "added", &b, d.added.iter().map(none))?;
+    p.changed_headers(out, &a, &b, &d.changed)
+}
+
+/// Section output shared by `diff` and `changes`.
+struct Printer<'a> {
+    keys: &'a [Key],
+    by: &'a [String],
+    limit: usize,
+    list: bool,
+}
+
+impl Printer<'_> {
+    /// `items` are (index into `msgs`, optional leading group column such as "INBOX -> Junk").
+    fn section(
+        &self,
+        out: &mut impl Write,
+        title: &str,
+        msgs: &[Msg],
+        items: impl Iterator<Item = (usize, Option<String>)>,
+    ) -> Result<()> {
+        let items: Vec<_> = items.collect();
+        if items.is_empty() {
             return Ok(());
         }
-        writeln!(out, "\n== {title} ({}) by {} ==", msgs.len(), by.join(", "))?;
+        let lead = items.iter().any(|(_, l)| l.is_some());
+        writeln!(
+            out,
+            "\n== {title} ({}) by {}{} ==",
+            items.len(),
+            if lead { "path, " } else { "" },
+            self.by.join(", ")
+        )?;
         let mut groups: HashMap<Vec<String>, u64> = HashMap::new();
-        for m in &msgs {
-            let g = keys
+        for (i, l) in &items {
+            let m = &msgs[*i];
+            let g = l
                 .iter()
-                .map(|k| k.group(m.values(&k.header).as_ref()))
+                .cloned()
+                .chain(
+                    self.keys
+                        .iter()
+                        .map(|k| k.group(m.values(&k.header).as_ref())),
+                )
                 .collect();
             *groups.entry(g).or_default() += 1;
         }
         let mut rows: Vec<_> = groups.into_iter().collect();
         rows.sort_by(|x, y| y.1.cmp(&x.1).then_with(|| x.0.cmp(&y.0)));
-        for (g, n) in rows.iter().take(limit) {
+        for (g, n) in rows.iter().take(self.limit) {
             writeln!(out, "  {n:>7}  {}", g.join("  "))?;
         }
-        if rows.len() > limit {
-            let rest: u64 = rows[limit..].iter().map(|(_, n)| n).sum();
-            writeln!(out, "  {rest:>7}  ({} more groups)", rows.len() - limit)?;
+        if rows.len() > self.limit {
+            let rest: u64 = rows[self.limit..].iter().map(|(_, n)| n).sum();
+            writeln!(
+                out,
+                "  {rest:>7}  ({} more groups)",
+                rows.len() - self.limit
+            )?;
         }
-        if list {
-            for m in &msgs {
-                writeln!(out, "{}", line(m))?;
+        if self.list {
+            for (i, l) in &items {
+                let m = &msgs[*i];
+                let get = |n: &str| {
+                    m.values(n)
+                        .and_then(|v| v.into_iter().next())
+                        .unwrap_or_default()
+                };
+                writeln!(
+                    out,
+                    "    {}{}  {}  {}",
+                    l.as_ref().map(|l| format!("{l}  ")).unwrap_or_default(),
+                    truncate(&get("date"), 31),
+                    truncate(&get("from"), 40),
+                    truncate(&get("subject"), 70)
+                )?;
             }
         }
         Ok(())
-    };
-    section(
-        "removed, NOT FOUND",
-        d.lost.iter().map(|&i| &a[i]).collect(),
-        out,
-    )?;
-    section(
-        "removed, moved",
-        d.moved.iter().map(|&i| &a[i]).collect(),
-        out,
-    )?;
-    section("added", d.added.iter().map(|&i| &b[i]).collect(), out)?;
+    }
 
-    if !d.changed.is_empty() {
+    fn changed_headers(
+        &self,
+        out: &mut impl Write,
+        a: &[Msg],
+        b: &[Msg],
+        pairs: &[(usize, usize)],
+    ) -> Result<()> {
+        if pairs.is_empty() {
+            return Ok(());
+        }
         let mut by_names: HashMap<String, u64> = HashMap::new();
-        for &(i, j) in &d.changed {
+        for &(i, j) in pairs {
             *by_names
                 .entry(diff::changed_headers(&a[i], &b[j]).join(", "))
                 .or_default() += 1;
@@ -831,11 +946,190 @@ fn diff(
         writeln!(
             out,
             "\n== headers changed ({}) by which headers differ ==",
-            d.changed.len()
+            pairs.len()
         )?;
-        for (names, n) in rows.iter().take(limit) {
+        for (names, n) in rows.iter().take(self.limit) {
             writeln!(out, "  {n:>7}  {names}")?;
         }
+        Ok(())
+    }
+}
+
+fn parse_runs(s: &str) -> Result<Vec<i64>> {
+    s.split(',')
+        .map(|r| {
+            r.trim()
+                .parse()
+                .with_context(|| format!("bad run id {r:?}"))
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn changes_cmd(
+    store: &Store,
+    before: Option<String>,
+    after: Option<String>,
+    origin: Option<String>,
+    rename: &[String],
+    by: &[String],
+    limit: usize,
+    list: bool,
+    record: bool,
+    out: &mut impl Write,
+) -> Result<()> {
+    let keys = by
+        .iter()
+        .map(|k| Key::parse(k))
+        .collect::<Result<Vec<_>>>()?;
+    let rename = rename
+        .iter()
+        .map(|r| {
+            r.split_once('=')
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .with_context(|| format!("--rename wants OLD=NEW, got {r:?}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let (before, after) = match (before, after, origin) {
+        (Some(b), Some(a), _) => (parse_runs(&b)?, parse_runs(&a)?),
+        (None, None, Some(label)) => {
+            let rows = query_rows(
+                store,
+                "SELECT r.run_id FROM import_run r JOIN origin g ON g.origin_id = r.origin_id
+                 WHERE g.label = ? AND r.finished_at IS NOT NULL ORDER BY r.run_id DESC LIMIT 2",
+                vec![label.clone().into()],
+            )
+            .await?;
+            let [Value::Integer(a), Value::Integer(b)] =
+                [&rows.first(), &rows.get(1)].map(|r| r.map_or(Value::Null, |r| r[0].clone()))
+            else {
+                bail!("origin {label:?} has fewer than two finished runs");
+            };
+            (vec![b], vec![a])
+        }
+        _ => bail!("give BEFORE and AFTER runs, or --origin LABEL"),
+    };
+    let mut c = changes::between(store, &before, &after, &rename).await?;
+    let mut need_b: Vec<usize> = c.removed.clone();
+    need_b.extend(c.moved.iter().map(|m| m.0));
+    need_b.extend(c.changed.iter().map(|m| m.0));
+    let mut need_a: Vec<usize> = c.added.clone();
+    need_a.extend(c.changed.iter().map(|m| m.1));
+    changes::fill_fields(store, &mut c.before, &need_b).await?;
+    changes::fill_fields(store, &mut c.after, &need_a).await?;
+
+    let runs = |r: &[i64]| r.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+    writeln!(
+        out,
+        "before runs {}  after runs {}",
+        runs(&before),
+        runs(&after)
+    )?;
+    writeln!(
+        out,
+        "  files unchanged  {:>7}  ({} messages)",
+        c.unchanged_files, c.unchanged_file_messages
+    )?;
+    writeln!(out, "  in changed files:")?;
+    writeln!(out, "  unchanged        {:>7}", c.unchanged)?;
+    writeln!(out, "  headers changed  {:>7}", c.changed.len())?;
+    writeln!(out, "  moved            {:>7}", c.moved.len())?;
+    writeln!(out, "  removed          {:>7}", c.removed.len())?;
+    writeln!(out, "  added            {:>7}", c.added.len())?;
+
+    let p = Printer {
+        keys: &keys,
+        by,
+        limit,
+        list,
+    };
+    let at = |s: &changes::Snapshot, i: usize| Some(s.copies[i].path.clone());
+    p.section(
+        out,
+        "removed",
+        &c.before.msgs,
+        c.removed.iter().map(|&i| (i, at(&c.before, i))),
+    )?;
+    p.section(
+        out,
+        "moved",
+        &c.before.msgs,
+        c.moved.iter().map(|&(i, j)| {
+            (
+                i,
+                Some(format!(
+                    "{} -> {}",
+                    c.before.copies[i].path, c.after.copies[j].path
+                )),
+            )
+        }),
+    )?;
+    p.section(
+        out,
+        "added",
+        &c.after.msgs,
+        c.added.iter().map(|&j| (j, at(&c.after, j))),
+    )?;
+    p.changed_headers(out, &c.before.msgs, &c.after.msgs, &c.changed)?;
+    if record {
+        store.begin().await?;
+        let n = changes::record(store, &c).await?;
+        store.commit().await?;
+        writeln!(out, "\nrecorded {n} new removals")?;
+    }
+    Ok(())
+}
+
+async fn removals(
+    store: &Store,
+    folder: Option<String>,
+    moved: Option<bool>,
+    limit: usize,
+    out: &mut impl Write,
+) -> Result<()> {
+    let mut sql = String::from(
+        "SELECT r.artifact_id, lr.started_at, gr.started_at, lg.label, r.path, r.moved_to,
+                a.date, a.sender, a.subject
+         FROM removal r
+         JOIN import_run lr ON lr.run_id = r.last_seen_run
+         JOIN origin lg ON lg.origin_id = lr.origin_id
+         JOIN import_run gr ON gr.run_id = r.gone_run
+         JOIN artifact a ON a.artifact_id = r.artifact_id
+         WHERE 1",
+    );
+    let mut params = Vec::new();
+    if let Some(f) = &folder {
+        sql.push_str(" AND r.path LIKE ? ESCAPE '\\'");
+        params.push(sieve_to_like(f).into());
+    }
+    match moved {
+        Some(true) => sql.push_str(" AND r.moved_to IS NOT NULL"),
+        Some(false) => sql.push_str(" AND r.moved_to IS NULL"),
+        None => {}
+    }
+    sql.push_str(" ORDER BY r.gone_run DESC, a.date DESC LIMIT ?");
+    params.push((limit as i64).into());
+    let when = |v: &Value| match v {
+        Value::Integer(t) => ymd(*t),
+        _ => "?".into(),
+    };
+    for r in query_rows(store, &sql, params).await? {
+        let dest = match &r[5] {
+            Value::Text(t) => format!("-> {t}"),
+            _ => "-> (gone)".into(),
+        };
+        writeln!(
+            out,
+            "{:>7}  {}..{}  {}:{} {dest}  {}  {}  {}",
+            text(&r[0]),
+            when(&r[1]),
+            when(&r[2]),
+            text(&r[3]),
+            text(&r[4]),
+            when(&r[6]),
+            truncate(&text(&r[7]), 30),
+            truncate(&text(&r[8]), 60)
+        )?;
     }
     Ok(())
 }
@@ -914,6 +1208,8 @@ async fn run(cli: Cli) -> Result<()> {
             | Cmd::Profile { .. }
             | Cmd::Show { .. }
             | Cmd::Stats
+            | Cmd::Removals { .. }
+            | Cmd::Changes { record: false, .. }
     );
     if read_txn {
         store.begin().await?;
@@ -948,6 +1244,9 @@ async fn run(cli: Cli) -> Result<()> {
                     elapsed = ?t.elapsed(),
                     "import finished"
                 );
+                let t = Instant::now();
+                changes::record_since_previous(&store, imp.origin_id, imp.run_id).await?;
+                info!(elapsed = ?t.elapsed(), "removals recorded");
             }
             let t = Instant::now();
             store.checkpoint().await?;
@@ -1025,6 +1324,26 @@ async fn run(cli: Cli) -> Result<()> {
                 writeln!(out, "{}", r.iter().map(text).collect::<Vec<_>>().join("\t"))?;
             }
         }
+        Cmd::Changes {
+            before,
+            after,
+            origin,
+            rename,
+            by,
+            limit,
+            list,
+            record,
+        } => {
+            changes_cmd(
+                &store, before, after, origin, &rename, &by, limit, list, record, &mut out,
+            )
+            .await?
+        }
+        Cmd::Removals {
+            folder,
+            moved,
+            limit,
+        } => removals(&store, folder, moved, limit, &mut out).await?,
         Cmd::Scan { .. } | Cmd::Diff { .. } => unreachable!(),
     }
     if read_txn {

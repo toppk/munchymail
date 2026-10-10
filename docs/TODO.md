@@ -44,8 +44,8 @@ rows each updating four B-trees (table, PK, `header_name_nth_value`,
 - [ ] Maildir import.
 - [ ] Read only the appended tail when a file extends its `parent_content_id`.
 - [ ] Detect lineage for files under 64 KiB and across differing heads.
-- [ ] `munchymail diff` between two import snapshots in the index (today:
-      SQL in docs/index.md, or `diff` on mbox files).
+- [ ] Prune old runs (sightings, observations of contents no run needs,
+      then unreferenced artifacts and objects), keeping recorded removals.
 - [ ] Garbage-collect unreferenced `data/content` objects and `.tmp.*` leftovers.
 - [ ] Measure the 16 KiB inline threshold against real size distributions.
 

@@ -41,7 +41,7 @@ recognised by hash and only get a new sighting, so re-running is cheap.
 
 Every import is kept as a run, so each re-import adds a generation:
 earlier snapshots of a file stay queryable (`--current` selects only the
-latest run per origin; `docs/index.md` has SQL comparing two runs). Only new
+latest run per origin; `changes` compares runs). Only new
 messages cost space; a header-only change (Dovecot writing `X-UID` or
 `Status`) shares the stored body.
 
@@ -182,7 +182,7 @@ Both print counts and percentages of the matching messages.
 ```
 munchymail show ID              # raw header block
 munchymail show ID --raw        # exact stored bytes
-munchymail show ID --where      # every origin/path/offset it was found at
+munchymail show ID --where      # every origin/path/offset it was found at, and recorded removals
 ```
 
 ### diff: before/after check of one mbox (no database)
@@ -213,6 +213,61 @@ after    62655  /var/mail/me/INBOX
 ...
 ```
 
+### changes: what changed between import runs
+
+```
+munchymail changes --origin mail [--by KEY ...] [-n N] [--list] [--record]
+munchymail changes BEFORE AFTER [--rename OLD=NEW ...] ...
+```
+
+The `diff` comparison, run on the index without reading any mail.
+`--origin` compares that origin's last two runs; otherwise BEFORE and AFTER
+are run ids, comma-separated when a snapshot spans origins (e.g. `6,7` for
+INBOX and the folders before the move to `/var/mail/me/`). Files
+identical on both sides are counted and skipped. In the rest, messages pair
+up per path as **unchanged**, **headers changed** (same body and
+Message-ID), **moved** (gone from one path and new at another), **removed**
+(gone and new nowhere) and **added**. `--rename me=INBOX` compares a
+recorded path under another name.
+
+```
+$ munchymail changes 1,2 3,4 --by list-id -n 2
+before runs 1,2  after runs 3,4
+  files unchanged       62  (94351 messages)
+  in changed files:
+  unchanged          56556
+  headers changed       12
+  moved              25264
+  removed                0
+  added                 11
+
+== moved (25264) by path, list-id ==
+     7584  me -> lists/github-project  widgets/gear <gear.widgets.github.com>
+     5724  me -> lists/github-project  widgets/rocket <rocket.widgets.github.com>
+   ...
+```
+
+### removals: what left where, and when
+
+Every `import` compares the new run with that origin's previous one and
+records each removed or moved message in the `removal` table: the path, the
+last run that saw it there and the first that didn't (so the time is known
+to within two imports), and where it turned up. `changes --record` does the
+same for any pair of snapshots, e.g. across origins. Moves between origins
+are only seen that way, since an import compares one origin at a time.
+
+```
+munchymail removals [--folder PATTERN] [--moved true|false] [-n N]
+```
+
+```
+$ munchymail removals --folder Sent -n 1
+  25689  2026-10-07..2026-10-10  home-mail:Sent -> Sent-sep-2026  2026-10-04  Me Example ...  Re: test message
+```
+
+Messages that arrived and left between two imports are never seen.
+Header-only changes (Dovecot rewriting `Status`) are not removals.
+
 ### sql, scan
 
 ```
@@ -242,14 +297,12 @@ index can compare where mail was with where it is now:
 
 ```
 munchymail import mail
-munchymail search --folder INBOX --current --count          # what's in INBOX now
+munchymail changes --origin mail --by list-id               # moved/removed/added since the last import
+munchymail removals --moved false                           # anything found nowhere
 munchymail report --folder lists/github-project --current \
   --by 'x-github-reason~^(subscribed|push|review_requested|team_mention)$' \
   --by 'list-id~<[^.]+\.(acme|widgets)\.github\.com>$'      # every message should be match/match
 ```
-
-For a before/after count of individual messages across snapshots, see the
-SQL in `docs/index.md`.
 
 ## Developing a Sieve rule
 

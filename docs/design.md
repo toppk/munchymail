@@ -93,7 +93,7 @@ Phase 1 is built for mbox: origins, Dovecot-compatible locked reads,
 byte-exact splitting, file- and message-level dedupe with provenance, a
 decoded header index, and the Sieve-oriented query tools (`search`,
 `report`, `profile`, `top`, `names`, `show`), `diff` for verifying mbox
-surgery, and a separate `mbox-sort` binary that writes date-sorted copies
+surgery, `changes` and recorded removals for comparing import runs, and a separate `mbox-sort` binary that writes date-sorted copies
 (the first code that writes a mail format; never in place). Not yet: Maildir, logical
 grouping, and everything from phase 2 on (see `docs/TODO.md`).
 

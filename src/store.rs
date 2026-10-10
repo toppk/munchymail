@@ -15,10 +15,11 @@ use crate::util::hex;
 /// Objects at most this size live inline in SQLite.
 pub const INLINE_MAX: usize = 16 * 1024;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Upgrades from the previous version; index `i` brings version `i + 1` to `i + 2`.
-const MIGRATIONS: [&str; 1] = ["ALTER TABLE origin ADD COLUMN retired_at INTEGER"];
+/// New tables and indexes need no entry: `SCHEMA` creates them if missing.
+const MIGRATIONS: [&str; 2] = ["ALTER TABLE origin ADD COLUMN retired_at INTEGER", ""];
 
 const SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
@@ -100,6 +101,7 @@ CREATE TABLE IF NOT EXISTS file_sighting (
 );
 CREATE INDEX IF NOT EXISTS file_sighting_path ON file_sighting (origin_id, path);
 CREATE INDEX IF NOT EXISTS file_sighting_content ON file_sighting (content_id);
+CREATE INDEX IF NOT EXISTS file_sighting_run ON file_sighting (run_id);
 
 CREATE TABLE IF NOT EXISTS observation (
     content_id INTEGER NOT NULL,
@@ -112,6 +114,19 @@ CREATE TABLE IF NOT EXISTS observation (
     PRIMARY KEY (content_id, ordinal)
 );
 CREATE INDEX IF NOT EXISTS observation_artifact ON observation (artifact_id);
+
+-- a copy last seen at path in last_seen_run and not there in gone_run
+CREATE TABLE IF NOT EXISTS removal (
+    artifact_id INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    last_seen_run INTEGER NOT NULL,
+    gone_run INTEGER NOT NULL,
+    -- path it turned up at in gone_run; NULL if found nowhere new
+    moved_to TEXT,
+    recorded_at INTEGER NOT NULL,
+    PRIMARY KEY (artifact_id, path, last_seen_run, gone_run)
+);
+CREATE INDEX IF NOT EXISTS removal_gone ON removal (gone_run);
 ";
 
 pub struct Store {
@@ -151,7 +166,9 @@ impl Store {
                     );
                 };
                 for (i, sql) in MIGRATIONS.iter().enumerate().skip(found as usize - 1) {
-                    conn.execute(sql, ()).await?;
+                    if !sql.is_empty() {
+                        conn.execute(sql, ()).await?;
+                    }
                     info!(to = i + 2, "migrated schema");
                 }
                 if found != SCHEMA_VERSION {

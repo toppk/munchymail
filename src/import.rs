@@ -121,8 +121,8 @@ impl Stmts {
 pub struct Importer<'a> {
     store: &'a Store,
     stmts: Stmts,
-    origin_id: i64,
-    run_id: i64,
+    pub origin_id: i64,
+    pub run_id: i64,
     root: PathBuf,
     pub stats: Stats,
 }

@@ -15,10 +15,12 @@ Schema in `src/store.rs`; everything lives in `data/` (`MUNCHYMAIL_DATA` or
 | `file_content` | Whole-file SHA-256, `head_hash` (first 64 KiB), message count, and `parent_content_id` when an earlier content is a byte prefix (a growing mbox across backups). |
 | `file_sighting` | Content seen at `path` (relative to origin root) in a run, with dev/ino/mtime/ctime. |
 | `observation` | Artifact at byte `offset` in a content, with its `From ` line and separator bytes. |
+| `removal` | A copy last seen at `path` in `last_seen_run` and absent in `gone_run`; `moved_to` is where it turned up, NULL if nowhere new. Filled by `import` (per origin) and `changes --record`. |
 
-`meta.schema_version` is 2. Opening an older database upgrades it in the
-opening transaction (`MIGRATIONS` in `store.rs`, version 1 → 2 adds
-`origin.retired_at`); a newer or unknown version refuses to open.
+`meta.schema_version` is 3. Opening an older database upgrades it in the
+opening transaction (`MIGRATIONS` in `store.rs`: 1 → 2 adds
+`origin.retired_at`; 2 → 3 adds `removal` and `file_sighting_run`, which
+`SCHEMA` creates); a newer or unknown version refuses to open.
 
 ## Performance rules
 
@@ -46,24 +48,13 @@ unchanged files ~1 s; `search` 0.04–0.3 s; `report`/`profile` 0.1–0.35 s;
 
 ## Comparing snapshots
 
-Each `import` adds a `file_sighting` per file per run, so earlier states
-stay queryable. Find the contents, then count each message (body hash +
-Message-ID, which survives Dovecot rewriting `X-UID`) across them:
-
-```
-munchymail sql "SELECT s.run_id, s.path, s.content_id, c.message_count
-  FROM file_sighting s JOIN file_content c ON c.content_id = s.content_id ORDER BY s.run_id"
-
-munchymail sql "SELECT o, i, d, count(*) FROM (
-    SELECT b, m, sum(src = 58) AS o, sum(src = 59) AS i, sum(src = 60) AS d FROM (
-      SELECT ob.content_id AS src, a.body_hash AS b, coalesce(a.message_id, '') AS m
-      FROM observation ob JOIN artifact a ON a.artifact_id = ob.artifact_id
-      WHERE ob.content_id IN (58, 59, 60))
-    GROUP BY b, m)
-  GROUP BY o, i, d ORDER BY 4 DESC"
-```
-
-(58 = INBOX before the GitHub surgery, 59 = INBOX after, 60 =
-`lists/github-project`.) A row with copies before and none after anywhere
-is lost mail.
-
+`changes` (`src/changes.rs`) loads the files of each side's runs, skips
+paths whose set of `content_id`s is identical on both sides, and loads
+observations only for the rest. Within a path it pairs copies with
+`diff::compare` (exact bytes, then body hash + Message-ID, which survives
+Dovecot rewriting `X-UID`/`Status`). Copies gone from a path are then matched
+against copies new at another path (moved); the remainder are removed or
+added. A copy that also exists, unchanged, at another path does not count as
+a destination, so deleting one of two duplicates is a removal. Comparing
+the 3 GB INBOX between two runs takes about 5 s, most of it reading
+observations.
