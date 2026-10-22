@@ -71,14 +71,15 @@ INFO munchymail::source: read under fcntl read lock path=/var/mail/me/INBOX
 
 ## Filters
 
-`search`, `report`, `profile`, `top` and `names` share these; all given must
-match:
+`search`, `report`, `profile`, `top`, `names` and `export` share these; all
+given must match:
 
 | Option | Matches |
 |---|---|
 | `-H, --header NAME:PATTERN` | decoded header value, like Sieve `header` (repeatable) |
 | `-R, --regex NAME:REGEX` | decoded header value, case-insensitive regex, like Sieve `header :regex` (repeatable) |
 | `--from PATTERN`, `--to PATTERN` | any address in From/To, like Sieve `address :all` |
+| `--participant PATTERN` | any address in From, Sender, Reply-To, To, Cc or Bcc: mail sent or received by someone (repeatable) |
 | `--subject PATTERN` | same as `-H subject:PATTERN` |
 | `--has NAME` | header present (repeatable) |
 | `--origin LABEL` | found in that origin |
@@ -267,6 +268,27 @@ $ munchymail removals --folder Sent -n 1
 
 Messages that arrived and left between two imports are never seen.
 Header-only changes (Dovecot rewriting `Status`) are not removals.
+
+### export: a copy for someone to keep
+
+```
+munchymail export NAME [filters] [--title TEXT] [-o FILE]
+```
+
+```
+$ munchymail export corp --participant '*@corp.example' --title 'Mail with corp.example'
+wrote data/exports/corp.tgz: 32 messages (5 duplicate copies left out)
+```
+
+Writes `data/exports/NAME.tgz`, which unpacks to `NAME/index.md` (a table
+of date, From, To, subject and current folder, the command that made it,
+and SHA-256 sums) and `NAME/maildir/001`, `002`, ... in date order. Each
+file is one whole message (an `.eml`), byte for byte as stored, without the
+mbox `From ` line. Bytes come from the index, so import first for the
+latest mail. Copies with the same body and Message-ID (e.g. one in INBOX,
+one in an archive, or Dovecot's `Status` rewrite) are exported once, using
+the copy seen most recently. Without `--current`, messages that have since
+left the mailbox are included and marked "gone" in the index.
 
 ### sql, scan
 

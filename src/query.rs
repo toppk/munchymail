@@ -123,9 +123,10 @@ fn like_hint(pattern: &str) -> String {
 
 enum Set {
     Sql(String, Vec<Value>),
-    /// Header values narrowed in SQL by name and a LIKE hint, then decided in Rust.
+    /// Header values narrowed in SQL by name and a LIKE hint, then decided in Rust;
+    /// a message matches if any value of any of the names does.
     Predicate {
-        name: String,
+        names: Vec<String>,
         like: String,
         test: Box<dyn Fn(&str) -> bool>,
     },
@@ -134,7 +135,7 @@ enum Set {
 async fn predicate_set(
     conn: &Connection,
     table: &str,
-    name: &str,
+    names: &[String],
     like: &str,
     test: &dyn Fn(&str) -> bool,
 ) -> Result<u64> {
@@ -143,12 +144,14 @@ async fn predicate_set(
             "SELECT artifact_id, value FROM header WHERE name = ?1 AND value LIKE ?2 ESCAPE '\\'",
         )
         .await?;
-    let mut rows = stmt.query((name, like)).await?;
     let mut ids = Vec::new();
-    while let Some(r) = rows.next().await? {
-        let value: String = r.get(1)?;
-        if test(&value) {
-            ids.push(r.get::<i64>(0)?);
+    for name in names {
+        let mut rows = stmt.query((name.as_str(), like)).await?;
+        while let Some(r) = rows.next().await? {
+            let value: String = r.get(1)?;
+            if test(&value) {
+                ids.push(r.get::<i64>(0)?);
+            }
         }
     }
     let mut ins = conn
@@ -163,12 +166,17 @@ async fn predicate_set(
     Ok(n)
 }
 
+/// Headers naming someone who sent or received a message.
+pub const PARTICIPANT_HEADERS: [&str; 6] = ["from", "sender", "reply-to", "to", "cc", "bcc"];
+
 #[derive(Debug, Default, Clone)]
 pub struct Filter {
     /// (header name, Sieve pattern) on decoded values, like Sieve `header`.
     pub headers: Vec<(String, String)>,
     /// (header name, Sieve pattern) on any address in it, like Sieve `address :all`.
     pub addresses: Vec<(String, String)>,
+    /// Sieve pattern on any address in any of [`PARTICIPANT_HEADERS`].
+    pub participants: Vec<String>,
     /// (header name, regex) on decoded values, case-insensitive, like Sieve `header :regex`.
     pub regexes: Vec<(String, String)>,
     pub has: Vec<String>,
@@ -184,10 +192,18 @@ impl Filter {
     /// One `SELECT artifact_id ...` per condition, with its bind values.
     fn sets(&self) -> Result<Vec<Set>> {
         let mut sets = Vec::new();
-        for (name, pattern) in &self.addresses {
+        let participants = self.participants.iter().map(|p| {
+            let names = PARTICIPANT_HEADERS.map(String::from).to_vec();
+            (names, p)
+        });
+        let addresses = self
+            .addresses
+            .iter()
+            .map(|(name, p)| (vec![name.to_ascii_lowercase()], p));
+        for (names, pattern) in addresses.chain(participants) {
             let pattern = pattern.clone();
             sets.push(Set::Predicate {
-                name: name.to_ascii_lowercase(),
+                names,
                 like: like_hint(&pattern),
                 test: Box::new(move |v| {
                     crate::headers::addresses(v)
@@ -202,7 +218,7 @@ impl Filter {
                 .build()
                 .with_context(|| format!("bad regex {re:?}"))?;
             sets.push(Set::Predicate {
-                name: name.to_ascii_lowercase(),
+                names: vec![name.to_ascii_lowercase()],
                 like: "%".into(),
                 test: Box::new(move |v| re.is_match(v)),
             });
@@ -315,8 +331,8 @@ impl Filter {
                     conn.execute(&format!("INSERT OR IGNORE INTO {t} {sql}"), params)
                         .await?
                 }
-                Set::Predicate { name, like, test } => {
-                    predicate_set(conn, &t, &name, &like, &*test).await?
+                Set::Predicate { names, like, test } => {
+                    predicate_set(conn, &t, &names, &like, &*test).await?
                 }
             };
             sized.push((n, t));

@@ -1,5 +1,6 @@
 pub mod changes;
 pub mod diff;
+pub mod export;
 pub mod headers;
 pub mod import;
 pub mod mbox;

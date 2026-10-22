@@ -17,7 +17,7 @@ use munchymail::query::{Filter, sieve_to_like};
 use munchymail::report::{self, Key};
 use munchymail::store::{Store, now};
 use munchymail::util::{hex, ymd};
-use munchymail::{mbox, source};
+use munchymail::{export, mbox, source};
 
 #[derive(Parser)]
 #[command(
@@ -123,6 +123,22 @@ enum Cmd {
         /// Where this message was found.
         #[arg(long = "where")]
         provenance: bool,
+    },
+    /// Write matching messages to data/exports/NAME.tgz for someone to keep:
+    /// NAME/index.md (a table of the messages) and NAME/maildir/001, 002, ...
+    ///
+    /// Copies with the same body and Message-ID are exported once.
+    Export {
+        /// Name of the export and of the directory it unpacks to.
+        name: String,
+        #[command(flatten)]
+        filter: FilterArgs,
+        /// Write here instead of data/exports/NAME.tgz.
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
+        /// Heading of index.md; default NAME.
+        #[arg(long)]
+        title: Option<String>,
     },
     /// Corpus counts.
     Stats,
@@ -250,6 +266,9 @@ struct FilterArgs {
     /// Any address in To.
     #[arg(long, value_name = "PATTERN")]
     to: Option<String>,
+    /// Any address in From, Sender, Reply-To, To, Cc or Bcc; repeatable (all must match).
+    #[arg(long, value_name = "PATTERN")]
+    participant: Vec<String>,
     /// Decoded Subject, same as -H subject:PATTERN.
     #[arg(long, value_name = "PATTERN")]
     subject: Option<String>,
@@ -298,6 +317,7 @@ impl FilterArgs {
         Ok(Filter {
             headers,
             addresses,
+            participants: self.participant,
             regexes,
             has: self.has,
             folder: self.folder,
@@ -955,6 +975,25 @@ impl Printer<'_> {
     }
 }
 
+/// This invocation as a shell command, for provenance.
+fn command_line() -> String {
+    let quote = |a: String| {
+        if !a.is_empty()
+            && a.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "@%+=:,./_-".contains(c))
+        {
+            a
+        } else {
+            format!("'{}'", a.replace('\'', r"'\''"))
+        }
+    };
+    ["munchymail".to_string()]
+        .into_iter()
+        .chain(std::env::args().skip(1).map(quote))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn parse_runs(s: &str) -> Result<Vec<i64>> {
     s.split(',')
         .map(|r| {
@@ -1207,6 +1246,7 @@ async fn run(cli: Cli) -> Result<()> {
             | Cmd::Report { .. }
             | Cmd::Profile { .. }
             | Cmd::Show { .. }
+            | Cmd::Export { .. }
             | Cmd::Stats
             | Cmd::Removals { .. }
             | Cmd::Changes { record: false, .. }
@@ -1318,6 +1358,41 @@ async fn run(cli: Cli) -> Result<()> {
             raw,
             provenance,
         } => show(&store, id, raw, provenance, &mut out).await?,
+        Cmd::Export {
+            name,
+            filter,
+            output,
+            title,
+        } => {
+            if name.is_empty() || name.starts_with('.') || name.contains('/') {
+                bail!("export name {name:?} must be a plain file name");
+            }
+            let path = match output {
+                Some(p) => p,
+                None => {
+                    let dir = store.data_dir.join("exports");
+                    std::fs::create_dir_all(&dir)?;
+                    dir.join(format!("{name}.tgz"))
+                }
+            };
+            let title = title.unwrap_or_else(|| name.clone());
+            let s = export::write(
+                &store,
+                &filter.build()?,
+                &name,
+                &title,
+                &command_line(),
+                &path,
+            )
+            .await?;
+            writeln!(
+                out,
+                "wrote {}: {} messages ({} duplicate copies left out)",
+                path.display(),
+                s.messages,
+                s.folded
+            )?;
+        }
         Cmd::Stats => stats(&store, &mut out).await?,
         Cmd::Sql { query } => {
             for r in query_rows(&store, &query, vec![]).await? {
