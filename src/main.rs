@@ -13,7 +13,7 @@ use turso::Value;
 use munchymail::changes;
 use munchymail::diff::{self, Msg};
 use munchymail::import::Importer;
-use munchymail::query::{Filter, sieve_to_like};
+use munchymail::query::{Filter, fold_copies, sieve_to_like};
 use munchymail::report::{self, Key};
 use munchymail::seen::{Seen, Sightings};
 use munchymail::store::{Store, now};
@@ -62,6 +62,10 @@ enum Cmd {
         /// The same as --long as tab-separated columns with a header row.
         #[arg(long, conflicts_with_all = ["headers", "raw", "count"])]
         tsv: bool,
+        /// One row per message: copies with the same body and Message-ID (e.g.
+        /// before and after Dovecot rewrote Status) count once, as in `export`.
+        #[arg(long)]
+        unique: bool,
         /// Print only the number of matches.
         #[arg(long)]
         count: bool,
@@ -458,11 +462,25 @@ async fn search(
     store: &Store,
     filter: Filter,
     listing: Listing,
+    unique: bool,
     count: bool,
     limit: i64,
     out: &mut impl Write,
 ) -> Result<()> {
-    let set = filter.materialize(&store.conn).await?;
+    let mut set = filter.materialize(&store.conn).await?;
+    if unique {
+        if set == "artifact" {
+            for sql in [
+                "CREATE TEMP TABLE IF NOT EXISTS hit (artifact_id INTEGER PRIMARY KEY)",
+                "DELETE FROM hit",
+                "INSERT INTO hit SELECT artifact_id FROM artifact",
+            ] {
+                store.conn.execute(sql, ()).await?;
+            }
+            set = "hit";
+        }
+        fold_copies(&store.conn, set).await?;
+    }
     if count {
         let rows = query_rows(store, &format!("SELECT count(*) FROM {set}"), vec![]).await?;
         writeln!(out, "{}", text(&rows[0][0]))?;
@@ -1363,6 +1381,7 @@ async fn run(cli: Cli) -> Result<()> {
             raw,
             long,
             tsv,
+            unique,
             count,
             limit,
         } => {
@@ -1373,7 +1392,16 @@ async fn run(cli: Cli) -> Result<()> {
                 (.., true) => Listing::Tsv,
                 _ => Listing::Summary,
             };
-            search(&store, filter.build()?, listing, count, limit, &mut out).await?
+            search(
+                &store,
+                filter.build()?,
+                listing,
+                unique,
+                count,
+                limit,
+                &mut out,
+            )
+            .await?
         }
         Cmd::Top {
             name,

@@ -1,5 +1,7 @@
 //! Search filters over artifacts, mirroring Sieve's `:matches` with `i;ascii-casemap`.
 
+use std::collections::{HashMap, HashSet};
+
 use anyhow::{Context, Result, bail};
 use turso::{Connection, Value};
 
@@ -354,6 +356,41 @@ impl Filter {
         conn.execute(&sql, ()).await?;
         Ok(true)
     }
+}
+
+/// Keep one artifact per message (same body and Message-ID) in TEMP TABLE
+/// `table`: the newest stored copy. Returns how many copies were dropped.
+pub async fn fold_copies(conn: &Connection, table: &str) -> Result<u64> {
+    let mut rows = conn
+        .query(
+            &format!(
+                "SELECT t.artifact_id, a.body_hash, a.message_id FROM {table} t
+                 JOIN artifact a ON a.artifact_id = t.artifact_id"
+            ),
+            (),
+        )
+        .await?;
+    let mut newest: HashMap<(Vec<u8>, Option<String>), i64> = HashMap::new();
+    let mut all = Vec::new();
+    while let Some(r) = rows.next().await? {
+        let id: i64 = r.get(0)?;
+        let Value::Blob(body) = r.get_value(1)? else {
+            bail!("artifact {id} has no body hash")
+        };
+        let e = newest.entry((body, r.get(2)?)).or_insert(id);
+        *e = (*e).max(id);
+        all.push(id);
+    }
+    drop(rows);
+    let keep: HashSet<i64> = newest.into_values().collect();
+    let mut del = conn
+        .prepare(&format!("DELETE FROM {table} WHERE artifact_id = ?1"))
+        .await?;
+    let mut n = 0;
+    for id in all.into_iter().filter(|id| !keep.contains(id)) {
+        n += del.execute((id,)).await?;
+    }
+    Ok(n)
 }
 
 #[cfg(test)]

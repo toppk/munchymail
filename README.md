@@ -117,7 +117,9 @@ last seen in PATH DATE"), date and time (UTC), From, To, body size in bytes
 as stored (MIME-encoded), and the number of attachments (parts with a file
 name or `Content-Disposition: attachment`); `--tsv` gives the same as
 columns. Folder is per stored copy: a copy whose headers Dovecot later
-rewrote shows as gone, next to its current copy (`--current` hides it).
+rewrote shows as gone, next to its current copy; `--unique` lists each
+message once (its newest copy), as `export` counts them, and `--current`
+leaves out copies no longer in any folder.
 
 ### report: grouped counts with percentages
 
