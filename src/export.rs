@@ -1,7 +1,7 @@
 //! Matching messages as a `.tgz` someone else can keep: `NAME/index.md` and one
 //! file per message under `NAME/maildir/`.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::path::Path;
@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use turso::Value;
 
 use crate::query::Filter;
+use crate::seen::{Seen, Sightings};
 use crate::store::{Store, now};
 use crate::util::{hex, ymd, ymd_hm};
 
@@ -29,15 +30,6 @@ struct Artifact {
     body_hash: Vec<u8>,
     message_id: Option<String>,
     subject: String,
-}
-
-/// Where copies of one message were seen.
-#[derive(Default)]
-struct Seen {
-    last_run: i64,
-    last_path: String,
-    last_time: i64,
-    current: BTreeSet<String>,
 }
 
 fn blob(v: Value) -> Result<Vec<u8>> {
@@ -61,20 +53,6 @@ fn cell(s: &str) -> String {
         }
     }
     out
-}
-
-async fn first_header(store: &Store, id: i64, name: &str) -> Result<String> {
-    let mut rows = store
-        .conn
-        .query(
-            "SELECT value FROM header WHERE artifact_id = ?1 AND nth = 0 AND name = ?2",
-            (id, name),
-        )
-        .await?;
-    Ok(match rows.next().await? {
-        Some(r) => r.get(0)?,
-        None => String::new(),
-    })
 }
 
 /// Write `out` (via a temporary file) with every message matching `filter`.
@@ -115,29 +93,7 @@ pub async fn write(
         bail!("no messages match");
     }
 
-    let mut current_runs = HashSet::new();
-    let mut rows = store
-        .conn
-        .query(
-            "SELECT max(r.run_id) FROM import_run r JOIN origin g ON g.origin_id = r.origin_id
-             WHERE r.finished_at IS NOT NULL AND g.retired_at IS NULL GROUP BY r.origin_id",
-            (),
-        )
-        .await?;
-    while let Some(r) = rows.next().await? {
-        current_runs.insert(r.get::<i64>(0)?);
-    }
-    drop(rows);
-
-    let mut sightings = store
-        .conn
-        .prepare(
-            "SELECT s.run_id, s.path, r.started_at FROM observation o
-             JOIN file_sighting s ON s.content_id = o.content_id
-             JOIN import_run r ON r.run_id = s.run_id
-             WHERE o.artifact_id = ?1",
-        )
-        .await?;
+    let mut sightings = Sightings::new(store).await?;
     // (body hash, Message-ID) -> where seen, and (last run, index) of each copy.
     type Group = (Seen, Vec<(i64, usize)>);
     let mut groups: HashMap<(Vec<u8>, Option<String>), Group> = HashMap::new();
@@ -145,23 +101,7 @@ pub async fn write(
         let (seen, members) = groups
             .entry((a.body_hash.clone(), a.message_id.clone()))
             .or_default();
-        let mut last = 0;
-        let mut rows = sightings.query((a.id,)).await?;
-        while let Some(r) = rows.next().await? {
-            let (run, path, time): (i64, String, i64) = (r.get(0)?, r.get(1)?, r.get(2)?);
-            last = last.max(run);
-            if current_runs.contains(&run) {
-                seen.current.insert(path.clone());
-            }
-            if run > seen.last_run {
-                *seen = Seen {
-                    last_run: run,
-                    last_path: path,
-                    last_time: time,
-                    current: std::mem::take(&mut seen.current),
-                };
-            }
-        }
+        let last = sightings.add(a.id, seen).await?;
         members.push((last, i));
     }
 
@@ -208,24 +148,15 @@ pub async fn write(
         tar.append_data(&mut h, format!("{name}/{file}"), bytes.as_slice())?;
         writeln!(sums, "{}  {file}", hex(&Sha256::digest(&bytes)))?;
 
-        let folder = if seen.current.is_empty() {
-            format!(
-                "gone; last seen in {} {}",
-                seen.last_path,
-                ymd(seen.last_time)
-            )
-        } else {
-            seen.current.iter().cloned().collect::<Vec<_>>().join(", ")
-        };
         writeln!(
             table,
             "| [{}]({file}) | {} | {} | {} | {} | {} |",
             n + 1,
             a.date.map_or("?".into(), ymd_hm),
-            cell(&first_header(store, a.id, "from").await?),
-            cell(&first_header(store, a.id, "to").await?),
+            cell(&store.first_header(a.id, "from").await?),
+            cell(&store.first_header(a.id, "to").await?),
             cell(&a.subject),
-            cell(&folder)
+            cell(&seen.folder())
         )?;
     }
 

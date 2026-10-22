@@ -231,6 +231,21 @@ impl Store {
         Ok(())
     }
 
+    /// Decoded value of a message's first `name` header, or "" if it has none.
+    pub async fn first_header(&self, artifact_id: i64, name: &str) -> Result<String> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT value FROM header WHERE artifact_id = ?1 AND nth = 0 AND name = ?2",
+                (artifact_id, name),
+            )
+            .await?;
+        Ok(match rows.next().await? {
+            Some(r) => r.get(0)?,
+            None => String::new(),
+        })
+    }
+
     pub async fn object(&self, hash: &[u8]) -> Result<Vec<u8>> {
         let mut rows = self
             .conn

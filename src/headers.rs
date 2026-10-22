@@ -73,6 +73,17 @@ pub fn first<'a>(fields: &'a [Field], name: &str) -> Option<&'a str> {
         .map(|f| f.value.as_str())
 }
 
+/// MIME parts with a filename or `Content-Disposition: attachment`; 0 if it doesn't parse.
+pub fn attachments(message: &[u8]) -> usize {
+    fn count(p: &mailparse::ParsedMail) -> usize {
+        let d = p.get_content_disposition();
+        let named = d.params.contains_key("filename") || p.ctype.params.contains_key("name");
+        usize::from(named || d.disposition == mailparse::DispositionType::Attachment)
+            + p.subparts.iter().map(count).sum::<usize>()
+    }
+    mailparse::parse_mail(message).map_or(0, |m| count(&m))
+}
+
 /// Every address in a header value, lowercased; empty if it doesn't parse.
 pub fn addresses(value: &str) -> Vec<String> {
     use mailparse::MailAddr;
@@ -109,6 +120,16 @@ pub fn summary(fields: &[Field]) -> Summary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_attachments() {
+        let m =
+            b"Content-Type: multipart/mixed; boundary=b\n\n--b\nContent-Type: text/plain\n\nhi\n\
+--b\nContent-Type: application/pdf; name=a.pdf\n\nx\n\
+--b\nContent-Disposition: attachment\n\ny\n--b--\n";
+        assert_eq!(attachments(m), 2);
+        assert_eq!(attachments(b"Subject: x\n\nplain\n"), 0);
+    }
 
     #[test]
     fn splits_folds_and_decodes() {

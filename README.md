@@ -107,10 +107,17 @@ munchymail search --origin inbox --since 2026-10-01 -n 20
 munchymail search --from '*@isp.example' --subject invoice --count
 munchymail search -R 'list-id:^widgets/' --headers -n 3     # raw header blocks
 munchymail search --has list-unsubscribe --raw -n 1        # whole raw messages
+munchymail search --participant '*@corp.example' --long     # folder, From, To, size, attachments
+munchymail search --participant '*@corp.example' --tsv -n 1000 > corp.tsv
 ```
 
 Output is `id  date  from  subject`, newest first. The id is what `show`
-takes.
+takes. `--long` adds, per message, the folders it is in now (or "gone;
+last seen in PATH DATE"), date and time (UTC), From, To, body size in bytes
+as stored (MIME-encoded), and the number of attachments (parts with a file
+name or `Content-Disposition: attachment`); `--tsv` gives the same as
+columns. Folder is per stored copy: a copy whose headers Dovecot later
+rewrote shows as gone, next to its current copy (`--current` hides it).
 
 ### report: grouped counts with percentages
 

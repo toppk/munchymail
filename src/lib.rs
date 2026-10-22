@@ -6,6 +6,7 @@ pub mod import;
 pub mod mbox;
 pub mod query;
 pub mod report;
+pub mod seen;
 pub mod sort;
 pub mod source;
 pub mod store;

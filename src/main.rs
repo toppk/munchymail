@@ -15,9 +15,10 @@ use munchymail::diff::{self, Msg};
 use munchymail::import::Importer;
 use munchymail::query::{Filter, sieve_to_like};
 use munchymail::report::{self, Key};
+use munchymail::seen::{Seen, Sightings};
 use munchymail::store::{Store, now};
-use munchymail::util::{hex, ymd};
-use munchymail::{export, mbox, source};
+use munchymail::util::{hex, ymd, ymd_hm};
+use munchymail::{export, headers, mbox, source};
 
 #[derive(Parser)]
 #[command(
@@ -55,6 +56,12 @@ enum Cmd {
         /// Print each full raw message.
         #[arg(long, conflicts_with = "count")]
         raw: bool,
+        /// Several lines per message: folder, date, From, To, subject, body size, attachments.
+        #[arg(long, conflicts_with_all = ["headers", "raw", "count", "tsv"])]
+        long: bool,
+        /// The same as --long as tab-separated columns with a header row.
+        #[arg(long, conflicts_with_all = ["headers", "raw", "count"])]
+        tsv: bool,
         /// Print only the number of matches.
         #[arg(long)]
         count: bool,
@@ -438,11 +445,19 @@ async fn origin(store: &Store, cmd: OriginCmd, out: &mut impl Write) -> Result<(
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Listing {
+    Summary,
+    Headers,
+    Raw,
+    Long,
+    Tsv,
+}
+
 async fn search(
     store: &Store,
     filter: Filter,
-    headers: bool,
-    raw: bool,
+    listing: Listing,
     count: bool,
     limit: i64,
     out: &mut impl Write,
@@ -466,15 +481,65 @@ async fn search(
         vec![limit.into()],
     )
     .await?;
+    if listing == Listing::Tsv {
+        writeln!(
+            out,
+            "id\tdate\tfolder\tfrom\tto\tsubject\tbody_bytes\tattachments"
+        )?;
+    }
+    let mut sightings = Sightings::new(store).await?;
     for r in rows {
-        if headers || raw {
+        if let Listing::Headers | Listing::Raw = listing {
             writeln!(out, "==> {} <==", text(&r[0]))?;
             if let (Value::Blob(h), Value::Blob(b)) = (&r[4], &r[5]) {
                 out.write_all(&store.object(h).await?)?;
-                if raw {
+                if listing == Listing::Raw {
                     out.write_all(&store.object(b).await?)?;
                     writeln!(out)?;
                 }
+            }
+        } else if let (
+            Listing::Long | Listing::Tsv,
+            Value::Integer(id),
+            Value::Blob(h),
+            Value::Blob(b),
+        ) = (listing, &r[0], &r[4], &r[5])
+        {
+            let mut seen = Seen::default();
+            sightings.add(*id, &mut seen).await?;
+            let mut msg = store.object(h).await?;
+            let body = store.object(b).await?;
+            let body_bytes = body.len();
+            msg.extend(body);
+            let attachments = headers::attachments(&msg);
+            let date = match r[1] {
+                Value::Integer(t) => ymd_hm(t),
+                _ => "?".into(),
+            };
+            let (from, to) = (
+                store.first_header(*id, "from").await?,
+                store.first_header(*id, "to").await?,
+            );
+            if listing == Listing::Tsv {
+                let clean = |s: &str| s.replace(['\t', '\r', '\n'], " ");
+                writeln!(
+                    out,
+                    "{id}\t{date}\t{}\t{}\t{}\t{}\t{body_bytes}\t{attachments}",
+                    clean(&seen.folder()),
+                    clean(&from),
+                    clean(&to),
+                    clean(&text(&r[3]))
+                )?;
+            } else {
+                writeln!(out, "{id:>7}  {date}  {}", seen.folder())?;
+                writeln!(out, "         From: {from}")?;
+                writeln!(out, "         To:   {to}")?;
+                writeln!(out, "         {}", text(&r[3]))?;
+                writeln!(
+                    out,
+                    "         body {body_bytes} bytes, {attachments} attachment{}\n",
+                    if attachments == 1 { "" } else { "s" }
+                )?;
             }
         } else {
             let date = match r[1] {
@@ -1296,19 +1361,19 @@ async fn run(cli: Cli) -> Result<()> {
             filter,
             headers,
             raw,
+            long,
+            tsv,
             count,
             limit,
         } => {
-            search(
-                &store,
-                filter.build()?,
-                headers,
-                raw,
-                count,
-                limit,
-                &mut out,
-            )
-            .await?
+            let listing = match (headers, raw, long, tsv) {
+                (true, ..) => Listing::Headers,
+                (_, true, ..) => Listing::Raw,
+                (_, _, true, _) => Listing::Long,
+                (.., true) => Listing::Tsv,
+                _ => Listing::Summary,
+            };
+            search(&store, filter.build()?, listing, count, limit, &mut out).await?
         }
         Cmd::Top {
             name,
