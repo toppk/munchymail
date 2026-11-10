@@ -5,8 +5,17 @@ Roughly in priority order within each section. Phases refer to
 
 ## Agent search and read (phase 1)
 
-- [ ] Body text search: full-text index of decoded text bodies, tested
-      against real searches. Attachment text is a separate decision.
+- [ ] Text search over bodies and attachments, one full-text index tagged
+      by source (turso's `fts` feature, else Tantivy in `data/`), tested
+      against real searches. Slices: bodies and text-like parts; PDF text
+      layer (`pdftotext`) and office files (antiword/catdoc, LibreOffice
+      headless, pandoc); OCR (tesseract, `ocrmypdf` for scans; English) as
+      a background job. Extract once per part hash, record tool+version and
+      outcome; run extractors under `bwrap` (no network, time/memory caps,
+      LibreOffice macros off). Most zips here hold `.js`/`.wsf`/`.vbs`.
+- [ ] `read mN --attachment K`: extracted text (untrusted-wrapped) and a way
+      to save the original bytes.
+- [ ] 7z/rar member names (only zip is listed today); nested zips.
 - [ ] Move search/read behind a service (one process owns the database;
       the CLI over a Unix socket, later the web UI). `src/api.rs` is the
       layer it will wrap.
@@ -87,9 +96,8 @@ rows each updating four B-trees (table, PK, `header_name_nth_value`,
 
 ## Search and MIME (phase 3)
 
-- [ ] Full-text search over bodies.
 - [ ] Threading.
-- [ ] MIME structure and attachment indexing; duplicate-attachment reports.
+- [ ] Duplicate-attachment reports (`part.hash` is indexed).
 - [ ] Optional reversible MIME extraction (bodies as extents of literals and
       objects), declining anything malformed, signed or unusual.
 - [ ] IMAP import and export.

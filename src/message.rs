@@ -1,14 +1,113 @@
-//! Decoding one stored message for reading: text body, attachments, and
+//! Decoding one stored message for reading: text body, MIME parts, and
 //! sanitising mail-supplied text before it reaches a terminal or an agent.
 
-use mailparse::{DispositionType, ParsedMail};
+use std::io::Cursor;
 
+use mailparse::{DispositionType, ParsedMail};
+use sha2::{Digest, Sha256};
+
+/// Most file names listed from one zip.
+const MAX_MEMBERS: usize = 1000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// text/plain or text/html, not marked as a file: the message text.
+    Body,
+    /// Any other part not marked as a file, e.g. an image the HTML shows.
+    Inline,
+    /// Has a file name or `Content-Disposition: attachment`.
+    Attachment,
+}
+
+impl Kind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Body => "body",
+            Kind::Inline => "inline",
+            Kind::Attachment => "attachment",
+        }
+    }
+}
+
+/// One MIME leaf part.
 #[derive(Debug, Clone)]
-pub struct Attachment {
+pub struct Part {
+    pub kind: Kind,
     pub filename: Option<String>,
+    /// Content-Type as the sender declared it, lowercased.
     pub content_type: String,
+    /// Type recognised from the decoded bytes (magic numbers), if any.
+    pub detected: Option<&'static str>,
     /// Decoded size in bytes.
     pub size: usize,
+    pub sha256: [u8; 32],
+    /// File names in a zip, with uncompressed sizes; at most `MAX_MEMBERS`.
+    pub members: Vec<(String, u64)>,
+}
+
+impl Part {
+    /// Lowercased file name extension, without the dot.
+    pub fn ext(&self) -> Option<String> {
+        let name = self.filename.as_deref()?;
+        let (stem, ext) = name.rsplit_once('.')?;
+        (!stem.is_empty() && !ext.is_empty() && ext.len() <= 16).then(|| ext.to_ascii_lowercase())
+    }
+
+    /// The detected type, else the declared one.
+    pub fn file_type(&self) -> &str {
+        self.detected.unwrap_or(&self.content_type)
+    }
+}
+
+fn zip_members(bytes: &[u8]) -> Vec<(String, u64)> {
+    let Ok(mut z) = zip::ZipArchive::new(Cursor::new(bytes)) else {
+        return Vec::new();
+    };
+    (0..z.len().min(MAX_MEMBERS))
+        .filter_map(|i| {
+            let f = z.by_index_raw(i).ok()?;
+            let name = String::from_utf8_lossy(f.name_raw()).into_owned();
+            Some((name, f.size()))
+        })
+        .collect()
+}
+
+/// `infer`'s type, except where its test is too loose: it calls any
+/// `-----BEGIN` text and any data starting 30 82 (DER) a certificate.
+fn detect(bytes: &[u8]) -> Option<&'static str> {
+    let t = infer::get(bytes)?.mime_type();
+    if t != "application/x-x509-ca-cert" {
+        return Some(t);
+    }
+    let label = bytes.strip_prefix(b"-----BEGIN ")?;
+    Some(if label.starts_with(b"PGP SIGNATURE") {
+        "application/pgp-signature"
+    } else if label.starts_with(b"PGP PUBLIC KEY") {
+        "application/pgp-keys"
+    } else if label.starts_with(b"PGP MESSAGE") {
+        "application/pgp-encrypted"
+    } else if label.starts_with(b"CERTIFICATE") {
+        t
+    } else {
+        "application/x-pem-file"
+    })
+}
+
+fn part(p: &ParsedMail, kind: Kind, bytes: &[u8]) -> Part {
+    let detected = detect(bytes);
+    Part {
+        kind,
+        filename: filename(p),
+        content_type: p.ctype.mimetype.to_ascii_lowercase(),
+        detected,
+        size: bytes.len(),
+        sha256: Sha256::digest(bytes).into(),
+        members: if detected == Some("application/zip") {
+            zip_members(bytes)
+        } else {
+            Vec::new()
+        },
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +135,8 @@ impl TextSource {
 pub struct Decoded {
     pub text: String,
     pub text_source: TextSource,
-    pub attachments: Vec<Attachment>,
+    /// Every leaf part, in MIME order, the text body's included.
+    pub parts: Vec<Part>,
     /// Why the message (or a part of it) couldn't be decoded, if it couldn't.
     pub problem: Option<String>,
 }
@@ -56,27 +156,41 @@ fn filename(p: &ParsedMail) -> Option<String> {
         .cloned()
 }
 
+impl Decoded {
+    /// Parts other than the message text: files and inline parts.
+    pub fn attachments(&self) -> impl Iterator<Item = &Part> {
+        self.parts.iter().filter(|p| p.kind != Kind::Body)
+    }
+
+    /// Parts marked as files.
+    pub fn files(&self) -> usize {
+        self.parts
+            .iter()
+            .filter(|p| p.kind == Kind::Attachment)
+            .count()
+    }
+}
+
 struct Walk {
     plain: Option<String>,
     html: Option<String>,
-    attachments: Vec<Attachment>,
+    parts: Vec<Part>,
     problem: Option<String>,
 }
 
 fn walk(p: &ParsedMail, w: &mut Walk) {
     if p.subparts.is_empty() {
         let mime = p.ctype.mimetype.to_ascii_lowercase();
-        if is_attachment(p) {
-            w.attachments.push(Attachment {
-                filename: filename(p),
-                content_type: mime,
-                size: p.get_body_raw().map_or(0, |b| b.len()),
-            });
-            return;
-        }
-        let slot = match mime.as_str() {
-            "text/plain" => &mut w.plain,
-            "text/html" => &mut w.html,
+        let bytes = p.get_body_raw().unwrap_or_default();
+        let kind = match mime.as_str() {
+            _ if is_attachment(p) => Kind::Attachment,
+            "text/plain" | "text/html" => Kind::Body,
+            _ => Kind::Inline,
+        };
+        w.parts.push(part(p, kind, &bytes));
+        let slot = match (kind, mime.as_str()) {
+            (Kind::Body, "text/plain") => &mut w.plain,
+            (Kind::Body, "text/html") => &mut w.html,
             _ => return,
         };
         if slot.is_none() {
@@ -100,7 +214,7 @@ pub fn decode(raw: &[u8], body: &[u8]) -> Decoded {
             return Decoded {
                 text: String::from_utf8_lossy(body).into_owned(),
                 text_source: TextSource::Raw,
-                attachments: Vec::new(),
+                parts: Vec::new(),
                 problem: Some(format!("MIME parse failed: {e}")),
             };
         }
@@ -108,7 +222,7 @@ pub fn decode(raw: &[u8], body: &[u8]) -> Decoded {
     let mut w = Walk {
         plain: None,
         html: None,
-        attachments: Vec::new(),
+        parts: Vec::new(),
         problem: None,
     };
     walk(&parsed, &mut w);
@@ -120,7 +234,7 @@ pub fn decode(raw: &[u8], body: &[u8]) -> Decoded {
     Decoded {
         text: text.replace("\r\n", "\n"),
         text_source,
-        attachments: w.attachments,
+        parts: w.parts,
         problem: w.problem,
     }
 }
@@ -268,10 +382,49 @@ mod tests {
         let d = decode(m, b"");
         assert_eq!(d.text.trim(), "café");
         assert_eq!(d.text_source, TextSource::Plain);
-        assert_eq!(d.attachments.len(), 2);
-        assert_eq!(d.attachments[0].filename.as_deref(), Some("a.pdf"));
-        assert_eq!(d.attachments[0].size, 3);
-        assert_eq!(decode(b"Subject: x\n\nplain\n", b"").attachments.len(), 0);
+        let a: Vec<&Part> = d.attachments().collect();
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0].filename.as_deref(), Some("a.pdf"));
+        assert_eq!(a[0].ext().as_deref(), Some("pdf"));
+        assert_eq!(a[0].size, 3);
+        assert_eq!(d.parts[0].kind, Kind::Body);
+        assert_eq!(
+            decode(b"Subject: x\n\nplain\n", b"").attachments().count(),
+            0
+        );
+    }
+
+    #[test]
+    fn detects_content_and_lists_zips() {
+        use std::io::Write;
+        let mut z = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        z.start_file("dir/scan.pdf", opts).unwrap();
+        z.write_all(b"%PDF-1.4").unwrap();
+        let zip = z.finish().unwrap().into_inner();
+        let b64 = |b: &[u8]| data_encoding::BASE64.encode(b);
+        let m = format!(
+            "Content-Type: multipart/mixed; boundary=b\n\n--b\nContent-Type: text/plain\n\nhi\n\
+--b\nContent-Type: application/octet-stream; name=x.bin\nContent-Transfer-Encoding: base64\n\n{}\n\
+--b\nContent-Type: application/zip; name=a.zip\nContent-Transfer-Encoding: base64\n\n{}\n\
+--b\nContent-Type: image/png\nContent-ID: <logo>\n\nnot really a png\n--b--\n",
+            b64(b"%PDF-1.4 hello"),
+            b64(&zip)
+        );
+        let d = decode(m.as_bytes(), b"");
+        let a: Vec<&Part> = d.attachments().collect();
+        assert_eq!(a[0].content_type, "application/octet-stream");
+        assert_eq!(a[0].detected, Some("application/pdf"));
+        assert_eq!(a[0].file_type(), "application/pdf");
+        assert_eq!(a[1].members, [("dir/scan.pdf".to_string(), 8)]);
+        assert_eq!((a[2].kind, a[2].detected), (Kind::Inline, None));
+        assert_eq!(d.files(), 2);
+        assert_eq!(
+            detect(b"-----BEGIN PGP SIGNATURE-----\n"),
+            Some("application/pgp-signature")
+        );
+        assert_eq!(detect(b"\x30\x82\x01\x02 pkcs7"), None);
     }
 
     #[test]

@@ -182,6 +182,11 @@ pub struct Filter {
     /// (header name, regex) on decoded values, case-insensitive, like Sieve `header :regex`.
     pub regexes: Vec<(String, String)>,
     pub has: Vec<String>,
+    /// A non-body part of this type: extension, detected or declared MIME type,
+    /// or either half of one (`pdf`, `image`, `application/zip`).
+    pub attachments: Vec<String>,
+    /// Sieve pattern on a part's file name or a file name inside a zip part.
+    pub attachment_names: Vec<String>,
     pub folder: Option<String>,
     pub origin: Option<String>,
     /// Restrict origin/folder to each origin's latest import instead of any sighting ever.
@@ -239,6 +244,35 @@ impl Filter {
             sets.push(Set::Sql(
                 "SELECT artifact_id FROM header WHERE name = ?".to_string(),
                 vec![name.to_ascii_lowercase().into()],
+            ));
+        }
+        for t in &self.attachments {
+            let t = t.trim_start_matches('.').to_ascii_lowercase();
+            let halves = |c: &str| {
+                format!(
+                    "?1 = substr({c}, 1, instr({c}, '/') - 1) OR ?1 = substr({c}, instr({c}, '/') + 1)"
+                )
+            };
+            sets.push(Set::Sql(
+                format!(
+                    "SELECT a.artifact_id FROM part p JOIN artifact a ON a.msg_id = p.msg_id
+                     WHERE p.kind != 'body' AND (?1 IN (p.ext, p.detected_type, p.declared_type)
+                       OR {} OR {})",
+                    halves("p.detected_type"),
+                    halves("p.declared_type")
+                ),
+                vec![t.into()],
+            ));
+        }
+        for n in &self.attachment_names {
+            sets.push(Set::Sql(
+                "SELECT a.artifact_id FROM part p JOIN artifact a ON a.msg_id = p.msg_id
+                 WHERE p.filename LIKE ?1 ESCAPE '\\'
+                 UNION SELECT a.artifact_id FROM archive_member z
+                 JOIN part p ON p.hash = z.hash JOIN artifact a ON a.msg_id = p.msg_id
+                 WHERE z.name LIKE ?1 ESCAPE '\\'"
+                    .to_string(),
+                vec![sieve_to_like(n).into()],
             ));
         }
         if self.folder.is_some() || self.origin.is_some() || self.current {

@@ -15,11 +15,11 @@ use crate::util::hex;
 /// Objects at most this size live inline in SQLite.
 pub const INLINE_MAX: usize = 16 * 1024;
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// Upgrades from the previous version; index `i` brings version `i + 1` to `i + 2`.
 /// New tables and indexes need no entry: `SCHEMA` creates them if missing.
-const MIGRATIONS: [&str; 3] = [
+const MIGRATIONS: [&str; 4] = [
     "ALTER TABLE origin ADD COLUMN retired_at INTEGER",
     "",
     "ALTER TABLE artifact ADD COLUMN msg_id INTEGER;
@@ -28,6 +28,8 @@ const MIGRATIONS: [&str; 3] = [
      UPDATE artifact SET msg_id = (SELECT m.msg_id FROM message m
          WHERE m.body_hash = artifact.body_hash AND m.message_id IS artifact.message_id
            AND m.date IS artifact.date);",
+    "ALTER TABLE message ADD COLUMN parts_version INTEGER;
+     ALTER TABLE message ADD COLUMN parts_problem TEXT;",
 ];
 
 /// Indexes on columns a migration may have just added.
@@ -65,9 +67,39 @@ CREATE TABLE IF NOT EXISTS message (
     msg_id INTEGER PRIMARY KEY,
     body_hash BLOB NOT NULL,
     message_id TEXT,
-    date INTEGER
+    date INTEGER,
+    -- parts::VERSION that filled its `part` rows; NULL = not yet
+    parts_version INTEGER,
+    -- why its MIME structure didn't parse, if it didn't
+    parts_problem TEXT
 );
 CREATE INDEX IF NOT EXISTS message_body ON message (body_hash);
+
+-- Every MIME leaf part of a message (`munchymail index`).
+CREATE TABLE IF NOT EXISTS part (
+    msg_id INTEGER NOT NULL,
+    ordinal INTEGER NOT NULL,
+    -- body (message text), inline, or attachment (has a file name)
+    kind TEXT NOT NULL,
+    filename TEXT,
+    ext TEXT,
+    declared_type TEXT NOT NULL,
+    -- from the decoded bytes (magic numbers); NULL if not recognised
+    detected_type TEXT,
+    size INTEGER NOT NULL,
+    hash BLOB NOT NULL,
+    PRIMARY KEY (msg_id, ordinal)
+);
+CREATE INDEX IF NOT EXISTS part_hash ON part (hash);
+
+-- File names inside a zip part, by the part's hash.
+CREATE TABLE IF NOT EXISTS archive_member (
+    hash BLOB NOT NULL,
+    ordinal INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    PRIMARY KEY (hash, ordinal)
+);
 
 CREATE TABLE IF NOT EXISTS header (
     artifact_id INTEGER NOT NULL,
@@ -154,6 +186,29 @@ CREATE TABLE IF NOT EXISTS removal (
 CREATE INDEX IF NOT EXISTS removal_gone ON removal (gone_run);
 ";
 
+/// Whether `stmt` is `ALTER TABLE t ADD COLUMN c` for a column `t` already
+/// has: `SCHEMA` creates tables new to an old database in their latest shape.
+async fn adds_existing_column(conn: &Connection, stmt: &str) -> Result<bool> {
+    let words: Vec<&str> = stmt.split_whitespace().collect();
+    let [alter, table, t, add, column, c, ..] = words[..] else {
+        return Ok(false);
+    };
+    let is_add = [alter, table, add, column]
+        .iter()
+        .zip(["alter", "table", "add", "column"])
+        .all(|(w, k)| w.eq_ignore_ascii_case(k));
+    if !is_add {
+        return Ok(false);
+    }
+    let mut rows = conn.query(&format!("PRAGMA table_info({t})"), ()).await?;
+    while let Some(r) = rows.next().await? {
+        if r.get::<String>(1)?.eq_ignore_ascii_case(c) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub struct Store {
     _db: Database,
     pub conn: Connection,
@@ -191,8 +246,10 @@ impl Store {
                     );
                 };
                 for (i, sql) in MIGRATIONS.iter().enumerate().skip(found as usize - 1) {
-                    if !sql.is_empty() {
-                        conn.execute_batch(sql).await?;
+                    for stmt in sql.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+                        if !adds_existing_column(&conn, stmt).await? {
+                            conn.execute(stmt, ()).await?;
+                        }
                     }
                     info!(to = i + 2, "migrated schema");
                 }

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use turso::Value;
 
@@ -19,7 +19,7 @@ use munchymail::query::{Filter, sieve_to_like};
 use munchymail::report::{self, Key};
 use munchymail::store::{Store, now};
 use munchymail::util::{hex, ymd, ymd_hm};
-use munchymail::{api, export, mbox, source};
+use munchymail::{api, export, mbox, parts, source};
 
 #[derive(Parser)]
 #[command(
@@ -169,6 +169,22 @@ enum Cmd {
         #[arg(long)]
         title: Option<String>,
     },
+    /// MIME parts of matching messages by type, most common first: what
+    /// senders declared, what the bytes are (magic numbers), or where they differ.
+    Attachments {
+        #[command(flatten)]
+        filter: FilterArgs,
+        #[arg(long = "by", value_enum, default_value = "type")]
+        by: parts::Key,
+        /// Include the message text parts (text/plain, text/html).
+        #[arg(long)]
+        all_parts: bool,
+        /// Maximum groups listed.
+        #[arg(short = 'n', long, default_value_t = 30)]
+        limit: usize,
+    },
+    /// Bring derived indexes (MIME parts) up to date; `import` does this too.
+    Index,
     /// Corpus counts.
     Stats,
     /// Run SQL against the index and print rows tab-separated.
@@ -297,6 +313,13 @@ struct FilterArgs {
     /// Any address in To.
     #[arg(long, value_name = "PATTERN")]
     to: Option<String>,
+    /// A part (not the message text) of this type: extension, detected or
+    /// declared MIME type, or half of one, e.g. pdf, zip, image; repeatable.
+    #[arg(long, value_name = "TYPE")]
+    attachment: Vec<String>,
+    /// A part's file name, or a file name inside a zip part, e.g. '*.xlsx'; repeatable.
+    #[arg(long, value_name = "PATTERN")]
+    attachment_name: Vec<String>,
     /// Any address in From, Sender, Reply-To, To, Cc or Bcc; repeatable (all must match).
     #[arg(long, value_name = "PATTERN")]
     participant: Vec<String>,
@@ -351,6 +374,8 @@ impl FilterArgs {
             participants: self.participant,
             regexes,
             has: self.has,
+            attachments: self.attachment,
+            attachment_names: self.attachment_name,
             folder: self.folder,
             origin: self.origin,
             current: self.current,
@@ -511,6 +536,7 @@ async fn search(
     after: Option<&str>,
     out: &mut impl Write,
 ) -> Result<()> {
+    warn_unindexed(store, &filter).await?;
     if let Listing::Long | Listing::Tsv | Listing::Json = listing {
         let (hits, next) = api::search(store, &filter, unique, limit, after).await?;
         if listing == Listing::Tsv {
@@ -654,15 +680,23 @@ async fn read(store: &Store, r: api::Ref, json: bool, out: &mut impl Write) -> R
             ymd(l.last_seen)
         )?;
     }
-    for (i, a) in m.decoded.attachments.iter().enumerate() {
+    for (i, a) in m.decoded.attachments().enumerate() {
+        let declared = sanitize(&a.content_type);
+        let kind = match a.detected {
+            Some(d) if d != declared => format!("{d}, declared {declared}"),
+            _ => declared,
+        };
         writeln!(
             out,
-            "  attachment {}: {} ({}, {} bytes)",
+            "  {} {}: {} ({kind}, {} bytes)",
+            a.kind.as_str(),
             i + 1,
             sanitize(a.filename.as_deref().unwrap_or("(no name)")),
-            sanitize(&a.content_type),
             a.size
         )?;
+        for (name, size) in &a.members {
+            writeln!(out, "      {} ({size} bytes)", sanitize(name))?;
+        }
     }
     if let Some(p) = &m.decoded.problem {
         writeln!(out, "  problem: {p}")?;
@@ -685,6 +719,70 @@ async fn read(store: &Store, r: api::Ref, json: bool, out: &mut impl Write) -> R
     let body = sanitize(&m.decoded.text);
     writeln!(out, "{}", body.trim_end())?;
     writeln!(out, "<<<end untrusted mail {}>>>", m.nonce)?;
+    Ok(())
+}
+
+async fn index(store: &Store) -> Result<()> {
+    let t = Instant::now();
+    let s = parts::index(store).await?;
+    info!(
+        messages = s.messages,
+        parts = s.parts,
+        unparsable = s.problems,
+        elapsed = ?t.elapsed(),
+        "parts indexed"
+    );
+    Ok(())
+}
+
+/// Warn when part filters would miss messages `index` hasn't reached.
+async fn warn_unindexed(store: &Store, filter: &Filter) -> Result<()> {
+    if filter.attachments.is_empty() && filter.attachment_names.is_empty() {
+        return Ok(());
+    }
+    let n = parts::pending(store).await?;
+    if n > 0 {
+        warn!("{n} messages have no part index yet; run `munchymail index`");
+    }
+    Ok(())
+}
+
+async fn attachments(
+    store: &Store,
+    filter: Filter,
+    by: parts::Key,
+    all: bool,
+    limit: usize,
+    out: &mut impl Write,
+) -> Result<()> {
+    let n = parts::pending(store).await?;
+    if n > 0 {
+        warn!("{n} messages have no part index yet; run `munchymail index`");
+    }
+    let set = filter.materialize(&store.conn).await?;
+    let groups = parts::report(store, set, by, all).await?;
+    writeln!(out, "{:>8} {:>8} {:>10}  type", "parts", "messages", "MiB")?;
+    for g in groups.iter().take(limit) {
+        writeln!(
+            out,
+            "{:>8} {:>8} {:>10.1}  {}",
+            g.parts,
+            g.messages,
+            g.bytes as f64 / (1 << 20) as f64,
+            sanitize(&g.key)
+        )?;
+    }
+    if groups.len() > limit {
+        let rest = &groups[limit..];
+        writeln!(
+            out,
+            "{:>8} {:>8} {:>10.1}  ({} more types)",
+            rest.iter().map(|g| g.parts).sum::<u64>(),
+            "",
+            rest.iter().map(|g| g.bytes).sum::<u64>() as f64 / (1 << 20) as f64,
+            rest.len()
+        )?;
+    }
     Ok(())
 }
 
@@ -1443,6 +1541,7 @@ async fn run(cli: Cli) -> Result<()> {
             | Cmd::Show { .. }
             | Cmd::Read { .. }
             | Cmd::Export { .. }
+            | Cmd::Attachments { .. }
             | Cmd::Stats
             | Cmd::Removals { .. }
             | Cmd::Changes { record: false, .. }
@@ -1484,10 +1583,21 @@ async fn run(cli: Cli) -> Result<()> {
                 changes::record_since_previous(&store, imp.origin_id, imp.run_id).await?;
                 info!(elapsed = ?t.elapsed(), "removals recorded");
             }
+            index(&store).await?;
             let t = Instant::now();
             store.checkpoint().await?;
             info!(elapsed = ?t.elapsed(), "wal checkpoint");
         }
+        Cmd::Index => {
+            index(&store).await?;
+            store.checkpoint().await?;
+        }
+        Cmd::Attachments {
+            filter,
+            by,
+            all_parts,
+            limit,
+        } => attachments(&store, filter.build()?, by, all_parts, limit, &mut out).await?,
         Cmd::Search {
             filter,
             headers,
@@ -1586,15 +1696,9 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             };
             let title = title.unwrap_or_else(|| name.clone());
-            let s = export::write(
-                &store,
-                &filter.build()?,
-                &name,
-                &title,
-                &command_line(),
-                &path,
-            )
-            .await?;
+            let filter = filter.build()?;
+            warn_unindexed(&store, &filter).await?;
+            let s = export::write(&store, &filter, &name, &title, &command_line(), &path).await?;
             writeln!(
                 out,
                 "wrote {}: {} messages ({} duplicate copies left out)",

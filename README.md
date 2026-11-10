@@ -38,6 +38,8 @@ An origin is a directory tree (walked; dot-entries like Dovecot's `.imap`
 are skipped) or a single mbox file. Files that don't start with a valid
 `From ` line are skipped. Import is idempotent: unchanged files are
 recognised by hash and only get a new sighting, so re-running is cheap.
+Import ends by indexing the MIME parts of new messages (`munchymail index`
+does only that step; the whole archive takes about 20 s).
 
 Every import is kept as a run, so each re-import adds a generation:
 earlier snapshots of a file stay queryable (`--current` selects only the
@@ -78,8 +80,8 @@ INFO munchymail::source: read under fcntl read lock path=/var/mail/me/INBOX
 
 ## Filters
 
-`search`, `report`, `profile`, `top`, `names` and `export` share these; all
-given must match:
+`search`, `report`, `profile`, `top`, `names`, `attachments` and `export`
+share these; all given must match:
 
 | Option | Matches |
 |---|---|
@@ -89,6 +91,8 @@ given must match:
 | `--participant PATTERN` | any address in From, Sender, Reply-To, To, Cc or Bcc: mail sent or received by someone (repeatable) |
 | `--subject PATTERN` | same as `-H subject:PATTERN` |
 | `--has NAME` | header present (repeatable) |
+| `--attachment TYPE` | a part other than the message text of this type: file extension, MIME type detected from its bytes or declared by the sender, or either half of one, exact and case-insensitive: `pdf`, `zip`, `image`, `application/pdf` (repeatable) |
+| `--attachment-name PATTERN` | a part's file name, or a file name inside a zip part, e.g. `'*.xlsx'` (repeatable) |
 | `--origin LABEL` | found in that origin |
 | `--folder PATTERN` | found at a matching path inside an origin, ever, e.g. `'lists/*'` |
 | `--current` | restrict `--origin`/`--folder` to each origin's latest import (where mail is now), not any past sighting; retired origins are left out unless named by `--origin` |
@@ -224,14 +228,34 @@ copy; `copies` lists the copy ids.
 
 The text body is the first `text/plain` part, decoded (transfer encoding
 and charset); without one, `text/html` converted to plain text
-(`text_source` says which). Attachments are parts with a file name or
-`Content-Disposition: attachment`, with decoded sizes. A message whose MIME
+(`text_source` says which). Every other part is listed: `attachment` (has a
+file name or `Content-Disposition: attachment`) or `inline` (e.g. an image
+the HTML shows), with decoded size, the type found in its bytes when it
+differs from the declared one, and the file names inside a zip. A message whose MIME
 structure doesn't parse is still shown, from its raw body, with a
 `problem`. The text form puts the mail between `<<<untrusted mail N>>>` and
 `<<<end untrusted mail N>>>`, where N comes from the SHA-256 of the whole
 message (including headers our server added), so a sender can't forge the
 end marker. A message that left every folder stays readable; its
 locations say `was`. `show --raw` gives the exact bytes.
+
+### attachments: MIME parts by type
+
+```
+munchymail attachments                       # most common types of non-text parts
+munchymail attachments --all-parts           # including text/plain and text/html bodies
+munchymail attachments --by mismatch         # declared type -> type the bytes are
+munchymail attachments --by ext --since 2024-01-01
+munchymail search --attachment pdf --unique  # messages with a PDF, however declared
+munchymail search --attachment-name '*.js'   # e.g. scripts inside zips
+```
+
+Counts parts, messages and decoded MiB per key: `type` (detected, else
+declared; the default), `declared`, `detected`, `ext`, or `mismatch`. Types
+are detected by magic numbers (`infer`), except that PEM text and DER data
+are only called certificates when they are (PGP armour is named as such).
+The index is in `part` and `archive_member`; until `index` has run on a
+message, `--attachment*` filters miss it and a warning says so.
 
 ### Messages and copies
 
