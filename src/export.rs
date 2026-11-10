@@ -12,8 +12,8 @@ use flate2::write::GzEncoder;
 use sha2::{Digest, Sha256};
 use turso::Value;
 
+use crate::locations::{self, Location, Sightings};
 use crate::query::Filter;
-use crate::seen::{Seen, Sightings};
 use crate::store::{Store, now};
 use crate::util::{hex, ymd, ymd_hm};
 
@@ -94,20 +94,22 @@ pub async fn write(
     }
 
     let mut sightings = Sightings::new(store).await?;
-    // (body hash, Message-ID) -> where seen, and (last run, index) of each copy.
-    type Group = (Seen, Vec<(i64, usize)>);
+    // (body hash, Message-ID) -> where seen, and (last seen, index) of each copy.
+    type Group = (Vec<Location>, Vec<(i64, usize)>);
     let mut groups: HashMap<(Vec<u8>, Option<String>), Group> = HashMap::new();
     for (i, a) in artifacts.iter().enumerate() {
         let (seen, members) = groups
             .entry((a.body_hash.clone(), a.message_id.clone()))
             .or_default();
-        let last = sightings.add(a.id, seen).await?;
+        let locs = sightings.of(a.id).await?;
+        let last = locs.iter().map(|l| l.last_seen).max().unwrap_or(0);
+        locations::merge(seen, locs);
         members.push((last, i));
     }
 
     // One representative per message, in date order.
     let folded = artifacts.len() - groups.len();
-    let mut chosen: Vec<(&Artifact, Seen)> = groups
+    let mut chosen: Vec<(&Artifact, Vec<Location>)> = groups
         .into_values()
         .map(|(seen, members)| {
             let &(_, i) = members
@@ -156,7 +158,7 @@ pub async fn write(
             cell(&store.first_header(a.id, "from").await?),
             cell(&store.first_header(a.id, "to").await?),
             cell(&a.subject),
-            cell(&seen.folder())
+            cell(&locations::folder(seen))
         )?;
     }
 

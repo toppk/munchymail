@@ -40,6 +40,18 @@ pub fn ymd_hm(epoch: i64) -> String {
     format!("{} {:02}:{:02}", ymd(epoch), s / 3600, s % 3600 / 60)
 }
 
+/// RFC 3339 UTC, e.g. `2026-10-22T15:46:21Z`.
+pub fn iso(epoch: i64) -> String {
+    let s = epoch.rem_euclid(86_400);
+    format!(
+        "{}T{:02}:{:02}:{:02}Z",
+        ymd(epoch),
+        s / 3600,
+        s % 3600 / 60,
+        s % 60
+    )
+}
+
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -55,6 +67,7 @@ mod tests {
         assert_eq!(ymd(1_005_345_232), "2001-11-09");
         assert_eq!(ymd(-1), "1969-12-31");
         assert_eq!(ymd_hm(1_005_345_232), "2001-11-09 22:33");
+        assert_eq!(iso(1_005_345_232), "2001-11-09T22:33:52Z");
         assert_eq!(parse_ymd("2001-13-01"), None);
     }
 }

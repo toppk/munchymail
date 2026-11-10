@@ -3,6 +3,18 @@
 Roughly in priority order within each section. Phases refer to
 `docs/design.md`.
 
+## Agent search and read (phase 1)
+
+- [ ] Message-level IDs: a `message` table (body hash + Message-ID) filled
+      at import, so IDs survive Dovecot rewriting `Status`; copy IDs stay.
+      Test missing and reused Message-IDs, the same body under another
+      Message-ID, and the same body and ID with materially different headers.
+- [ ] Body text search: full-text index of decoded text bodies, tested
+      against real searches. Attachment text is a separate decision.
+- [ ] Move search/read behind a service (one process owns the database;
+      the CLI over a Unix socket, later the web UI). `src/api.rs` is the
+      layer it will wrap.
+
 ## Sieve rule work (current use)
 
 - [ ] Negated filters (`--not-header`, `--not-from`, …) so a profile can be

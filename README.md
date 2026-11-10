@@ -116,6 +116,7 @@ munchymail search -R 'list-id:^widgets/' --headers -n 3     # raw header blocks
 munchymail search --has list-unsubscribe --raw -n 1        # whole raw messages
 munchymail search --participant '*@corp.example' --long     # folder, From, To, size, attachments
 munchymail search --participant '*@corp.example' --tsv -n 1000 > corp.tsv
+munchymail search --participant '*@corp.example' --unique --json -n 20   # for agents
 ```
 
 Output is `id  date  from  subject`, newest first. The id is what `show`
@@ -127,6 +128,19 @@ columns. Folder is per stored copy: a copy whose headers Dovecot later
 rewrote shows as gone, next to its current copy; `--unique` lists each
 message once (its newest copy), as `export` counts them, and `--current`
 leaves out copies no longer in any folder.
+
+Results come in pages of `-n` (1 to 1000, default 50), newest first by
+`Date:` with ties broken by id, so pages are stable. When there are more,
+the next cursor is logged to stderr (`more results: add --after CURSOR`).
+`--json` prints JSON Lines: one `{"type":"message",...}` record per message
+(id, date, Message-ID, From, To, subject, a 160-character snippet of the
+text body, body size, attachment count, `locations`, `problem` if it didn't
+decode, `"untrusted": true`), then `{"type":"page","returned":N,"next":CURSOR
+or null}`. Each location has `origin`, `path`, `current`, `first_seen`,
+`last_seen` and `origin_last_import`, so a reader can tell how fresh the
+answer is and that a copy has left a folder. Text from mail has control
+characters and bidi overrides replaced in every output form except
+`--headers`/`--raw`.
 
 ### report: grouped counts with percentages
 
@@ -193,6 +207,24 @@ munchymail names --origin inbox --like 'list-*'    # header names, by messages c
 ```
 
 Both print counts and percentages of the matching messages.
+
+### read: one message, decoded
+
+```
+munchymail read ID              # locations, attachments, then headers and text body
+munchymail read ID --json       # one object: all decoded headers, text, attachments, locations
+```
+
+The text body is the first `text/plain` part, decoded (transfer encoding
+and charset); without one, `text/html` converted to plain text
+(`text_source` says which). Attachments are parts with a file name or
+`Content-Disposition: attachment`, with decoded sizes. A message whose MIME
+structure doesn't parse is still shown, from its raw body, with a
+`problem`. The text form puts the mail between `<<<untrusted mail N>>>` and
+`<<<end untrusted mail N>>>`, where N comes from the SHA-256 of the whole
+message (including headers our server added), so a sender can't forge the
+end marker. A message that left every folder stays readable; its
+locations say `was`. `show --raw` gives the exact bytes.
 
 ### show: one message
 
