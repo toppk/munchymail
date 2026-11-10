@@ -254,6 +254,8 @@ enum OriginCmd {
         #[arg(long)]
         undo: bool,
     },
+    /// Point an origin at its new path after the files were moved; history is kept.
+    Move { label: String, root: PathBuf },
     /// List origins and when each was last imported.
     List,
 }
@@ -399,6 +401,27 @@ async fn origin(store: &Store, cmd: OriginCmd, out: &mut impl Write) -> Result<(
                 .with_context(|| format!("adding origin {label:?}"))?;
             store.commit().await?;
             writeln!(out, "added origin {label} -> {}", root.display())?;
+        }
+        OriginCmd::Move { label, root } => {
+            let root = root
+                .canonicalize()
+                .with_context(|| format!("resolving {}", root.display()))?;
+            if root.starts_with(store.data_dir.canonicalize()?) {
+                bail!("origin {} is inside the data directory", root.display());
+            }
+            store.begin().await?;
+            let n = store
+                .conn
+                .execute(
+                    "UPDATE origin SET root = ?1 WHERE label = ?2",
+                    (root.to_string_lossy().as_ref(), label.as_str()),
+                )
+                .await?;
+            store.commit().await?;
+            if n == 0 {
+                bail!("no origin labelled {label:?}");
+            }
+            writeln!(out, "origin {label} -> {}", root.display())?;
         }
         OriginCmd::Retire { label, undo } => {
             store.begin().await?;

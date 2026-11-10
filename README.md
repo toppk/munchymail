@@ -60,6 +60,13 @@ A retired origin is skipped by `import`, refused when named, and ignored by
 (`lists/github-project`) stay the same across such a move, so `--folder`
 matches old and new runs; the old single-file INBOX was recorded as `me`.
 
+When the same files only change place (e.g. a backup filed under
+`~/mail-backups/`), keep the origin and repoint it instead:
+
+```
+munchymail origin move spool-2021-07 ~/mail-backups/spool-2021-07-07/me
+```
+
 Global options: `--data DIR` (or `MUNCHYMAIL_DATA`, default `data`).
 Logs go to stderr; `MUNCHYMAIL_LOG=munchymail=debug` for more. Each file
 read logs how long its lock was waited for and held:
