@@ -70,8 +70,8 @@ enum Cmd {
         /// Continue after this cursor (from `next`, or the hint on stderr).
         #[arg(long, value_name = "CURSOR")]
         after: Option<String>,
-        /// One row per message: copies with the same body and Message-ID (e.g.
-        /// before and after Dovecot rewrote Status) count once, as in `export`.
+        /// One row per message: copies with the same body, Message-ID and Date
+        /// (e.g. before and after Dovecot rewrote Status) count once, as in `export`.
         #[arg(long)]
         unique: bool,
         /// Print only the number of matches.
@@ -85,8 +85,8 @@ enum Cmd {
     ///
     /// Mail text is marked as untrusted; control characters are replaced.
     Read {
-        /// Message id, as listed by `search`.
-        id: i64,
+        /// Message id (m1234, kept across header rewrites) or copy id (227617).
+        id: api::Ref,
         /// One JSON object, including every decoded header.
         #[arg(long)]
         json: bool,
@@ -156,7 +156,7 @@ enum Cmd {
     /// Write matching messages to data/exports/NAME.tgz for someone to keep:
     /// NAME/index.md (a table of the messages) and NAME/maildir/001, 002, ...
     ///
-    /// Copies with the same body and Message-ID are exported once.
+    /// Copies of one message (same body, Message-ID and Date) are exported once.
     Export {
         /// Name of the export and of the directory it unpacks to.
         name: String,
@@ -516,7 +516,7 @@ async fn search(
         if listing == Listing::Tsv {
             writeln!(
                 out,
-                "id\tdate\tfolder\tfrom\tto\tsubject\tbody_bytes\tattachments"
+                "id\tmessage\tdate\tfolder\tfrom\tto\tsubject\tbody_bytes\tattachments"
             )?;
         }
         for h in &hits {
@@ -528,8 +528,9 @@ async fn search(
                     let clean = |s: &str| sanitize(s).replace(['\t', '\n'], " ");
                     writeln!(
                         out,
-                        "{}\t{date}\t{}\t{}\t{}\t{}\t{}\t{}",
+                        "{}\tm{}\t{date}\t{}\t{}\t{}\t{}\t{}\t{}",
                         h.id,
+                        h.msg,
                         clean(&folder),
                         clean(&h.from),
                         clean(&h.to),
@@ -546,7 +547,8 @@ async fn search(
                     writeln!(out, "         {}", one(&h.subject))?;
                     writeln!(
                         out,
-                        "         body {} bytes, {} attachment{}\n",
+                        "         message m{}, body {} bytes, {} attachment{}\n",
+                        h.msg,
                         h.body_bytes,
                         h.attachments,
                         if h.attachments == 1 { "" } else { "s" }
@@ -606,8 +608,9 @@ async fn search(
     Ok(())
 }
 
-async fn read(store: &Store, id: i64, json: bool, out: &mut impl Write) -> Result<()> {
-    let m = api::read(store, id).await?;
+async fn read(store: &Store, r: api::Ref, json: bool, out: &mut impl Write) -> Result<()> {
+    let m = api::read(store, r).await?;
+    let id = m.id;
     if json {
         writeln!(out, "{}", m.to_json())?;
         return Ok(());
@@ -617,9 +620,18 @@ async fn read(store: &Store, id: i64, json: bool, out: &mut impl Write) -> Resul
         .map_or("no date".into(), |t| format!("{} UTC", ymd_hm(t)));
     writeln!(
         out,
-        "message {id}, {date}, {} bytes (exact bytes: munchymail show {id} --raw)",
+        "message m{}, {date}, copy {id} of {}, {} bytes (exact bytes: munchymail show {id} --raw)",
+        m.msg,
+        m.copies.len(),
         m.raw_bytes
     )?;
+    if let api::Ref::Copy(_) = r {
+        writeln!(
+            out,
+            "  places of this copy; all copies: munchymail read m{}",
+            m.msg
+        )?;
+    }
     for l in &m.locations {
         let state = if l.current { "now" } else { "was" };
         let absent = match l.origin_last_import {

@@ -61,6 +61,9 @@ struct Stmts {
     ins_object: Statement,
     ins_artifact: Statement,
     sel_artifact: Statement,
+    sel_message: Statement,
+    ins_message: Statement,
+    set_message: Statement,
     ins_header: Statement,
     ins_observation: Statement,
     ins_sighting: Statement,
@@ -96,6 +99,18 @@ impl Stmts {
                 .await?,
             sel_artifact: c
                 .prepare("SELECT artifact_id FROM artifact WHERE header_hash = ?1 AND body_hash = ?2")
+                .await?,
+            sel_message: c
+                .prepare(
+                    "SELECT msg_id FROM message
+                     WHERE body_hash = ?1 AND message_id IS ?2 AND date IS ?3",
+                )
+                .await?,
+            ins_message: c
+                .prepare("INSERT INTO message (body_hash, message_id, date) VALUES (?1, ?2, ?3)")
+                .await?,
+            set_message: c
+                .prepare("UPDATE artifact SET msg_id = ?1 WHERE artifact_id = ?2")
                 .await?,
             ins_header: c
                 .prepare("INSERT INTO header (artifact_id, ordinal, name, nth, value) VALUES (?1, ?2, ?3, ?4, ?5)")
@@ -347,6 +362,8 @@ impl<'a> Importer<'a> {
             let artifact_id = if inserted == 1 {
                 new_artifacts += 1;
                 let id = self.store.conn.last_insert_rowid();
+                let msg = self.message(&p.body_hash, s).await?;
+                self.stmts.set_message.execute((msg, id)).await?;
                 let mut seen: HashMap<&str, i64> = HashMap::new();
                 for (i, f) in p.fields.iter().enumerate() {
                     let nth = seen.entry(f.name.as_str()).or_default();
@@ -392,6 +409,17 @@ impl<'a> Importer<'a> {
             "imported content"
         );
         Ok(content_id)
+    }
+
+    async fn message(&mut self, body_hash: &Hash, s: &Summary) -> Result<i64> {
+        let key = (body_hash.to_vec(), s.message_id.clone(), s.date);
+        let mut rows = self.stmts.sel_message.query(key.clone()).await?;
+        if let Some(r) = rows.next().await? {
+            return Ok(r.get(0)?);
+        }
+        drop(rows);
+        self.stmts.ins_message.execute(key).await?;
+        Ok(self.store.conn.last_insert_rowid())
     }
 
     async fn put_object(&mut self, hash: &Hash, bytes: &[u8]) -> Result<()> {

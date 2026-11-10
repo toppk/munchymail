@@ -8,7 +8,8 @@ Schema in `src/store.rs`; everything lives in `data/` (`MUNCHYMAIL_DATA` or
 | Table | Holds |
 |---|---|
 | `object` | SHA-256 → bytes. `inline_bytes` NULL means `data/content/aa/<hash>` (objects > 16 KiB). |
-| `artifact` | One exact message: `header_hash`, `body_hash`, plus `date`, `sender`, `subject`, `message_id` for listing. |
+| `artifact` | One exact stored copy: `header_hash`, `body_hash`, plus `date`, `sender`, `subject`, `message_id` for listing, and `msg_id`. |
+| `message` | One email however many copies were stored: `body_hash`, `message_id` and `date` (NULLs compared with `IS`), set at import when a new artifact is stored. |
 | `header` | Derived: per artifact, ordered fields; `name` lowercased, `value` unfolded and RFC 2047-decoded; `nth` = occurrence of that name in the message (0 = first, i.e. Sieve `:index` − 1). |
 | `origin` | Registered roots (directory tree or single mbox file); `retired_at` set by `origin retire`. |
 | `import_run` | One per origin per `import`. |
@@ -17,10 +18,12 @@ Schema in `src/store.rs`; everything lives in `data/` (`MUNCHYMAIL_DATA` or
 | `observation` | Artifact at byte `offset` in a content, with its `From ` line and separator bytes. |
 | `removal` | A copy last seen at `path` in `last_seen_run` and absent in `gone_run`; `moved_to` is where it turned up, NULL if nowhere new. Filled by `import` (per origin) and `changes --record`. |
 
-`meta.schema_version` is 3. Opening an older database upgrades it in the
+`meta.schema_version` is 4. Opening an older database upgrades it in the
 opening transaction (`MIGRATIONS` in `store.rs`: 1 → 2 adds
 `origin.retired_at`; 2 → 3 adds `removal` and `file_sighting_run`, which
-`SCHEMA` creates); a newer or unknown version refuses to open.
+`SCHEMA` creates; 3 → 4 adds `artifact.msg_id` and fills `message` from
+existing artifacts, about 2 s for 262k; `LATE_SCHEMA` then indexes it); a
+newer or unknown version refuses to open.
 
 ## Performance rules
 

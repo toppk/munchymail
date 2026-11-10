@@ -1,6 +1,6 @@
 use std::fs;
 
-use munchymail::api;
+use munchymail::api::{self, Ref};
 use munchymail::import::Importer;
 use munchymail::query::Filter;
 use munchymail::store::Store;
@@ -66,14 +66,14 @@ async fn scenario(dir: &std::path::Path) {
         .run()
         .await
         .unwrap();
-    let m = api::read(&store, a).await.unwrap();
+    let m = api::read(&store, Ref::Copy(a)).await.unwrap();
     assert_eq!(m.decoded.text.trim(), "first");
     assert_eq!(m.locations.len(), 1);
     assert!(!m.locations[0].current);
     assert!(m.locations[0].origin_last_import >= Some(m.locations[0].last_seen));
-    let b = api::read(&store, p1[1].id).await.unwrap();
+    let b = api::read(&store, Ref::Copy(p1[1].id)).await.unwrap();
     assert!(b.locations[0].current);
-    assert!(api::read(&store, 999_999).await.is_err());
+    assert!(api::read(&store, Ref::Copy(999_999)).await.is_err());
 }
 
 #[test]

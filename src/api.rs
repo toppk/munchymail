@@ -3,12 +3,15 @@
 //! message is sender-controlled, so records carry `"untrusted": true` and
 //! strings are passed through `message::sanitize`.
 
+use std::fmt;
+use std::str::FromStr;
+
 use anyhow::{Context, Result, bail};
 use serde_json::{Value as Json, json};
 use turso::Value;
 
 use crate::headers::{self, Field};
-use crate::locations::{Location, Sightings};
+use crate::locations::{self, Location, Sightings};
 use crate::message::{self, Decoded, sanitize};
 use crate::query::{Filter, fold_copies};
 use crate::store::Store;
@@ -16,6 +19,34 @@ use crate::util::{hex, iso};
 use sha2::{Digest, Sha256};
 
 pub const MAX_LIMIT: usize = 1000;
+
+/// What `read` takes: a message (`m123`), which keeps its id when the mail
+/// server rewrites headers, or one stored copy (`123`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Ref {
+    Message(i64),
+    Copy(i64),
+}
+
+impl FromStr for Ref {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Ref, String> {
+        let bad = || format!("{s:?}: want a message id like m1234 or a copy id like 227617");
+        match s.strip_prefix('m') {
+            Some(n) => n.parse().map(Ref::Message).map_err(|_| bad()),
+            None => s.parse().map(Ref::Copy).map_err(|_| bad()),
+        }
+    }
+}
+
+impl fmt::Display for Ref {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Ref::Message(n) => write!(f, "m{n}"),
+            Ref::Copy(n) => write!(f, "{n}"),
+        }
+    }
+}
 
 /// Sort key for a missing Date header: after every dated message.
 const NO_DATE: i64 = i64::MIN;
@@ -98,6 +129,7 @@ fn parse_cursor(c: &str) -> Result<(i64, i64)> {
 
 pub struct Hit {
     pub id: i64,
+    pub msg: i64,
     pub date: Option<i64>,
     pub message_id: Option<String>,
     pub from: String,
@@ -106,11 +138,13 @@ pub struct Hit {
     pub body_bytes: usize,
     pub attachments: usize,
     pub snippet: String,
+    /// This copy's places, or with `unique` those of every copy of the message.
     pub locations: Vec<Location>,
     pub problem: Option<String>,
 }
 
 struct Stored {
+    msg: i64,
     date: Option<i64>,
     message_id: Option<String>,
     subject: String,
@@ -123,23 +157,26 @@ async fn load(store: &Store, id: i64) -> Result<Stored> {
     let mut rows = store
         .conn
         .query(
-            "SELECT date, message_id, subject, header_hash, body_hash FROM artifact WHERE artifact_id = ?1",
+            "SELECT date, message_id, subject, header_hash, body_hash, msg_id
+             FROM artifact WHERE artifact_id = ?1",
             (id,),
         )
         .await?;
     let Some(r) = rows.next().await? else {
-        bail!("no message {id}")
+        bail!("no stored copy {id}; `search` lists ids")
     };
     let (Value::Blob(h), Value::Blob(b)) = (r.get_value(3)?, r.get_value(4)?) else {
         bail!("bad hashes for {id}")
     };
     let (date, message_id, subject) = (r.get(0)?, r.get(1)?, r.get::<Option<String>>(2)?);
+    let msg = r.get(5)?;
     drop(rows);
     let mut raw = store.object(&h).await?;
     let body = store.object(&b).await?;
     raw.extend_from_slice(&body);
     let decoded = message::decode(&raw, &body);
     Ok(Stored {
+        msg,
         date,
         message_id,
         subject: subject.unwrap_or_default(),
@@ -147,6 +184,39 @@ async fn load(store: &Store, id: i64) -> Result<Stored> {
         raw,
         decoded,
     })
+}
+
+/// Every stored copy of message `msg`, the one seen most recently (then the
+/// newest stored), and the places of all of them.
+async fn message_copies(
+    store: &Store,
+    sightings: &mut Sightings,
+    msg: i64,
+) -> Result<(Vec<i64>, i64, Vec<Location>)> {
+    let mut rows = store
+        .conn
+        .query(
+            "SELECT artifact_id FROM artifact WHERE msg_id = ?1 ORDER BY artifact_id",
+            (msg,),
+        )
+        .await?;
+    let mut ids = Vec::new();
+    while let Some(r) = rows.next().await? {
+        ids.push(r.get::<i64>(0)?);
+    }
+    drop(rows);
+    let mut all = Vec::new();
+    let mut best = None;
+    for &id in &ids {
+        let locs = sightings.of(id).await?;
+        let key = (locs.iter().map(|l| l.last_seen).max().unwrap_or(0), id);
+        best = best.max(Some(key));
+        locations::merge(&mut all, locs);
+    }
+    let Some((_, chosen)) = best else {
+        bail!("no message m{msg}; `search --json` lists message ids")
+    };
+    Ok((ids, chosen, all))
 }
 
 /// One page of matching messages, with locations and a snippet each.
@@ -163,8 +233,14 @@ pub async fn search(
     let mut hits = Vec::with_capacity(ids.len());
     for id in ids {
         let s = load(store, id).await?;
+        let locations = if unique {
+            message_copies(store, &mut sightings, s.msg).await?.2
+        } else {
+            sightings.of(id).await?
+        };
         hits.push(Hit {
             id,
+            msg: s.msg,
             date: s.date,
             message_id: s.message_id,
             from: store.first_header(id, "from").await?,
@@ -173,7 +249,7 @@ pub async fn search(
             body_bytes: s.body_len,
             attachments: s.decoded.attachments.len(),
             snippet: message::snippet(&s.decoded.text, 160),
-            locations: sightings.of(id).await?,
+            locations,
             problem: s.decoded.problem,
         });
     }
@@ -181,7 +257,11 @@ pub async fn search(
 }
 
 pub struct Message {
+    /// The copy shown.
     pub id: i64,
+    pub msg: i64,
+    /// Every stored copy of the message, oldest first.
+    pub copies: Vec<i64>,
     pub date: Option<i64>,
     pub message_id: Option<String>,
     pub subject: String,
@@ -189,6 +269,7 @@ pub struct Message {
     pub headers: Vec<Field>,
     pub decoded: Decoded,
     pub raw_bytes: usize,
+    /// The message's places when read by message id, else this copy's.
     pub locations: Vec<Location>,
     /// From the SHA-256 of the whole message, which includes headers our own
     /// server added, so a sender can't predict it to fake an end marker.
@@ -201,11 +282,22 @@ impl Message {
     }
 }
 
-pub async fn read(store: &Store, id: i64) -> Result<Message> {
-    let s = load(store, id).await?;
+pub async fn read(store: &Store, r: Ref) -> Result<Message> {
     let mut sightings = Sightings::new(store).await?;
+    let id = match r {
+        Ref::Message(msg) => message_copies(store, &mut sightings, msg).await?.1,
+        Ref::Copy(id) => id,
+    };
+    let s = load(store, id).await?;
+    let (copies, _, all) = message_copies(store, &mut sightings, s.msg).await?;
+    let locations = match r {
+        Ref::Message(_) => all,
+        Ref::Copy(_) => sightings.of(id).await?,
+    };
     Ok(Message {
         id,
+        msg: s.msg,
+        copies,
         date: s.date,
         message_id: s.message_id,
         subject: s.subject,
@@ -213,7 +305,7 @@ pub async fn read(store: &Store, id: i64) -> Result<Message> {
         raw_bytes: s.raw.len(),
         nonce: hex(&Sha256::digest(&s.raw)[..6]),
         decoded: s.decoded,
-        locations: sightings.of(id).await?,
+        locations,
     })
 }
 
@@ -238,6 +330,7 @@ impl Hit {
         json!({
             "type": "message",
             "id": self.id,
+            "message": Ref::Message(self.msg).to_string(),
             "date": opt_time(self.date),
             "message_id": self.message_id.as_deref().map(sanitize),
             "from": sanitize(&self.from),
@@ -258,6 +351,8 @@ impl Message {
         json!({
             "type": "message",
             "id": self.id,
+            "message": Ref::Message(self.msg).to_string(),
+            "copies": self.copies,
             "date": opt_time(self.date),
             "message_id": self.message_id.as_deref().map(sanitize),
             "from": sanitize(self.header("from")),

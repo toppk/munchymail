@@ -15,11 +15,23 @@ use crate::util::hex;
 /// Objects at most this size live inline in SQLite.
 pub const INLINE_MAX: usize = 16 * 1024;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// Upgrades from the previous version; index `i` brings version `i + 1` to `i + 2`.
 /// New tables and indexes need no entry: `SCHEMA` creates them if missing.
-const MIGRATIONS: [&str; 2] = ["ALTER TABLE origin ADD COLUMN retired_at INTEGER", ""];
+const MIGRATIONS: [&str; 3] = [
+    "ALTER TABLE origin ADD COLUMN retired_at INTEGER",
+    "",
+    "ALTER TABLE artifact ADD COLUMN msg_id INTEGER;
+     INSERT INTO message (body_hash, message_id, date)
+         SELECT DISTINCT body_hash, message_id, date FROM artifact;
+     UPDATE artifact SET msg_id = (SELECT m.msg_id FROM message m
+         WHERE m.body_hash = artifact.body_hash AND m.message_id IS artifact.message_id
+           AND m.date IS artifact.date);",
+];
+
+/// Indexes on columns a migration may have just added.
+const LATE_SCHEMA: &str = "CREATE INDEX IF NOT EXISTS artifact_msg ON artifact (msg_id);";
 
 const SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
@@ -39,10 +51,23 @@ CREATE TABLE IF NOT EXISTS artifact (
     sender TEXT,
     subject TEXT,
     message_id TEXT,
+    -- the message this is a copy of
+    msg_id INTEGER,
     UNIQUE (header_hash, body_hash)
 );
 CREATE INDEX IF NOT EXISTS artifact_date ON artifact (date);
 CREATE INDEX IF NOT EXISTS artifact_message_id ON artifact (message_id);
+
+-- One email, whatever copies of it were stored: same body, Message-ID and Date.
+-- Dovecot's Status/X-Keywords rewrites and SpamAssassin's subject tag fold
+-- together; Date splits reused Message-IDs and ID-less mail sharing a body.
+CREATE TABLE IF NOT EXISTS message (
+    msg_id INTEGER PRIMARY KEY,
+    body_hash BLOB NOT NULL,
+    message_id TEXT,
+    date INTEGER
+);
+CREATE INDEX IF NOT EXISTS message_body ON message (body_hash);
 
 CREATE TABLE IF NOT EXISTS header (
     artifact_id INTEGER NOT NULL,
@@ -167,7 +192,7 @@ impl Store {
                 };
                 for (i, sql) in MIGRATIONS.iter().enumerate().skip(found as usize - 1) {
                     if !sql.is_empty() {
-                        conn.execute(sql, ()).await?;
+                        conn.execute_batch(sql).await?;
                     }
                     info!(to = i + 2, "migrated schema");
                 }
@@ -188,6 +213,7 @@ impl Store {
                 .await?;
             }
         }
+        conn.execute_batch(LATE_SCHEMA).await?;
         conn.execute("COMMIT", ()).await?;
         Ok(Store {
             _db: db,

@@ -119,21 +119,24 @@ munchymail search --participant '*@corp.example' --tsv -n 1000 > corp.tsv
 munchymail search --participant '*@corp.example' --unique --json -n 20   # for agents
 ```
 
-Output is `id  date  from  subject`, newest first. The id is what `show`
-takes. `--long` adds, per message, the folders it is in now (or "gone;
-last seen in PATH DATE"), date and time (UTC), From, To, body size in bytes
-as stored (MIME-encoded), and the number of attachments (parts with a file
-name or `Content-Disposition: attachment`); `--tsv` gives the same as
+Output is `id  date  from  subject`, newest first. The id is a stored
+copy's, what `show` takes; see [Messages and copies](#messages-and-copies).
+`--long` adds, per message, the folders it is in now (or "gone; last seen
+in PATH DATE"), date and time (UTC), the message id, From, To, body size in
+bytes as stored (MIME-encoded), and the number of attachments (parts with a
+file name or `Content-Disposition: attachment`); `--tsv` gives the same as
 columns. Folder is per stored copy: a copy whose headers Dovecot later
 rewrote shows as gone, next to its current copy; `--unique` lists each
-message once (its newest copy), as `export` counts them, and `--current`
-leaves out copies no longer in any folder.
+message once (its newest copy, with the places of all its copies), as
+`export` counts them, and `--current` leaves out copies no longer in any
+folder.
 
 Results come in pages of `-n` (1 to 1000, default 50), newest first by
 `Date:` with ties broken by id, so pages are stable. When there are more,
 the next cursor is logged to stderr (`more results: add --after CURSOR`).
 `--json` prints JSON Lines: one `{"type":"message",...}` record per message
-(id, date, Message-ID, From, To, subject, a 160-character snippet of the
+(copy `id`, `message` id, date, Message-ID, From, To, subject, a
+160-character snippet of the
 text body, body size, attachment count, `locations`, `problem` if it didn't
 decode, `"untrusted": true`), then `{"type":"page","returned":N,"next":CURSOR
 or null}`. Each location has `origin`, `path`, `current`, `first_seen`,
@@ -211,9 +214,13 @@ Both print counts and percentages of the matching messages.
 ### read: one message, decoded
 
 ```
-munchymail read ID              # locations, attachments, then headers and text body
-munchymail read ID --json       # one object: all decoded headers, text, attachments, locations
+munchymail read m1234          # a message: locations, attachments, then headers and text body
+munchymail read 227617         # one stored copy, and only its locations
+munchymail read m1234 --json   # one object: all decoded headers, text, attachments, locations
 ```
+
+A message id shows the copy seen most recently and the places of every
+copy; `copies` lists the copy ids.
 
 The text body is the first `text/plain` part, decoded (transfer encoding
 and charset); without one, `text/html` converted to plain text
@@ -226,7 +233,23 @@ message (including headers our server added), so a sender can't forge the
 end marker. A message that left every folder stays readable; its
 locations say `was`. `show --raw` gives the exact bytes.
 
-### show: one message
+### Messages and copies
+
+A **copy** (plain number, e.g. `227617`) is one exact stored message, byte
+for byte. Dovecot rewrites `Status`/`X-Keywords` in the file when mail is
+read or flagged, and the next import stores that as a new copy with a new
+id; the old copy then reads as gone from the folder.
+
+A **message** (`m` and a number, e.g. `m1234`) is every copy with the same
+body, Message-ID and `Date:`, so it keeps its id across those rewrites, a
+SpamAssassin `[SPAM]` subject tag, re-quoted addresses, and the same mail in
+INBOX and in a backup. `Date:` is part of it because the archive has
+different mail sharing body and Message-ID (a reused Exchange id), and mail
+without a Message-ID sharing a body (daily reminders). `search --unique`,
+`export` and `read mN` use messages; `show` and `changes` work on copies.
+Ids of both kinds are never reused within one `data/` directory.
+
+### show: one stored copy
 
 ```
 munchymail show ID              # raw header block
@@ -333,9 +356,9 @@ of date, From, To, subject and current folder, the command that made it,
 and SHA-256 sums) and `NAME/maildir/001`, `002`, ... in date order. Each
 file is one whole message (an `.eml`), byte for byte as stored, without the
 mbox `From ` line. Bytes come from the index, so import first for the
-latest mail. Copies with the same body and Message-ID (e.g. one in INBOX,
-one in an archive, or Dovecot's `Status` rewrite) are exported once, using
-the copy seen most recently. Without `--current`, messages that have since
+latest mail. Copies of one message (e.g. one in INBOX, one in an archive,
+or Dovecot's `Status` rewrite; see [Messages and copies](#messages-and-copies))
+are exported once, using the copy seen most recently. Without `--current`, messages that have since
 left the mailbox are included and marked "gone" in the index.
 
 ### sql, scan

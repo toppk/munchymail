@@ -5,15 +5,23 @@ Roughly in priority order within each section. Phases refer to
 
 ## Agent search and read (phase 1)
 
-- [ ] Message-level IDs: a `message` table (body hash + Message-ID) filled
-      at import, so IDs survive Dovecot rewriting `Status`; copy IDs stay.
-      Test missing and reused Message-IDs, the same body under another
-      Message-ID, and the same body and ID with materially different headers.
 - [ ] Body text search: full-text index of decoded text bodies, tested
       against real searches. Attachment text is a separate decision.
 - [ ] Move search/read behind a service (one process owns the database;
       the CLI over a Unix socket, later the web UI). `src/api.rs` is the
       layer it will wrap.
+
+Agent-friendly CLI gaps (against an agent-friendly CLI checklist):
+
+- [ ] `describe`: commands, arguments and effects generated from the clap
+      definitions, so it can't drift; the service API reuses it.
+- [ ] Name each command's effect: read-only, or writes `data/` (`import`,
+      `export`, `origin move/retire`), visible in `describe` and `--help`.
+- [ ] Render text and JSON from one value, so `search --long` and `--json`
+      carry the same facts (text lacks the snippet today).
+- [ ] Every error names a fix: unknown ID or origin points at the command
+      that lists them; the database-locked error says another munchymail
+      process holds `data/email.sqlite`.
 
 ## Sieve rule work (current use)
 
@@ -63,10 +71,10 @@ rows each updating four B-trees (table, PK, `header_name_nth_value`,
 
 ## Surgery (phase 2)
 
-- [ ] Logical-message grouping: link artifacts that are the same email
-      (ignore Dovecot `X-UID`/`Status`/`X-Keywords`/`Content-Length`,
-      transport headers; use Message-ID, body hash, DKIM-signed headers).
-      Explicit and reversible; prefer false negatives.
+- [ ] Fuzzier logical-message grouping beyond `message` (body, Message-ID,
+      Date): the same mail with a list footer or a rewritten body, a resend
+      hours later (seen: carriers, device vendors). Use DKIM-signed headers;
+      explicit and reversible; prefer false negatives.
 - [ ] Rule engine with versioned rules and recorded classifications (rule
       language still open: SQL, DSL, or Sieve itself).
 - [ ] Previewable views (e.g. `Sent/YYYY/MM`) and anomaly reports

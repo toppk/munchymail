@@ -19,7 +19,7 @@ use crate::util::{hex, ymd, ymd_hm};
 
 pub struct Summary {
     pub messages: usize,
-    /// Copies left out because they differ from an exported one only in headers.
+    /// Copies left out because they are other copies of an exported message.
     pub folded: usize,
 }
 
@@ -28,7 +28,7 @@ struct Artifact {
     date: Option<i64>,
     header_hash: Vec<u8>,
     body_hash: Vec<u8>,
-    message_id: Option<String>,
+    msg_id: i64,
     subject: String,
 }
 
@@ -56,8 +56,8 @@ fn cell(s: &str) -> String {
 }
 
 /// Write `out` (via a temporary file) with every message matching `filter`.
-/// Copies with the same body and Message-ID are one message; the copy seen
-/// most recently is exported. `command` is quoted in index.md as provenance.
+/// Copies of one message (`artifact.msg_id`) are exported once, using the
+/// copy seen most recently. `command` is quoted in index.md as provenance.
 pub async fn write(
     store: &Store,
     filter: &Filter,
@@ -73,7 +73,7 @@ pub async fn write(
     let mut rows = store
         .conn
         .query(
-            "SELECT a.artifact_id, a.date, a.header_hash, a.body_hash, a.message_id, a.subject
+            "SELECT a.artifact_id, a.date, a.header_hash, a.body_hash, a.msg_id, a.subject
              FROM hit JOIN artifact a ON a.artifact_id = hit.artifact_id",
             (),
         )
@@ -84,7 +84,7 @@ pub async fn write(
             date: r.get(1)?,
             header_hash: blob(r.get_value(2)?)?,
             body_hash: blob(r.get_value(3)?)?,
-            message_id: r.get(4)?,
+            msg_id: r.get(4)?,
             subject: r.get::<Option<String>>(5)?.unwrap_or_default(),
         });
     }
@@ -94,13 +94,11 @@ pub async fn write(
     }
 
     let mut sightings = Sightings::new(store).await?;
-    // (body hash, Message-ID) -> where seen, and (last seen, index) of each copy.
+    // Message -> where seen, and (last seen, index) of each copy.
     type Group = (Vec<Location>, Vec<(i64, usize)>);
-    let mut groups: HashMap<(Vec<u8>, Option<String>), Group> = HashMap::new();
+    let mut groups: HashMap<i64, Group> = HashMap::new();
     for (i, a) in artifacts.iter().enumerate() {
-        let (seen, members) = groups
-            .entry((a.body_hash.clone(), a.message_id.clone()))
-            .or_default();
+        let (seen, members) = groups.entry(a.msg_id).or_default();
         let locs = sightings.of(a.id).await?;
         let last = locs.iter().map(|l| l.last_seen).max().unwrap_or(0);
         locations::merge(seen, locs);
@@ -178,7 +176,8 @@ pub async fn write(
     if folded > 0 {
         write!(
             index,
-            "\n{folded} further copies differed only in such headers and are left out.\n"
+            "\n{folded} further stored copies of these messages (same body, Message-ID and\n\
+             Date; headers rewritten, e.g. by the mail server) are left out.\n"
         )?;
     }
     write!(
