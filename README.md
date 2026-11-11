@@ -38,8 +38,9 @@ An origin is a directory tree (walked; dot-entries like Dovecot's `.imap`
 are skipped) or a single mbox file. Files that don't start with a valid
 `From ` line are skipped. Import is idempotent: unchanged files are
 recognised by hash and only get a new sighting, so re-running is cheap.
-Import ends by indexing the MIME parts of new messages (`munchymail index`
-does only that step; the whole archive takes about 20 s).
+Import ends by indexing new messages' MIME parts and text (`munchymail
+index` does only that step; the whole archive takes about 20 s for parts
+and 40 s for text).
 
 Every import is kept as a run, so each re-import adds a generation:
 earlier snapshots of a file stay queryable (`--current` selects only the
@@ -93,6 +94,7 @@ share these; all given must match:
 | `--has NAME` | header present (repeatable) |
 | `--attachment TYPE` | a part other than the message text of this type: file extension, MIME type detected from its bytes or declared by the sender, or either half of one, exact and case-insensitive: `pdf`, `zip`, `image`, `application/pdf` (repeatable) |
 | `--attachment-name PATTERN` | a part's file name, or a file name inside a zip part, e.g. `'*.xlsx'` (repeatable) |
+| `--text QUERY` | words in the Subject or text; see [Text search](#text-search) |
 | `--origin LABEL` | found in that origin |
 | `--folder PATTERN` | found at a matching path inside an origin, ever, e.g. `'lists/*'` |
 | `--current` | restrict `--origin`/`--folder` to each origin's latest import (where mail is now), not any past sighting; retired origins are left out unless named by `--origin` |
@@ -107,7 +109,7 @@ unfolding and RFC 2047 decoding, which is what Sieve compares.
 finds `News <news@substack.com>`, while `-H 'from:*@substack.com'` does not
 (the value ends in `>`), exactly as in Sieve.
 
-There is no negation yet (see TODO).
+There is no negation yet (see TODO), except within `--text`.
 
 ## Commands
 
@@ -256,6 +258,33 @@ are detected by magic numbers (`infer`), except that PEM text and DER data
 are only called certificates when they are (PGP armour is named as such).
 The index is in `part` and `archive_member`; until `index` has run on a
 message, `--attachment*` filters miss it and a warning says so.
+
+### Text search
+
+```
+munchymail search --text invoice --unique --long        # invoices too (stemmed)
+munchymail search --text '"tracking number"' --since 2026-01-01
+munchymail search --text 'sieve -spam' --folder 'lists/*' --count
+munchymail search --text 'subject:passport OR subject:visa' --json
+```
+
+`--text` searches the Subject and the text of each message: the text/plain
+body (or the text/html one converted, when there is no plain one), every
+other text/* part (text attachments, calendars, patches, logs) and attached
+messages (`message/rfc822`, their Subject and text, nested up to 3 deep),
+at most 1 MiB per part. Words are English-stemmed and case-insensitive, and
+all must match; `"a phrase"`, `a OR b`, `-word` and `subject:word` /
+`text:word` work as in Tantivy's query syntax. It combines with every
+other filter. `--long` adds where it matched (`body`, `attachment NAME`,
+`inline`, `subject`) and a fragment around the match; `--json` puts the
+fragment in `snippet` and adds `match` (`source`, `part`, `filename`,
+`highlighted` byte ranges of the snippet). Not yet searched: PDF, office
+documents and images (see TODO).
+
+The index is Tantivy in `data/text/`, one document per message, built by
+`index` (and `import`); deleting the directory makes the next `index`
+rebuild it. Until a message is indexed `--text` misses it and a warning
+says so.
 
 ### Messages and copies
 

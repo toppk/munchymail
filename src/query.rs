@@ -1,10 +1,12 @@
 //! Search filters over artifacts, mirroring Sieve's `:matches` with `i;ascii-casemap`.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use turso::{Connection, Value};
 
+use crate::text::TextQuery;
 use crate::util::parse_ymd;
 
 /// Sieve wildcard (`*`, `?`, `\` escapes) to a LIKE pattern with `\` as escape.
@@ -125,6 +127,8 @@ fn like_hint(pattern: &str) -> String {
 
 enum Set {
     Sql(String, Vec<Value>),
+    /// Every copy of these messages.
+    Messages(Vec<i64>),
     /// Header values narrowed in SQL by name and a LIKE hint, then decided in Rust;
     /// a message matches if any value of any of the names does.
     Predicate {
@@ -187,6 +191,8 @@ pub struct Filter {
     pub attachments: Vec<String>,
     /// Sieve pattern on a part's file name or a file name inside a zip part.
     pub attachment_names: Vec<String>,
+    /// Words in the Subject or text (bodies, text attachments, attached messages).
+    pub text: Option<Arc<TextQuery>>,
     pub folder: Option<String>,
     pub origin: Option<String>,
     /// Restrict origin/folder to each origin's latest import instead of any sighting ever.
@@ -274,6 +280,9 @@ impl Filter {
                     .to_string(),
                 vec![sieve_to_like(n).into()],
             ));
+        }
+        if let Some(t) = &self.text {
+            sets.push(Set::Messages(t.messages()?));
         }
         if self.folder.is_some() || self.origin.is_some() || self.current {
             let mut sql = String::from(
@@ -369,6 +378,18 @@ impl Filter {
                 }
                 Set::Predicate { names, like, test } => {
                     predicate_set(conn, &t, &names, &like, &*test).await?
+                }
+                Set::Messages(msgs) => {
+                    let mut ins = conn
+                        .prepare(&format!(
+                            "INSERT OR IGNORE INTO {t} SELECT artifact_id FROM artifact WHERE msg_id = ?1"
+                        ))
+                        .await?;
+                    let mut n = 0;
+                    for m in msgs {
+                        n += ins.execute((m,)).await?;
+                    }
+                    n
                 }
             };
             sized.push((n, t));

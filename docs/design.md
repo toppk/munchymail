@@ -97,7 +97,8 @@ surgery, `read` and `search --json` (decoded text, attachments, locations, JSON
 Lines with stable paging) for agents, message ids (`m123`: same body,
 Message-ID and Date) that survive Dovecot's header rewrites, a MIME part
 index (declared vs detected type, zip member names; `attachments`,
-`--attachment`), `changes` and
+`--attachment`), full-text search over bodies, text attachments and
+attached messages (`--text`, Tantivy), `changes` and
 recorded removals for comparing import runs, `export` (a `.tgz` of matching
 messages with an index), and a separate `mbox-sort` binary that writes
 date-sorted copies (the first code that writes a mail format; never in

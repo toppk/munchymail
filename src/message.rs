@@ -3,11 +3,17 @@
 
 use std::io::Cursor;
 
-use mailparse::{DispositionType, ParsedMail};
+use mailparse::{DispositionType, MailHeaderMap, ParsedMail};
 use sha2::{Digest, Sha256};
 
 /// Most file names listed from one zip.
 const MAX_MEMBERS: usize = 1000;
+
+/// Most text kept from one part, in bytes.
+const MAX_TEXT: usize = 1 << 20;
+
+/// Attached messages decoded within attached messages, at most.
+const MAX_DEPTH: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -43,6 +49,9 @@ pub struct Part {
     pub sha256: [u8; 32],
     /// File names in a zip, with uncompressed sizes; at most `MAX_MEMBERS`.
     pub members: Vec<(String, u64)>,
+    /// Decoded text of a text/* part (HTML converted) or an attached message;
+    /// at most `MAX_TEXT` bytes.
+    pub text: Option<String>,
 }
 
 impl Part {
@@ -93,7 +102,37 @@ fn detect(bytes: &[u8]) -> Option<&'static str> {
     })
 }
 
-fn part(p: &ParsedMail, kind: Kind, bytes: &[u8]) -> Part {
+fn cap(s: String) -> String {
+    let mut s = if s.contains('\r') {
+        s.replace("\r\n", "\n")
+    } else {
+        s
+    };
+    if s.len() > MAX_TEXT {
+        let mut end = MAX_TEXT;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
+    }
+    s
+}
+
+/// An attached message's Subject and every text part in it.
+fn message_text(bytes: &[u8], depth: usize) -> String {
+    let d = decode_at(bytes, bytes, depth + 1);
+    let subject = mailparse::parse_headers(bytes)
+        .ok()
+        .and_then(|(h, _)| h.get_first_value("Subject"));
+    let texts = d.parts.into_iter().filter_map(|p| p.text);
+    subject
+        .into_iter()
+        .chain(texts)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn part(p: &ParsedMail, kind: Kind, bytes: &[u8], text: Option<String>) -> Part {
     let detected = detect(bytes);
     Part {
         kind,
@@ -107,6 +146,7 @@ fn part(p: &ParsedMail, kind: Kind, bytes: &[u8]) -> Part {
         } else {
             Vec::new()
         },
+        text: text.map(cap),
     }
 }
 
@@ -172,6 +212,7 @@ impl Decoded {
 }
 
 struct Walk {
+    depth: usize,
     plain: Option<String>,
     html: Option<String>,
     parts: Vec<Part>,
@@ -187,17 +228,31 @@ fn walk(p: &ParsedMail, w: &mut Walk) {
             "text/plain" | "text/html" => Kind::Body,
             _ => Kind::Inline,
         };
-        w.parts.push(part(p, kind, &bytes));
+        let body = match mime.as_str() {
+            m if m.starts_with("text/") => match p.get_body() {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    w.problem = Some(format!("{mime} part: {e}"));
+                    None
+                }
+            },
+            _ => None,
+        };
+        let text = match mime.as_str() {
+            "text/html" => body.as_deref().map(html_to_text),
+            "message/rfc822" | "message/global" if w.depth < MAX_DEPTH => {
+                Some(message_text(&bytes, w.depth))
+            }
+            _ => body.clone(),
+        };
+        w.parts.push(part(p, kind, &bytes, text));
         let slot = match (kind, mime.as_str()) {
             (Kind::Body, "text/plain") => &mut w.plain,
             (Kind::Body, "text/html") => &mut w.html,
             _ => return,
         };
         if slot.is_none() {
-            match p.get_body() {
-                Ok(t) => *slot = Some(t),
-                Err(e) => w.problem = Some(format!("{mime} part: {e}")),
-            }
+            *slot = body;
         }
         return;
     }
@@ -208,6 +263,10 @@ fn walk(p: &ParsedMail, w: &mut Walk) {
 
 /// Decode a whole raw message (header block plus body).
 pub fn decode(raw: &[u8], body: &[u8]) -> Decoded {
+    decode_at(raw, body, 0)
+}
+
+fn decode_at(raw: &[u8], body: &[u8], depth: usize) -> Decoded {
     let parsed = match mailparse::parse_mail(raw) {
         Ok(p) => p,
         Err(e) => {
@@ -220,6 +279,7 @@ pub fn decode(raw: &[u8], body: &[u8]) -> Decoded {
         }
     };
     let mut w = Walk {
+        depth,
         plain: None,
         html: None,
         parts: Vec::new(),

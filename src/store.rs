@@ -15,11 +15,11 @@ use crate::util::hex;
 /// Objects at most this size live inline in SQLite.
 pub const INLINE_MAX: usize = 16 * 1024;
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// Upgrades from the previous version; index `i` brings version `i + 1` to `i + 2`.
 /// New tables and indexes need no entry: `SCHEMA` creates them if missing.
-const MIGRATIONS: [&str; 4] = [
+const MIGRATIONS: [&str; 5] = [
     "ALTER TABLE origin ADD COLUMN retired_at INTEGER",
     "",
     "ALTER TABLE artifact ADD COLUMN msg_id INTEGER;
@@ -30,6 +30,7 @@ const MIGRATIONS: [&str; 4] = [
            AND m.date IS artifact.date);",
     "ALTER TABLE message ADD COLUMN parts_version INTEGER;
      ALTER TABLE message ADD COLUMN parts_problem TEXT;",
+    "ALTER TABLE message ADD COLUMN text_version INTEGER",
 ];
 
 /// Indexes on columns a migration may have just added.
@@ -71,7 +72,9 @@ CREATE TABLE IF NOT EXISTS message (
     -- parts::VERSION that filled its `part` rows; NULL = not yet
     parts_version INTEGER,
     -- why its MIME structure didn't parse, if it didn't
-    parts_problem TEXT
+    parts_problem TEXT,
+    -- text::VERSION that put it in data/text/; NULL = not yet
+    text_version INTEGER
 );
 CREATE INDEX IF NOT EXISTS message_body ON message (body_hash);
 

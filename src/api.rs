@@ -15,6 +15,7 @@ use crate::locations::{self, Location, Sightings};
 use crate::message::{self, Decoded, sanitize};
 use crate::query::{Filter, fold_copies};
 use crate::store::Store;
+use crate::text;
 use crate::util::{hex, iso};
 use sha2::{Digest, Sha256};
 
@@ -127,6 +128,15 @@ fn parse_cursor(c: &str) -> Result<(i64, i64)> {
     ))
 }
 
+pub struct Matched {
+    /// The subject, body, an attachment or an inline part.
+    pub source: &'static str,
+    pub part: Option<usize>,
+    pub filename: Option<String>,
+    /// Byte ranges of `snippet` that matched.
+    pub highlighted: Vec<std::ops::Range<usize>>,
+}
+
 pub struct Hit {
     pub id: i64,
     pub msg: i64,
@@ -138,6 +148,8 @@ pub struct Hit {
     pub body_bytes: usize,
     pub attachments: usize,
     pub snippet: String,
+    /// Where `--text` matched, with `snippet` the matching fragment.
+    pub matched: Option<Matched>,
     /// This copy's places, or with `unique` those of every copy of the message.
     pub locations: Vec<Location>,
     pub problem: Option<String>,
@@ -238,6 +250,26 @@ pub async fn search(
         } else {
             sightings.of(id).await?
         };
+        let mut snippet = message::snippet(&s.decoded.text, 160);
+        let matched = filter.text.as_ref().and_then(|t| {
+            let texts: Vec<_> = text::texts(&s.decoded)
+                .into_iter()
+                .map(|(i, t)| (i, sanitize(t)))
+                .collect();
+            let m = t.find(&texts, &sanitize(&s.subject))?;
+            let part = m.part.map(|i| &s.decoded.parts[i]);
+            snippet = m.fragment;
+            Some(Matched {
+                source: match part {
+                    _ if m.subject => "subject",
+                    Some(p) => p.kind.as_str(),
+                    None => "body",
+                },
+                part: m.part,
+                filename: part.and_then(|p| p.filename.clone()),
+                highlighted: m.highlighted,
+            })
+        });
         hits.push(Hit {
             id,
             msg: s.msg,
@@ -248,7 +280,8 @@ pub async fn search(
             subject: s.subject,
             body_bytes: s.body_len,
             attachments: s.decoded.files(),
-            snippet: message::snippet(&s.decoded.text, 160),
+            snippet,
+            matched,
             locations,
             problem: s.decoded.problem,
         });
@@ -337,6 +370,12 @@ impl Hit {
             "to": sanitize(&self.to),
             "subject": sanitize(&self.subject),
             "snippet": sanitize(&self.snippet),
+            "match": self.matched.as_ref().map(|m| json!({
+                "source": m.source,
+                "part": m.part,
+                "filename": m.filename.as_deref().map(sanitize),
+                "highlighted": m.highlighted.iter().map(|r| [r.start, r.end]).collect::<Vec<_>>(),
+            })),
             "body_bytes": self.body_bytes,
             "attachments": self.attachments,
             "locations": self.locations.iter().map(location_json).collect::<Vec<_>>(),

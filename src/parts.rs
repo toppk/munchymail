@@ -7,7 +7,7 @@ use std::time::Instant;
 use anyhow::{Result, bail};
 use rayon::prelude::*;
 use tracing::info;
-use turso::Value;
+use turso::{Statement, Value};
 
 use crate::message::{self, Part};
 use crate::store::Store;
@@ -43,6 +43,24 @@ fn blob(v: Value) -> Result<Vec<u8>> {
     }
 }
 
+/// One stored copy's whole bytes, body bytes and Subject, by `sel`:
+/// `SELECT header_hash, body_hash, subject FROM artifact WHERE artifact_id = ?1`.
+pub(crate) async fn stored(
+    store: &Store,
+    sel: &mut Statement,
+    id: i64,
+) -> Result<(Vec<u8>, Vec<u8>, Option<String>)> {
+    let mut rows = sel.query((id,)).await?;
+    let r = rows.next().await?.expect("artifact listed above");
+    let (h, b) = (blob(r.get_value(0)?)?, blob(r.get_value(1)?)?);
+    let subject = r.get(2)?;
+    drop(rows);
+    let mut bytes = store.object(&h).await?;
+    let body = store.object(&b).await?;
+    bytes.extend_from_slice(&body);
+    Ok((bytes, body, subject))
+}
+
 /// Fill `part` and `archive_member` for every pending message, one
 /// transaction per batch, decoding one stored copy of each.
 pub async fn index(store: &Store) -> Result<Stats> {
@@ -63,7 +81,7 @@ pub async fn index(store: &Store) -> Result<Stats> {
     drop(rows);
     let c = &store.conn;
     let mut sel = c
-        .prepare("SELECT header_hash, body_hash FROM artifact WHERE artifact_id = ?1")
+        .prepare("SELECT header_hash, body_hash, subject FROM artifact WHERE artifact_id = ?1")
         .await?;
     let mut del = c.prepare("DELETE FROM part WHERE msg_id = ?1").await?;
     let mut ins = c
@@ -82,13 +100,7 @@ pub async fn index(store: &Store) -> Result<Stats> {
     for batch in todo.chunks(BATCH) {
         let mut raw = Vec::with_capacity(batch.len());
         for &(msg, id) in batch {
-            let mut rows = sel.query((id,)).await?;
-            let r = rows.next().await?.expect("artifact listed above");
-            let (h, b) = (blob(r.get_value(0)?)?, blob(r.get_value(1)?)?);
-            drop(rows);
-            let mut bytes = store.object(&h).await?;
-            let body = store.object(&b).await?;
-            bytes.extend_from_slice(&body);
+            let (bytes, body, _) = stored(store, &mut sel, id).await?;
             raw.push((msg, bytes, body));
         }
         let decoded: Vec<(i64, Vec<Part>, Option<String>)> = raw

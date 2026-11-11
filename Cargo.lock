@@ -1634,6 +1634,7 @@ dependencies = [
  "regex",
  "serde_json",
  "sha2",
+ "tantivy",
  "tar",
  "tracing",
  "tracing-subscriber",

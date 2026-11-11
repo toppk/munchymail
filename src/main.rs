@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -18,6 +19,7 @@ use munchymail::message::{TextSource, sanitize};
 use munchymail::query::{Filter, sieve_to_like};
 use munchymail::report::{self, Key};
 use munchymail::store::{Store, now};
+use munchymail::text::{self, TextQuery};
 use munchymail::util::{hex, ymd, ymd_hm};
 use munchymail::{api, export, mbox, parts, source};
 
@@ -183,7 +185,7 @@ enum Cmd {
         #[arg(short = 'n', long, default_value_t = 30)]
         limit: usize,
     },
-    /// Bring derived indexes (MIME parts) up to date; `import` does this too.
+    /// Bring derived indexes (MIME parts, text) up to date; `import` does this too.
     Index,
     /// Corpus counts.
     Stats,
@@ -320,6 +322,11 @@ struct FilterArgs {
     /// A part's file name, or a file name inside a zip part, e.g. '*.xlsx'; repeatable.
     #[arg(long, value_name = "PATTERN")]
     attachment_name: Vec<String>,
+    /// Words in the Subject or text: bodies, text attachments, attached
+    /// messages. All words must match (stemmed: invoice finds invoices);
+    /// also "a phrase", a OR b, -word, subject:word.
+    #[arg(long, value_name = "QUERY")]
+    text: Option<String>,
     /// Any address in From, Sender, Reply-To, To, Cc or Bcc; repeatable (all must match).
     #[arg(long, value_name = "PATTERN")]
     participant: Vec<String>,
@@ -344,7 +351,7 @@ struct FilterArgs {
 }
 
 impl FilterArgs {
-    fn build(self) -> Result<Filter> {
+    fn build(self, data_dir: &Path) -> Result<Filter> {
         let mut headers = Vec::new();
         for h in self.header {
             let Some((name, pat)) = h.split_once(':') else {
@@ -376,6 +383,10 @@ impl FilterArgs {
             has: self.has,
             attachments: self.attachment,
             attachment_names: self.attachment_name,
+            text: match self.text {
+                Some(q) => Some(Arc::new(TextQuery::new(data_dir, &q)?)),
+                None => None,
+            },
             folder: self.folder,
             origin: self.origin,
             current: self.current,
@@ -573,12 +584,23 @@ async fn search(
                     writeln!(out, "         {}", one(&h.subject))?;
                     writeln!(
                         out,
-                        "         message m{}, body {} bytes, {} attachment{}\n",
+                        "         message m{}, body {} bytes, {} attachment{}",
                         h.msg,
                         h.body_bytes,
                         h.attachments,
                         if h.attachments == 1 { "" } else { "s" }
                     )?;
+                    if let Some(m) = &h.matched {
+                        let name = m.filename.as_deref().map(|n| format!(" {}", one(n)));
+                        writeln!(
+                            out,
+                            "         {}{}: {}",
+                            m.source,
+                            name.unwrap_or_default(),
+                            one(&h.snippet)
+                        )?;
+                    }
+                    writeln!(out)?;
                 }
             }
         }
@@ -732,17 +754,25 @@ async fn index(store: &Store) -> Result<()> {
         elapsed = ?t.elapsed(),
         "parts indexed"
     );
+    let t = Instant::now();
+    let s = text::index(store).await?;
+    info!(messages = s.messages, texts = s.parts, elapsed = ?t.elapsed(), "text indexed");
     Ok(())
 }
 
-/// Warn when part filters would miss messages `index` hasn't reached.
+/// Warn when part or text filters would miss messages `index` hasn't reached.
 async fn warn_unindexed(store: &Store, filter: &Filter) -> Result<()> {
-    if filter.attachments.is_empty() && filter.attachment_names.is_empty() {
-        return Ok(());
+    if !(filter.attachments.is_empty() && filter.attachment_names.is_empty()) {
+        let n = parts::pending(store).await?;
+        if n > 0 {
+            warn!("{n} messages have no part index yet; run `munchymail index`");
+        }
     }
-    let n = parts::pending(store).await?;
-    if n > 0 {
-        warn!("{n} messages have no part index yet; run `munchymail index`");
+    if filter.text.is_some() {
+        let n = text::pending(store).await?;
+        if n > 0 {
+            warn!("{n} messages are not in the text index yet; run `munchymail index`");
+        }
     }
     Ok(())
 }
@@ -1597,7 +1627,17 @@ async fn run(cli: Cli) -> Result<()> {
             by,
             all_parts,
             limit,
-        } => attachments(&store, filter.build()?, by, all_parts, limit, &mut out).await?,
+        } => {
+            attachments(
+                &store,
+                filter.build(&store.data_dir)?,
+                by,
+                all_parts,
+                limit,
+                &mut out,
+            )
+            .await?
+        }
         Cmd::Search {
             filter,
             headers,
@@ -1620,7 +1660,7 @@ async fn run(cli: Cli) -> Result<()> {
             };
             search(
                 &store,
-                filter.build()?,
+                filter.build(&store.data_dir)?,
                 listing,
                 unique,
                 count,
@@ -1640,7 +1680,7 @@ async fn run(cli: Cli) -> Result<()> {
                 "value",
                 Some(&name),
                 None,
-                filter.build()?,
+                filter.build(&store.data_dir)?,
                 limit,
                 &mut out,
             )
@@ -1656,7 +1696,7 @@ async fn run(cli: Cli) -> Result<()> {
                 "name",
                 None,
                 like.as_deref(),
-                filter.build()?,
+                filter.build(&store.data_dir)?,
                 limit,
                 &mut out,
             )
@@ -1667,12 +1707,31 @@ async fn run(cli: Cli) -> Result<()> {
             filter,
             limit,
             tsv,
-        } => report(&store, &by, filter.build()?, limit, tsv, &mut out).await?,
+        } => {
+            report(
+                &store,
+                &by,
+                filter.build(&store.data_dir)?,
+                limit,
+                tsv,
+                &mut out,
+            )
+            .await?
+        }
         Cmd::Profile {
             like,
             filter,
             values,
-        } => profile(&store, like.as_deref(), filter.build()?, values, &mut out).await?,
+        } => {
+            profile(
+                &store,
+                like.as_deref(),
+                filter.build(&store.data_dir)?,
+                values,
+                &mut out,
+            )
+            .await?
+        }
         Cmd::Show {
             id,
             raw,
@@ -1696,7 +1755,7 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             };
             let title = title.unwrap_or_else(|| name.clone());
-            let filter = filter.build()?;
+            let filter = filter.build(&store.data_dir)?;
             warn_unindexed(&store, &filter).await?;
             let s = export::write(&store, &filter, &name, &title, &command_line(), &path).await?;
             writeln!(
