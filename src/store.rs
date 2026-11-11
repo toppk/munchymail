@@ -239,7 +239,20 @@ impl Store {
         let path = data_dir.join("email.sqlite");
         let db = Builder::new_local(path.to_str().context("non-UTF-8 data path")?)
             .build()
-            .await?;
+            .await
+            .map_err(|e| {
+                let held = e.to_string().contains("locked by another process");
+                let e = anyhow::Error::from(e);
+                if held {
+                    e.context(format!(
+                        "another munchymail process (import, index, ocr, or a long query) holds {}; wait for it, or see which with `fuser -v {}`",
+                        path.display(),
+                        path.display()
+                    ))
+                } else {
+                    e
+                }
+            })?;
         let conn = db.connect()?;
         conn.execute("BEGIN", ()).await?;
         conn.execute_batch(SCHEMA).await?;

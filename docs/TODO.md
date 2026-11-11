@@ -21,18 +21,6 @@ Roughly in priority order within each section. Phases refer to
       the CLI over a Unix socket, later the web UI). `src/api.rs` is the
       layer it will wrap.
 
-Agent-friendly CLI gaps (against an agent-friendly CLI checklist):
-
-- [ ] `describe`: commands, arguments and effects generated from the clap
-      definitions, so it can't drift; the service API reuses it.
-- [ ] Name each command's effect: read-only, or writes `data/` (`import`,
-      `export`, `origin move/retire`), visible in `describe` and `--help`.
-- [ ] Render text and JSON from one value, so `search --long` and `--json`
-      carry the same facts (text lacks the snippet today).
-- [ ] Every error names a fix: unknown ID or origin points at the command
-      that lists them; the database-locked error says another munchymail
-      process holds `data/email.sqlite`.
-
 ## Sieve rule work (current use)
 
 - [ ] Negated filters (`--not-header`, `--not-from`, …) so a profile can be

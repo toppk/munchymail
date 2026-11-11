@@ -90,7 +90,7 @@ pub async fn write(
     }
     drop(rows);
     if artifacts.is_empty() {
-        bail!("no messages match");
+        bail!("no messages match; `munchymail search --count` with the same filters checks them");
     }
 
     let mut sightings = Sightings::new(store).await?;

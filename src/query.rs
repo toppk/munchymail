@@ -358,6 +358,14 @@ impl Filter {
     /// and intersected by primary-key joins, because turso scans
     /// `IN (subquery-with-join)` lists linearly.
     pub async fn materialize_into(&self, conn: &Connection, table: &str) -> Result<bool> {
+        if let Some(o) = &self.origin {
+            let mut rows = conn
+                .query("SELECT 1 FROM origin WHERE label = ?1", (o.as_str(),))
+                .await?;
+            if rows.next().await?.is_none() {
+                bail!("no origin labelled {o:?}; `munchymail origin list` lists them");
+            }
+        }
         let sets = self.sets()?;
         if sets.is_empty() {
             return Ok(false);

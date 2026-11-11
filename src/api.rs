@@ -122,11 +122,9 @@ pub async fn page(
 }
 
 fn parse_cursor(c: &str) -> Result<(i64, i64)> {
-    let (d, id) = c.split_once(':').context("bad cursor")?;
-    Ok((
-        d.parse().context("bad cursor")?,
-        id.parse().context("bad cursor")?,
-    ))
+    let bad = || format!("bad cursor {c:?}; pass the `next` of the previous page as --after");
+    let (d, id) = c.split_once(':').with_context(bad)?;
+    Ok((d.parse().with_context(bad)?, id.parse().with_context(bad)?))
 }
 
 pub struct Matched {

@@ -20,7 +20,7 @@ Schema in `src/store.rs`; everything lives in `data/` (`MUNCHYMAIL_DATA` or
 | `file_content` | Whole-file SHA-256, `head_hash` (first 64 KiB), message count, and `parent_content_id` when an earlier content is a byte prefix (a growing mbox across backups). |
 | `file_sighting` | Content seen at `path` (relative to origin root) in a run, with dev/ino/mtime/ctime. |
 | `observation` | Artifact at byte `offset` in a content, with its `From ` line and separator bytes. |
-| `removal` | A copy last seen at `path` in `last_seen_run` and absent in `gone_run`; `moved_to` is where it turned up, NULL if nowhere new. Filled by `import` (per origin) and `changes --record`. |
+| `removal` | A copy last seen at `path` in `last_seen_run` and absent in `gone_run`; `moved_to` is where it turned up, NULL if nowhere new. Filled by `import` (per origin) and `record-removals`. |
 
 `meta.schema_version` is 6. Opening an older database upgrades it in the
 opening transaction (`MIGRATIONS` in `store.rs`: 1 → 2 adds

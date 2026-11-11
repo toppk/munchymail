@@ -113,6 +113,17 @@ There is no negation yet (see TODO), except within `--text`.
 
 ## Commands
 
+`munchymail describe` lists every command with its arguments, defaults and
+effect, generated from the same definitions that parse them (`--json` for
+one object; `describe search` for one command). The effect is `read` (reads
+`data/` only, or for `diff`/`scan` only the files named) or `write` (says
+what in `data/` it changes, or the `-o` path for `export`), and leads each
+command's line in `--help`. No flag changes a command's effect: recording
+removals is its own command, `record-removals`. Errors name the command
+that fixes them or lists valid values, e.g. an unknown `--origin` points
+at `origin list`, and a database held by another munchymail process says
+so.
+
 ### search: list messages
 
 ```
@@ -128,10 +139,11 @@ munchymail search --participant '*@corp.example' --unique --json -n 20   # for a
 Output is `id  date  from  subject`, newest first. The id is a stored
 copy's, what `show` takes; see [Messages and copies](#messages-and-copies).
 `--long` adds, per message, the folders it is in now (or "gone; last seen
-in PATH DATE"), date and time (UTC), the message id, From, To, body size in
-bytes as stored (MIME-encoded), and the number of attachments (parts with a
-file name or `Content-Disposition: attachment`); `--tsv` gives the same as
-columns. Folder is per stored copy: a copy whose headers Dovecot later
+in PATH DATE"), date and time (UTC), the message id and Message-ID, From,
+To, body size in bytes as stored (MIME-encoded), the number of attachments
+(parts with a file name or `Content-Disposition: attachment`), the snippet
+(with `--text`, where it matched, matched words in «»), and `problem` if it
+didn't decode; `--tsv` gives the same as columns. Folder is per stored copy: a copy whose headers Dovecot later
 rewrote shows as gone, next to its current copy; `--unique` lists each
 message once (its newest copy, with the places of all its copies), as
 `export` counts them, and `--current` leaves out copies no longer in any
@@ -382,7 +394,7 @@ after    62655  /var/mail/me/INBOX
 ### changes: what changed between import runs
 
 ```
-munchymail changes --origin mail [--by KEY ...] [-n N] [--list] [--record]
+munchymail changes --origin mail [--by KEY ...] [-n N] [--list]
 munchymail changes BEFORE AFTER [--rename OLD=NEW ...] ...
 ```
 
@@ -418,8 +430,8 @@ before runs 1,2  after runs 3,4
 Every `import` compares the new run with that origin's previous one and
 records each removed or moved message in the `removal` table: the path, the
 last run that saw it there and the first that didn't (so the time is known
-to within two imports), and where it turned up. `changes --record` does the
-same for any pair of snapshots, e.g. across origins. Moves between origins
+to within two imports), and where it turned up. `record-removals` (taking
+the same runs as `changes`) does the same for any pair of snapshots, e.g. across origins. Moves between origins
 are only seen that way, since an import compares one origin at a time.
 
 ```
@@ -461,6 +473,10 @@ left the mailbox are included and marked "gone" in the index.
 munchymail sql "SELECT name, count(*) FROM header WHERE nth = 0 GROUP BY name ORDER BY 2 DESC LIMIT 10"
 munchymail scan --list /var/mail/me/Drafts       # split only, verify byte-exact, no database
 ```
+
+`sql` takes one query (`SELECT`, `WITH`, `VALUES` or `EXPLAIN`) and runs it
+in a transaction that is rolled back, so it changes nothing; columns of a
+table: `SELECT * FROM pragma_table_info('artifact')`.
 
 ## mbox-sort: date-sorted copy of an mbox
 

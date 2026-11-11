@@ -94,7 +94,8 @@ byte-exact splitting, file- and message-level dedupe with provenance, a
 decoded header index, and the Sieve-oriented query tools (`search`,
 `report`, `profile`, `top`, `names`, `show`), `diff` for verifying mbox
 surgery, `read` and `search --json` (decoded text, attachments, locations, JSON
-Lines with stable paging) for agents, message ids (`m123`: same body,
+Lines with stable paging) and `describe` (commands, arguments and
+effects from the parser's definitions) for agents, message ids (`m123`: same body,
 Message-ID and Date) that survive Dovecot's header rewrites, a MIME part
 index (declared vs detected type, zip member names; `attachments`,
 `--attachment`), full-text search over bodies, text attachments,
