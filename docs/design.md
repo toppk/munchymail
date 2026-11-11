@@ -98,8 +98,8 @@ Lines with stable paging) for agents, message ids (`m123`: same body,
 Message-ID and Date) that survive Dovecot's header rewrites, a MIME part
 index (declared vs detected type, zip member names; `attachments`,
 `--attachment`), full-text search over bodies, text attachments,
-attached messages and documents (`--text`, Tantivy; PDF and Word/Excel 97
-via sandboxed tools), `changes` and
+attached messages, documents and OCR of images and scanned PDFs
+(`--text`, Tantivy; external tools sandboxed with bwrap), `changes` and
 recorded removals for comparing import runs, `export` (a `.tgz` of matching
 messages with an index), and a separate `mbox-sort` binary that writes
 date-sorted copies (the first code that writes a mail format; never in

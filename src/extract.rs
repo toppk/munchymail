@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use rayon::prelude::*;
 use tracing::{info, warn};
-use turso::Value;
+use turso::{Statement, Value};
 
 use crate::message::{self, Decoded, MAX_TEXT};
 use crate::parts::stored;
@@ -24,8 +24,17 @@ use crate::store::Store;
 pub const VERSION: i64 = 2;
 
 const BATCH: usize = 64;
-const TIMEOUT: Duration = Duration::from_secs(60);
-const MAX_MEMORY: u64 = 1 << 30;
+/// Caps on one sandboxed tool run.
+#[derive(Clone, Copy)]
+pub struct Limits {
+    pub time: Duration,
+    pub memory: u64,
+}
+
+const LIMITS: Limits = Limits {
+    time: Duration::from_secs(60),
+    memory: 1 << 30,
+};
 /// Most XML read from one member of an office zip, against zip bombs.
 const MAX_XML: u64 = 64 << 20;
 
@@ -80,7 +89,7 @@ pub struct Extracted {
     pub text: Option<String>,
 }
 
-fn done(tool: String, out: Result<Vec<u8>, String>) -> Extracted {
+pub(crate) fn done(tool: String, out: Result<Vec<u8>, String>) -> Extracted {
     match out {
         Ok(bytes) => {
             let text = String::from_utf8_lossy(&bytes).into_owned();
@@ -117,11 +126,11 @@ pub fn extract(f: Format, bytes: &[u8], tmp: &Path, tools: &Tools) -> Extracted 
     };
     let mut cmd = vec![tool];
     cmd.extend_from_slice(args);
-    let e = done(tools.name(tool), sandboxed(bytes, &cmd, tmp));
+    let e = done(tools.name(tool), sandboxed(bytes, &cmd, tmp, LIMITS));
     if f == Format::Doc && e.text.is_none() {
         let again = done(
             "antiword".into(),
-            sandboxed(bytes, &["antiword", "/in"], tmp),
+            sandboxed(bytes, &["antiword", "/in"], tmp, LIMITS),
         );
         if again.text.is_some() {
             return again;
@@ -130,20 +139,23 @@ pub fn extract(f: Format, bytes: &[u8], tmp: &Path, tools: &Tools) -> Extracted 
     e
 }
 
+/// "tool VERSION" from the first word starting with a digit in `tool arg`'s output.
+pub(crate) fn version(tool: &str, arg: &str) -> Option<String> {
+    let out = Command::new(tool).arg(arg).output().ok()?;
+    let all = [out.stdout, out.stderr].concat();
+    let first = String::from_utf8_lossy(&all).lines().next()?.to_string();
+    let v = first
+        .split_whitespace()
+        .find(|w| w.starts_with(|c: char| c.is_ascii_digit()))?;
+    Some(format!("{tool} {v}"))
+}
+
 /// Tool names with versions, found once per run.
 pub struct Tools(HashMap<&'static str, String>);
 
 impl Tools {
     pub fn find() -> Tools {
-        let probe = |tool: &'static str, arg: &str| {
-            let out = Command::new(tool).arg(arg).output().ok()?;
-            let all = [out.stdout, out.stderr].concat();
-            let first = String::from_utf8_lossy(&all).lines().next()?.to_string();
-            let v = first
-                .split_whitespace()
-                .find(|w| w.starts_with(|c: char| c.is_ascii_digit()))?;
-            Some((tool, format!("{tool} {v}")))
-        };
+        let probe = |tool: &'static str, arg: &str| Some((tool, version(tool, arg)?));
         let mut m: HashMap<_, _> = [
             ("pdftotext", "-v"),
             ("catdoc", "-V"),
@@ -174,7 +186,12 @@ impl Tools {
 
 /// Run `cmd` under bwrap on a read-only copy of `bytes` at `/in`: no
 /// network or other namespaces, only /usr, capped time, memory and output.
-fn sandboxed(bytes: &[u8], cmd: &[&str], tmp: &Path) -> Result<Vec<u8>, String> {
+pub(crate) fn sandboxed(
+    bytes: &[u8],
+    cmd: &[&str],
+    tmp: &Path,
+    limits: Limits,
+) -> Result<Vec<u8>, String> {
     std::fs::write(tmp.join("in"), bytes).map_err(|e| format!("failed: writing input: {e}"))?;
     let input = tmp.join("in");
     let mut c = Command::new("bwrap");
@@ -204,6 +221,7 @@ fn sandboxed(bytes: &[u8], cmd: &[&str], tmp: &Path) -> Result<Vec<u8>, String> 
             "--clearenv",
         ])
         .args(["--setenv", "PATH", "/usr/bin", "--setenv", "HOME", "/tmp"])
+        .args(["--setenv", "OMP_THREAD_LIMIT", "1"])
         .arg("--ro-bind")
         .arg(&input)
         .arg("/in")
@@ -213,14 +231,14 @@ fn sandboxed(bytes: &[u8], cmd: &[&str], tmp: &Path) -> Result<Vec<u8>, String> 
         .stderr(Stdio::piped());
     // SAFETY: only async-signal-safe setrlimit calls between fork and exec.
     unsafe {
-        c.pre_exec(|| {
+        c.pre_exec(move || {
             let mem = libc::rlimit {
-                rlim_cur: MAX_MEMORY,
-                rlim_max: MAX_MEMORY,
+                rlim_cur: limits.memory,
+                rlim_max: limits.memory,
             };
             let cpu = libc::rlimit {
-                rlim_cur: TIMEOUT.as_secs(),
-                rlim_max: TIMEOUT.as_secs(),
+                rlim_cur: limits.time.as_secs(),
+                rlim_max: limits.time.as_secs(),
             };
             if libc::setrlimit(libc::RLIMIT_DATA, &mem) != 0
                 || libc::setrlimit(libc::RLIMIT_CPU, &cpu) != 0
@@ -253,7 +271,7 @@ fn sandboxed(bytes: &[u8], cmd: &[&str], tmp: &Path) -> Result<Vec<u8>, String> 
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break Some(s),
-            Ok(None) if start.elapsed() > TIMEOUT => {
+            Ok(None) if start.elapsed() > limits.time => {
                 let _ = child.kill();
                 let _ = child.wait();
                 break None;
@@ -428,33 +446,12 @@ pub async fn run(store: &Store) -> Result<Stats> {
     }
     let tools = Tools::find();
     let tmp = store.data_dir.join("tmp");
-    let c = &store.conn;
-    let mut first = c
-        .prepare("SELECT min(artifact_id) FROM artifact WHERE msg_id = ?1")
-        .await?;
-    let mut sel = c
-        .prepare("SELECT header_hash, body_hash, subject FROM artifact WHERE artifact_id = ?1")
-        .await?;
-    let mut ins = c
-        .prepare(
-            "INSERT OR REPLACE INTO extract (hash, version, tool, outcome, text)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-        )
-        .await?;
-    let mut stale = c
-        .prepare(
-            "UPDATE message SET text_version = NULL
-             WHERE msg_id IN (SELECT msg_id FROM part WHERE hash = ?1)",
-        )
-        .await?;
+    let mut load = PartLoader::new(store).await?;
+    let mut rec = Recorder::new(store).await?;
     for batch in todo.chunks(BATCH) {
         let mut docs = Vec::with_capacity(batch.len());
         for (hash, msg, ordinal, f) in batch {
-            let mut rows = first.query((*msg,)).await?;
-            let id: i64 = rows.next().await?.expect("message has a copy").get(0)?;
-            drop(rows);
-            let (raw, _, _) = stored(store, &mut sel, id).await?;
-            docs.push((hash, *f, message::leaf(&raw, *ordinal).unwrap_or_default()));
+            docs.push((hash, *f, load.bytes(*msg, *ordinal).await?));
         }
         let results: Vec<Extracted> = docs
             .par_iter()
@@ -478,15 +475,7 @@ pub async fn run(store: &Store) -> Result<Stats> {
             .collect();
         store.begin().await?;
         for ((hash, _, _), e) in docs.iter().zip(&results) {
-            ins.execute((
-                hash.to_vec(),
-                VERSION,
-                e.tool.as_str(),
-                e.outcome.as_str(),
-                e.text.clone(),
-            ))
-            .await?;
-            stale.execute((hash.to_vec(),)).await?;
+            rec.record(hash, e).await?;
             stats.with_text += e.text.is_some() as u64;
             stats.failed += (e.outcome.starts_with("failed") || e.outcome == "timeout") as u64;
         }
@@ -496,6 +485,77 @@ pub async fn run(store: &Store) -> Result<Stats> {
     }
     let _ = std::fs::remove_dir(&tmp);
     Ok(stats)
+}
+
+/// Decoded bytes of a part, from the first stored copy of its message.
+pub(crate) struct PartLoader<'a> {
+    store: &'a Store,
+    first: Statement,
+    sel: Statement,
+}
+
+impl<'a> PartLoader<'a> {
+    pub(crate) async fn new(store: &'a Store) -> Result<PartLoader<'a>> {
+        let c = &store.conn;
+        Ok(PartLoader {
+            store,
+            first: c
+                .prepare("SELECT min(artifact_id) FROM artifact WHERE msg_id = ?1")
+                .await?,
+            sel: c
+                .prepare(
+                    "SELECT header_hash, body_hash, subject FROM artifact WHERE artifact_id = ?1",
+                )
+                .await?,
+        })
+    }
+
+    pub(crate) async fn bytes(&mut self, msg: i64, ordinal: usize) -> Result<Vec<u8>> {
+        let mut rows = self.first.query((msg,)).await?;
+        let id: i64 = rows.next().await?.expect("message has a copy").get(0)?;
+        drop(rows);
+        let (raw, _, _) = stored(self.store, &mut self.sel, id).await?;
+        Ok(message::leaf(&raw, ordinal).unwrap_or_default())
+    }
+}
+
+/// Writes `extract` rows and marks the messages holding each part for re-indexing.
+pub(crate) struct Recorder {
+    ins: Statement,
+    stale: Statement,
+}
+
+impl Recorder {
+    pub(crate) async fn new(store: &Store) -> Result<Recorder> {
+        let c = &store.conn;
+        Ok(Recorder {
+            ins: c
+                .prepare(
+                    "INSERT OR REPLACE INTO extract (hash, version, tool, outcome, text)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                )
+                .await?,
+            stale: c
+                .prepare(
+                    "UPDATE message SET text_version = NULL
+                     WHERE msg_id IN (SELECT msg_id FROM part WHERE hash = ?1)",
+                )
+                .await?,
+        })
+    }
+
+    pub(crate) async fn record(&mut self, hash: &[u8], e: &Extracted) -> Result<()> {
+        let row = (
+            hash.to_vec(),
+            VERSION,
+            e.tool.as_str(),
+            e.outcome.as_str(),
+            e.text.clone(),
+        );
+        self.ins.execute(row).await?;
+        self.stale.execute((hash.to_vec(),)).await?;
+        Ok(())
+    }
 }
 
 /// Fill the text of `d`'s parts (message `msg`) from `extract`.

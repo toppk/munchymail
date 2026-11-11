@@ -302,7 +302,25 @@ made of each file is in the `extract` table (`ok`, `empty`, `truncated`,
 munchymail sql "SELECT tool, outcome, count(*) FROM extract GROUP BY 1, 2"
 ```
 
-Not yet searched: images and scanned PDFs (OCR, see TODO).
+Images and scanned PDFs need OCR (English), which is slow, so it is a
+command of its own rather than part of `index`:
+
+```
+munchymail ocr              # everything queued, half the CPUs at a time
+munchymail ocr -n 200 -j 8  # a bounded run
+```
+
+It queues PDFs whose text layer came out empty (`ocrmypdf --force-ocr`,
+sidecar text) and image parts of 10 KiB or more (`tesseract`, keeping
+words with confidence 40 or more; smaller images are icons and logos),
+each once per distinct file, sandboxed as above with 2 GiB and 120 s per
+image or 900 s per PDF. It takes the database only to load each chunk of
+64 and to record it and update the text index, so other commands can run
+in between (they fail with "File is locked" only during those moments);
+`ocr` itself waits up to 10 minutes for a lock another process holds. The
+whole archive here (86 scanned PDFs, about 1,000 images) took under 2
+minutes on 16 processes. Results go in
+`extract` like the other tools, so `ocr` again only does what's new.
 
 The index is Tantivy in `data/text/`, one document per message, built by
 `index` (and `import`); deleting the directory makes the next `index`

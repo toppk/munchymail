@@ -5,13 +5,12 @@ Roughly in priority order within each section. Phases refer to
 
 ## Agent search and read (phase 1)
 
-- [ ] OCR into `extract` (tesseract, `ocrmypdf` for PDFs with no text
-      layer; English) as a background job, sandboxed like the other tools:
-      86 PDFs here have no text layer, plus ~2,200 images (most are logos
-      and photos; maybe only OCR attachments, not inline parts). (Done:
-      bodies, text parts, attached messages, PDF text layer, office files;
-      Tantivy in `data/text/` because turso's `fts` index type is
-      experimental and would make the database unreadable to `sqlite3`.)
+- [ ] OCR: keep tesseract's text when it exits 1 over a truncated JPEG
+      (libjpeg warnings; output may be fine). Run `ocr` after `import`
+      automatically, e.g. a systemd timer, once the service exists.
+      (Text search is Tantivy in `data/text/` because turso's `fts` index
+      type is experimental and would make the database unreadable to
+      `sqlite3`.)
 - [ ] Text inside zips (documents in a zip part); the `.docm`/`.xlsm` here
       are macro-only droppers with no text.
 - [ ] `--text` ranking (`--sort relevance`); today results stay newest first.

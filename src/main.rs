@@ -21,7 +21,7 @@ use munchymail::report::{self, Key};
 use munchymail::store::{Store, now};
 use munchymail::text::{self, TextQuery};
 use munchymail::util::{hex, ymd, ymd_hm};
-use munchymail::{api, export, extract, mbox, parts, source};
+use munchymail::{api, export, extract, mbox, ocr, parts, source};
 
 #[derive(Parser)]
 #[command(
@@ -185,8 +185,20 @@ enum Cmd {
         #[arg(short = 'n', long, default_value_t = 30)]
         limit: usize,
     },
-    /// Bring derived indexes (MIME parts, text) up to date; `import` does this too.
+    /// Bring derived indexes (MIME parts, document text, text search) up to
+    /// date; `import` does this too.
     Index,
+    /// OCR (English) image attachments and PDFs with no text layer into the
+    /// text index. Slow; holds the database only between chunks, so other
+    /// commands can run meanwhile.
+    Ocr {
+        /// At most this many images and PDFs this run.
+        #[arg(short = 'n', long)]
+        limit: Option<usize>,
+        /// OCR processes at a time; default half the CPUs.
+        #[arg(short = 'j', long)]
+        jobs: Option<usize>,
+    },
     /// Corpus counts.
     Stats,
     /// Run SQL against the index and print rows tab-separated.
@@ -1563,6 +1575,20 @@ async fn run(cli: Cli) -> Result<()> {
         diff(before, after, moved_to, by, *limit, *list, &mut out)?;
         return Ok(out.flush()?);
     }
+    if let Cmd::Ocr { limit, jobs } = cli.cmd {
+        let t = Instant::now();
+        let cpus = std::thread::available_parallelism().map_or(2, |n| n.get());
+        let s = ocr::run(&cli.data, limit, jobs.unwrap_or(cpus / 2).max(1)).await?;
+        info!(
+            queued = s.queued,
+            done = s.done,
+            with_text = s.with_text,
+            failed = s.failed,
+            elapsed = ?t.elapsed(),
+            "ocr finished"
+        );
+        return Ok(out.flush()?);
+    }
     if let Cmd::Scan { list, paths } = &cli.cmd {
         for p in paths {
             scan(p, *list, &mut out).with_context(|| p.display().to_string())?;
@@ -1802,7 +1828,7 @@ async fn run(cli: Cli) -> Result<()> {
             moved,
             limit,
         } => removals(&store, folder, moved, limit, &mut out).await?,
-        Cmd::Scan { .. } | Cmd::Diff { .. } => unreachable!(),
+        Cmd::Scan { .. } | Cmd::Diff { .. } | Cmd::Ocr { .. } => unreachable!(),
     }
     if read_txn {
         store.commit().await?;

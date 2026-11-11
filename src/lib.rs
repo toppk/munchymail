@@ -8,6 +8,7 @@ pub mod import;
 pub mod locations;
 pub mod mbox;
 pub mod message;
+pub mod ocr;
 pub mod parts;
 pub mod query;
 pub mod report;
