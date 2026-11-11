@@ -95,6 +95,18 @@ CREATE TABLE IF NOT EXISTS part (
 );
 CREATE INDEX IF NOT EXISTS part_hash ON part (hash);
 
+-- Text extracted from a part's bytes by a tool, once per part hash.
+CREATE TABLE IF NOT EXISTS extract (
+    hash BLOB PRIMARY KEY,
+    -- extract::VERSION
+    version INTEGER NOT NULL,
+    -- e.g. 'pdftotext 26.01.0', 'office-xml'
+    tool TEXT NOT NULL,
+    -- ok, empty, truncated, timeout, or 'failed: ' and the tool's message
+    outcome TEXT NOT NULL,
+    text TEXT
+);
+
 -- File names inside a zip part, by the part's hash.
 CREATE TABLE IF NOT EXISTS archive_member (
     hash BLOB NOT NULL,

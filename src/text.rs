@@ -1,5 +1,6 @@
 //! Full-text index in `data/text/` (Tantivy): one document per message with
-//! its Subject and the text of its text parts and attached messages. Derived
+//! its Subject and the text of its text parts, attached messages and
+//! documents (`extract`). Derived
 //! from stored bytes; `message.text_version` says which messages are stale.
 
 use std::fmt;
@@ -18,6 +19,7 @@ use tantivy::snippet::SnippetGenerator;
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, Searcher, TantivyDocument, Term};
 use tracing::info;
 
+use crate::extract;
 use crate::message::{self, Decoded};
 use crate::parts::{Stats, stored};
 use crate::store::Store;
@@ -142,12 +144,18 @@ pub async fn index(store: &Store) -> Result<Stats> {
         let mut raw = Vec::with_capacity(batch.len());
         for &(msg, id) in batch {
             let (bytes, body, subject) = stored(store, &mut sel, id).await?;
-            raw.push((msg, bytes, body, subject));
+            let extracted = extract::texts(store, msg).await?;
+            raw.push((msg, bytes, body, subject, extracted));
         }
         let docs: Vec<(TantivyDocument, usize)> = raw
             .par_iter()
-            .map(|(msg, bytes, body, subject)| {
-                let d = message::decode(bytes, body);
+            .map(|(msg, bytes, body, subject, extracted)| {
+                let mut d = message::decode(bytes, body);
+                for (i, t) in extracted {
+                    if let Some(p) = d.parts.get_mut(*i) {
+                        p.text.get_or_insert_with(|| t.clone());
+                    }
+                }
                 let mut doc = TantivyDocument::default();
                 doc.add_u64(f.msg, *msg as u64);
                 doc.add_text(f.subject, subject.as_deref().unwrap_or(""));

@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 const MAX_MEMBERS: usize = 1000;
 
 /// Most text kept from one part, in bytes.
-const MAX_TEXT: usize = 1 << 20;
+pub const MAX_TEXT: usize = 1 << 20;
 
 /// Attached messages decoded within attached messages, at most.
 const MAX_DEPTH: usize = 3;
@@ -102,7 +102,8 @@ fn detect(bytes: &[u8]) -> Option<&'static str> {
     })
 }
 
-fn cap(s: String) -> String {
+/// `s` with CRLF as LF, cut to at most `MAX_TEXT` bytes.
+pub fn cap(s: String) -> String {
     let mut s = if s.contains('\r') {
         s.replace("\r\n", "\n")
     } else {
@@ -259,6 +260,22 @@ fn walk(p: &ParsedMail, w: &mut Walk) {
     for s in &p.subparts {
         walk(s, w);
     }
+}
+
+fn nth_leaf(p: &ParsedMail, n: &mut usize) -> Option<Vec<u8>> {
+    if p.subparts.is_empty() {
+        if *n == 0 {
+            return Some(p.get_body_raw().unwrap_or_default());
+        }
+        *n -= 1;
+        return None;
+    }
+    p.subparts.iter().find_map(|s| nth_leaf(s, n))
+}
+
+/// The decoded bytes of leaf part `n` (`Decoded::parts[n]`).
+pub fn leaf(raw: &[u8], mut n: usize) -> Option<Vec<u8>> {
+    nth_leaf(&mailparse::parse_mail(raw).ok()?, &mut n)
 }
 
 /// Decode a whole raw message (header block plus body).

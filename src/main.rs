@@ -21,7 +21,7 @@ use munchymail::report::{self, Key};
 use munchymail::store::{Store, now};
 use munchymail::text::{self, TextQuery};
 use munchymail::util::{hex, ymd, ymd_hm};
-use munchymail::{api, export, mbox, parts, source};
+use munchymail::{api, export, extract, mbox, parts, source};
 
 #[derive(Parser)]
 #[command(
@@ -753,6 +753,15 @@ async fn index(store: &Store) -> Result<()> {
         unparsable = s.problems,
         elapsed = ?t.elapsed(),
         "parts indexed"
+    );
+    let t = Instant::now();
+    let s = extract::run(store).await?;
+    info!(
+        documents = s.documents,
+        with_text = s.with_text,
+        failed = s.failed,
+        elapsed = ?t.elapsed(),
+        "documents extracted"
     );
     let t = Instant::now();
     let s = text::index(store).await?;

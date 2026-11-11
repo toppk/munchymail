@@ -5,15 +5,15 @@ Roughly in priority order within each section. Phases refer to
 
 ## Agent search and read (phase 1)
 
-- [ ] Text from files, into the `--text` index: PDF text layer
-      (`pdftotext`) and office files (antiword/catdoc, LibreOffice
-      headless, pandoc); then OCR (tesseract, `ocrmypdf` for scans;
-      English) as a background job. Extract once per part hash, record
-      tool+version and outcome; run extractors under `bwrap` (no network,
-      time/memory caps, LibreOffice macros off). Most zips here hold
-      `.js`/`.wsf`/`.vbs`. (Bodies, text parts and attached messages are
-      done: Tantivy in `data/text/`; turso's `fts` index type is
+- [ ] OCR into `extract` (tesseract, `ocrmypdf` for PDFs with no text
+      layer; English) as a background job, sandboxed like the other tools:
+      86 PDFs here have no text layer, plus ~2,200 images (most are logos
+      and photos; maybe only OCR attachments, not inline parts). (Done:
+      bodies, text parts, attached messages, PDF text layer, office files;
+      Tantivy in `data/text/` because turso's `fts` index type is
       experimental and would make the database unreadable to `sqlite3`.)
+- [ ] Text inside zips (documents in a zip part); the `.docm`/`.xlsm` here
+      are macro-only droppers with no text.
 - [ ] `--text` ranking (`--sort relevance`); today results stay newest first.
 - [ ] `read mN --attachment K`: extracted text (untrusted-wrapped) and a way
       to save the original bytes.

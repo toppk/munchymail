@@ -40,7 +40,7 @@ are skipped) or a single mbox file. Files that don't start with a valid
 recognised by hash and only get a new sighting, so re-running is cheap.
 Import ends by indexing new messages' MIME parts and text (`munchymail
 index` does only that step; the whole archive takes about 20 s for parts
-and 40 s for text).
+and 40 s for text, plus about 8 s to extract documents).
 
 Every import is kept as a run, so each re-import adds a generation:
 earlier snapshots of a file stay queryable (`--current` selects only the
@@ -271,15 +271,38 @@ munchymail search --text 'subject:passport OR subject:visa' --json
 `--text` searches the Subject and the text of each message: the text/plain
 body (or the text/html one converted, when there is no plain one), every
 other text/* part (text attachments, calendars, patches, logs) and attached
-messages (`message/rfc822`, their Subject and text, nested up to 3 deep),
-at most 1 MiB per part. Words are English-stemmed and case-insensitive, and
+messages (`message/rfc822`, their Subject and text, nested up to 3 deep)
+and documents (below), at most 1 MiB per part. Words are English-stemmed and case-insensitive, and
 all must match; `"a phrase"`, `a OR b`, `-word` and `subject:word` /
 `text:word` work as in Tantivy's query syntax. It combines with every
 other filter. `--long` adds where it matched (`body`, `attachment NAME`,
 `inline`, `subject`) and a fragment around the match; `--json` puts the
 fragment in `snippet` and adds `match` (`source`, `part`, `filename`,
-`highlighted` byte ranges of the snippet). Not yet searched: PDF, office
-documents and images (see TODO).
+`highlighted` byte ranges of the snippet).
+
+Documents are found by detected type (else declared type and extension)
+and extracted once per distinct file:
+
+| Format | Tool |
+|---|---|
+| PDF | `pdftotext` (text layer only; scans come out empty) |
+| docx, xlsx, pptx, odt, ods, odp | read in-process from the XML inside the zip (every sheet's strings) |
+| doc | `catdoc`, else `antiword` |
+| xls | `xls2csv` |
+| rtf | `pandoc` |
+
+External tools run under `bwrap`: read-only `/usr`, a private `/tmp`, no
+network or other namespaces, one file at `/in`, 60 s, 1 GiB data and 1 MiB
+of output; the file is written to `data/tmp/` for the run and removed.
+Without `bwrap` only the in-process formats are extracted. What each tool
+made of each file is in the `extract` table (`ok`, `empty`, `truncated`,
+`timeout`, `failed: …`), e.g.:
+
+```
+munchymail sql "SELECT tool, outcome, count(*) FROM extract GROUP BY 1, 2"
+```
+
+Not yet searched: images and scanned PDFs (OCR, see TODO).
 
 The index is Tantivy in `data/text/`, one document per message, built by
 `index` (and `import`); deleting the directory makes the next `index`

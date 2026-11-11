@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value as Json, json};
 use turso::Value;
 
+use crate::extract;
 use crate::headers::{self, Field};
 use crate::locations::{self, Location, Sightings};
 use crate::message::{self, Decoded, sanitize};
@@ -186,7 +187,8 @@ async fn load(store: &Store, id: i64) -> Result<Stored> {
     let mut raw = store.object(&h).await?;
     let body = store.object(&b).await?;
     raw.extend_from_slice(&body);
-    let decoded = message::decode(&raw, &body);
+    let mut decoded = message::decode(&raw, &body);
+    extract::fill(store, msg, &mut decoded).await?;
     Ok(Stored {
         msg,
         date,
