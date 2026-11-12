@@ -26,6 +26,8 @@ Roughly in priority order within each section. Phases refer to
 - [ ] Cross-account search (a milestone, not an afterthought): `search`
       and `read` over several or all accounts, merging pages by date with
       a cursor per account; the CLI can do it before the service exists.
+- [x] `gmail auth`/`gmail status`: read-only sign-in, secrets in
+      `~/.config/munchymail/creds/`.
 - [ ] Gmail import through the Gmail API into `data/me.example@gmail.com/`,
       read-only scope: `format=raw` bytes, labels as places (a sighting kind
       keyed by Gmail message id, since there is no file), incremental via

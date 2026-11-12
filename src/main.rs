@@ -21,7 +21,7 @@ use munchymail::report::{self, Key};
 use munchymail::store::{Store, now};
 use munchymail::text::{self, TextQuery};
 use munchymail::util::{hex, ymd, ymd_hm};
-use munchymail::{account, api, export, extract, mbox, ocr, parts, source};
+use munchymail::{account, api, export, extract, google, mbox, ocr, parts, source};
 
 #[derive(Parser)]
 #[command(
@@ -46,6 +46,11 @@ fn effect(command: &str) -> Option<(&'static str, &'static str)> {
         "account add" => ("write", "creates data/ADDRESS/"),
         "alias add" | "alias remove" => ("write", "the alias table in data/"),
         "account list" | "alias list" => ("read", READ),
+        "gmail auth" => (
+            "write",
+            "a Google sign-in (read-only scopes) in ~/.config/munchymail/creds/",
+        ),
+        "gmail status" => ("read", "the Gmail profile and labels, over the network"),
         "origin add" | "origin retire" | "origin move" => ("write", "the origin table in data/"),
         "import" => (
             "write",
@@ -230,6 +235,9 @@ enum Cmd {
     /// The account's own addresses, for telling mail it sent from mail it got.
     #[command(subcommand)]
     Alias(AliasCmd),
+    /// Gmail, through Google's API (read-only).
+    #[command(subcommand)]
+    Gmail(GmailCmd),
     /// Manage origins: places mail is found (live trees, backups, exports).
     #[command(subcommand)]
     Origin(OriginCmd),
@@ -482,6 +490,19 @@ enum AccountCmd {
     Add { address: String },
     /// List accounts and their aliases.
     List,
+}
+
+#[derive(Subcommand)]
+enum GmailCmd {
+    /// Sign the account in to Google in a browser, with read-only access to
+    /// Gmail and contacts, and keep the token in ~/.config/munchymail/creds/.
+    Auth {
+        /// OAuth client JSON (Desktop app) to copy into the creds directory first.
+        #[arg(long, value_name = "FILE")]
+        client: Option<PathBuf>,
+    },
+    /// Check the sign-in: the mailbox's address, size, history id and labels.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -754,6 +775,36 @@ async fn account_cmd(root: &Path, cmd: &AccountCmd, out: &mut impl Write) -> Res
             }
         }
     }
+    Ok(())
+}
+
+fn gmail(address: &str, cmd: &GmailCmd, out: &mut impl Write) -> Result<()> {
+    let profile = match cmd {
+        GmailCmd::Auth { client } => {
+            let p = google::authorize(address, client.as_deref(), out)?;
+            writeln!(
+                out,
+                "\nsigned in as {address}; token kept in {}",
+                google::creds_dir()?.display()
+            )?;
+            p
+        }
+        GmailCmd::Status => google::Session::open(address)?.gmail("profile")?,
+    };
+    let mut s = google::Session::open(address)?;
+    let labels = s.gmail("labels")?;
+    let labels = labels["labels"].as_array().cloned().unwrap_or_default();
+    let user = labels.iter().filter(|l| l["type"] == "user").count();
+    writeln!(
+        out,
+        "{}: {} messages, {} threads, history id {}, {} labels ({user} yours)",
+        profile["emailAddress"].as_str().unwrap_or("?"),
+        profile["messagesTotal"],
+        profile["threadsTotal"],
+        profile["historyId"].as_str().unwrap_or("?"),
+        labels.len()
+    )?;
+    writeln!(out, "scopes: {}", s.scopes.join(" "))?;
     Ok(())
 }
 
@@ -1930,6 +1981,12 @@ async fn run(cli: Cli) -> Result<()> {
         diff(before, after, moved_to, by, *limit, *list, &mut out)?;
         return Ok(out.flush()?);
     }
+    if let Cmd::Gmail(cmd) = &cli.cmd {
+        let dir = account::resolve(&cli.data, cli.account.as_deref())?;
+        let address = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        gmail(address, cmd, &mut out)?;
+        return Ok(out.flush()?);
+    }
     if let Cmd::Account(cmd) = &cli.cmd {
         account_cmd(&cli.data, cmd, &mut out).await?;
         return Ok(out.flush()?);
@@ -2195,7 +2252,8 @@ async fn run(cli: Cli) -> Result<()> {
         | Cmd::Diff { .. }
         | Cmd::Ocr { .. }
         | Cmd::Describe { .. }
-        | Cmd::Account(_) => {
+        | Cmd::Account(_)
+        | Cmd::Gmail(_) => {
             unreachable!()
         }
     }

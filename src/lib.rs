@@ -4,6 +4,7 @@ pub mod changes;
 pub mod diff;
 pub mod export;
 pub mod extract;
+pub mod google;
 pub mod headers;
 pub mod import;
 pub mod locations;

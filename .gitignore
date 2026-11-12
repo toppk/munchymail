@@ -1,3 +1,4 @@
 /target
 /upstream/
 /data/
+/client_secret*.json

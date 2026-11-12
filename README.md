@@ -40,6 +40,24 @@ munchymail alias add '*@example.org' me@old-isp.example
 munchymail account list                     # accounts and their aliases
 ```
 
+Gmail accounts sign in to Google with read-only access to mail and
+contacts (sync itself is not built yet). Secrets stay out of `data/`: the
+OAuth client JSON (a Desktop app client) goes in
+`~/.config/munchymail/creds/google-client.json` and each account's refresh
+token next to it, all readable only by you:
+
+```
+munchymail account add me.example@gmail.com
+munchymail --account me.example@gmail.com gmail auth   # prints a link; approve in the browser
+munchymail --account me.example@gmail.com gmail status # address, message count, history id, labels
+```
+
+`gmail auth` waits for Google's redirect on 127.0.0.1; with the browser on
+another machine, paste the address the browser ended on instead. It refuses
+a sign-in as a different Google account than `--account`. Keep the Google
+Cloud consent screen "In production": in Testing, refresh tokens can expire
+after 7 days.
+
 Within an account:
 
 ```
