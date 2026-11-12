@@ -31,7 +31,10 @@ Roughly in priority order within each section. Phases refer to
 - [x] `gmail sync` through the Gmail API, read-only: `format=raw` bytes,
       labels as paths of a run, incremental via history, full listing when
       history has expired.
-- [ ] Run `gmail sync` every few minutes (timer or the service).
+- [ ] The service runs Gmail sync itself, woken by new mail: poll
+      history.list (2 units) every ~30 s, or users.watch with a Pub/Sub
+      pull subscription. Gmail IMAP IDLE needs the full-access
+      `https://mail.google.com/` scope (no read-only IMAP scope exists).
 - [x] First full sync of me.example@gmail.com: 19,515 messages in 3 h, held
       to ~100 messages a minute by "Units per minute per user" errors. The
       Google project is shared with other tools and other tools; incremental syncs are
@@ -48,8 +51,13 @@ Roughly in priority order within each section. Phases refer to
     copies and their origins are kept even when they fold into one message.
   - OAuth: the consent screen is In production (in Testing, refresh
     tokens expire after 7 days and unattended sync would break).
-- [ ] Takeout: no importer of its own; its `.mbox` imports as an origin of
+- [x] Takeout: no importer of its own; its `.mbox` imports as an origin of
       the Gmail account (`X-Gmail-Labels` is then just a header).
+- [ ] Takeout vs API (2026-11-12, 19,509 shared): 16,617 fold; 2,892 don't,
+      as Takeout quotes `>From `, ends every message with CRLF (the API
+      copy may not), and in 75 replaced non-UTF-8 bytes with U+FFFD (lossy).
+      Decide whether folding should ignore the first two; the API copy is
+      the faithful one.
 - [ ] Sending (later): through the originating account, with the sent copy
       visible there; verify each provider's Sent behaviour (Gmail files API
       sends itself; Dovecot needs an IMAP APPEND or a locked mbox write).
