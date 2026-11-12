@@ -32,11 +32,10 @@ Roughly in priority order within each section. Phases refer to
       labels as paths of a run, incremental via history, full listing when
       history has expired.
 - [ ] Run `gmail sync` every few minutes (timer or the service).
-- [ ] First full sync of me.example@gmail.com is quota-bound: Gmail answers
-      "Units per minute per user" errors at ~500 units/min (~100 messages a
-      minute), far under the documented 15,000. Find what else spends this
-      project's per-user quota (other tools, other tools?) or give munchymail its own
-      Google Cloud project. Pacing adapts to whatever is left.
+- [x] First full sync of me.example@gmail.com: 19,515 messages in 3 h, held
+      to ~100 messages a minute by "Units per minute per user" errors. The
+      Google project is shared with other tools and other tools; incremental syncs are
+      cheap, so a project of munchymail's own is needed only if that bites.
 - [ ] Gmail's batch endpoint (fewer HTTP round trips; same quota cost).
   - Gmail labels and presence are source records, kept apart from the
     archive's own tags and rules; a deletion or label removal in Gmail
@@ -47,9 +46,8 @@ Roughly in priority order within each section. Phases refer to
   - Before relying on dedupe, compare Takeout and API copies of the same
     messages (8-bit, long lines, attachments, odd encodings): both raw
     copies and their origins are kept even when they fold into one message.
-  - OAuth setup: check the consent screen's publishing status. Google
-    expires refresh tokens after 7 days for many apps left in Testing,
-    which would break unattended sync.
+  - OAuth: the consent screen is In production (in Testing, refresh
+    tokens expire after 7 days and unattended sync would break).
 - [ ] Takeout: no importer of its own; its `.mbox` imports as an origin of
       the Gmail account (`X-Gmail-Labels` is then just a header).
 - [ ] Sending (later): through the originating account, with the sent copy
