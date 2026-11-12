@@ -21,6 +21,33 @@ Roughly in priority order within each section. Phases refer to
       the CLI over a Unix socket, later the web UI). `src/api.rs` is the
       layer it will wrap.
 
+## Accounts and Gmail (phase 5)
+
+- [ ] Cross-account search (a milestone, not an afterthought): `search`
+      and `read` over several or all accounts, merging pages by date with
+      a cursor per account; the CLI can do it before the service exists.
+- [ ] Gmail import through the Gmail API into `data/me.example@gmail.com/`,
+      read-only scope: `format=raw` bytes, labels as places (a sighting kind
+      keyed by Gmail message id, since there is no file), incremental via
+      the history API, full listing when history has expired.
+  - Gmail labels and presence are source records, kept apart from the
+    archive's own tags and rules; a deletion or label removal in Gmail
+    updates the source record and never removes archived mail.
+  - Advance the history checkpoint only after every change it covers is
+    committed. A full rescan marks messages or labels absent only once
+    the scan has completed.
+  - Before relying on dedupe, compare Takeout and API copies of the same
+    messages (8-bit, long lines, attachments, odd encodings): both raw
+    copies and their origins are kept even when they fold into one message.
+  - OAuth setup: check the consent screen's publishing status. Google
+    expires refresh tokens after 7 days for many apps left in Testing,
+    which would break unattended sync.
+- [ ] Takeout: no importer of its own; its `.mbox` imports as an origin of
+      the Gmail account (`X-Gmail-Labels` is then just a header).
+- [ ] Sending (later): through the originating account, with the sent copy
+      visible there; verify each provider's Sent behaviour (Gmail files API
+      sends itself; Dovecot needs an IMAP APPEND or a locked mbox write).
+
 ## Sieve rule work (current use)
 
 - [ ] Negated filters (`--not-header`, `--not-from`, …) so a profile can be

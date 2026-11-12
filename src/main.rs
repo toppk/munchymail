@@ -21,7 +21,7 @@ use munchymail::report::{self, Key};
 use munchymail::store::{Store, now};
 use munchymail::text::{self, TextQuery};
 use munchymail::util::{hex, ymd, ymd_hm};
-use munchymail::{api, export, extract, mbox, ocr, parts, source};
+use munchymail::{account, api, export, extract, mbox, ocr, parts, source};
 
 #[derive(Parser)]
 #[command(
@@ -29,9 +29,12 @@ use munchymail::{api, export, extract, mbox, ocr, parts, source};
     after_help = "Logging goes to stderr; set MUNCHYMAIL_LOG (e.g. munchymail=debug) to change it."
 )]
 struct Cli {
-    /// Data directory holding email.sqlite and content/.
+    /// Directory holding one directory per account (ADDRESS/email.sqlite, content/, ...).
     #[arg(long, env = "MUNCHYMAIL_DATA", default_value = "data", global = true)]
     data: PathBuf,
+    /// Account to use, e.g. me@example.org; needed only when there are several.
+    #[arg(long, env = "MUNCHYMAIL_ACCOUNT", global = true)]
+    account: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -40,6 +43,9 @@ struct Cli {
 fn effect(command: &str) -> Option<(&'static str, &'static str)> {
     const READ: &str = "reads data/ only";
     Some(match command {
+        "account add" => ("write", "creates data/ADDRESS/"),
+        "alias add" | "alias remove" => ("write", "the alias table in data/"),
+        "account list" | "alias list" => ("read", READ),
         "origin add" | "origin retire" | "origin move" => ("write", "the origin table in data/"),
         "import" => (
             "write",
@@ -218,6 +224,12 @@ fn describe(only: &[String], json: bool, out: &mut impl Write) -> Result<()> {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Manage accounts: one per mail address, each with its own data/ADDRESS/.
+    #[command(subcommand)]
+    Account(AccountCmd),
+    /// The account's own addresses, for telling mail it sent from mail it got.
+    #[command(subcommand)]
+    Alias(AliasCmd),
     /// Manage origins: places mail is found (live trees, backups, exports).
     #[command(subcommand)]
     Origin(OriginCmd),
@@ -463,6 +475,31 @@ enum Cmd {
     },
 }
 
+#[derive(Subcommand)]
+enum AccountCmd {
+    /// Create data/ADDRESS/ (or adopt the database already there) and add
+    /// ADDRESS as its first alias.
+    Add { address: String },
+    /// List accounts and their aliases.
+    List,
+}
+
+#[derive(Subcommand)]
+enum AliasCmd {
+    /// Add addresses or Sieve patterns, e.g. '*@example.org'.
+    Add {
+        #[arg(required = true)]
+        patterns: Vec<String>,
+    },
+    /// Remove addresses or patterns.
+    Remove {
+        #[arg(required = true)]
+        patterns: Vec<String>,
+    },
+    /// List the account's addresses.
+    List,
+}
+
 /// Which import runs `changes` and `record-removals` compare.
 #[derive(Args)]
 struct Runs {
@@ -678,6 +715,79 @@ async fn query_rows(store: &Store, sql: &str, params: Vec<Value>) -> Result<Vec<
         );
     }
     Ok(out)
+}
+
+async fn account_cmd(root: &Path, cmd: &AccountCmd, out: &mut impl Write) -> Result<()> {
+    match cmd {
+        AccountCmd::Add { address } => {
+            let a = account::validate(address)?;
+            if root.join("email.sqlite").exists() {
+                account::resolve(root, None)?;
+            }
+            let dir = root.join(&a);
+            let adopted = dir.join("email.sqlite").exists();
+            let store = Store::open(&dir).await?;
+            store.begin().await?;
+            store
+                .conn
+                .execute(
+                    "INSERT OR IGNORE INTO alias (pattern, added_at) VALUES (?1, ?2)",
+                    (a.as_str(), now()),
+                )
+                .await?;
+            store.commit().await?;
+            let how = if adopted { "adopted" } else { "added" };
+            writeln!(out, "{how} account {a} -> {}", dir.display())?;
+        }
+        AccountCmd::List => {
+            for a in account::list(root)? {
+                let aliases = match Store::open(&root.join(&a)).await {
+                    Ok(s) => query_rows(&s, "SELECT pattern FROM alias ORDER BY pattern", vec![])
+                        .await?
+                        .iter()
+                        .map(|r| text(&r[0]))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    Err(e) => format!("(not readable now: {e:#})"),
+                };
+                writeln!(out, "{a}\t{aliases}")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn alias(store: &Store, cmd: AliasCmd, out: &mut impl Write) -> Result<()> {
+    let (sql, patterns, verb) = match cmd {
+        AliasCmd::Add { patterns } => (
+            "INSERT OR IGNORE INTO alias (pattern, added_at) VALUES (?1, ?2)",
+            patterns,
+            "added",
+        ),
+        AliasCmd::Remove { patterns } => (
+            "DELETE FROM alias WHERE pattern = ?1 AND ?2 IS NOT NULL",
+            patterns,
+            "removed",
+        ),
+        AliasCmd::List => {
+            for r in query_rows(store, "SELECT pattern FROM alias ORDER BY pattern", vec![]).await?
+            {
+                writeln!(out, "{}", text(&r[0]))?;
+            }
+            return Ok(());
+        }
+    };
+    store.begin().await?;
+    for p in &patterns {
+        let p = p.trim().to_ascii_lowercase();
+        let n = store.conn.execute(sql, (p.as_str(), now())).await?;
+        if n == 0 && verb == "removed" {
+            bail!("no alias {p:?}; `munchymail alias list` lists them");
+        }
+        writeln!(out, "{verb} {p}")?;
+    }
+    store.commit().await?;
+    Ok(())
 }
 
 async fn origin(store: &Store, cmd: OriginCmd, out: &mut impl Write) -> Result<()> {
@@ -1820,10 +1930,15 @@ async fn run(cli: Cli) -> Result<()> {
         diff(before, after, moved_to, by, *limit, *list, &mut out)?;
         return Ok(out.flush()?);
     }
+    if let Cmd::Account(cmd) = &cli.cmd {
+        account_cmd(&cli.data, cmd, &mut out).await?;
+        return Ok(out.flush()?);
+    }
     if let Cmd::Ocr { limit, jobs } = cli.cmd {
         let t = Instant::now();
         let cpus = std::thread::available_parallelism().map_or(2, |n| n.get());
-        let s = ocr::run(&cli.data, limit, jobs.unwrap_or(cpus / 2).max(1)).await?;
+        let dir = account::resolve(&cli.data, cli.account.as_deref())?;
+        let s = ocr::run(&dir, limit, jobs.unwrap_or(cpus / 2).max(1)).await?;
         info!(
             queued = s.queued,
             done = s.done,
@@ -1844,7 +1959,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         return Ok(out.flush()?);
     }
-    let store = Store::open(&cli.data).await?;
+    let store = Store::open(&account::resolve(&cli.data, cli.account.as_deref())?).await?;
     let read_txn = matches!(
         cli.cmd,
         Cmd::Search { .. }
@@ -1865,6 +1980,7 @@ async fn run(cli: Cli) -> Result<()> {
     }
     match cli.cmd {
         Cmd::Origin(cmd) => origin(&store, cmd, &mut out).await?,
+        Cmd::Alias(cmd) => alias(&store, cmd, &mut out).await?,
         Cmd::Import { mut labels } => {
             if labels.is_empty() {
                 for r in query_rows(
@@ -2075,7 +2191,11 @@ async fn run(cli: Cli) -> Result<()> {
             moved,
             limit,
         } => removals(&store, folder, moved, limit, &mut out).await?,
-        Cmd::Scan { .. } | Cmd::Diff { .. } | Cmd::Ocr { .. } | Cmd::Describe { .. } => {
+        Cmd::Scan { .. }
+        | Cmd::Diff { .. }
+        | Cmd::Ocr { .. }
+        | Cmd::Describe { .. }
+        | Cmd::Account(_) => {
             unreachable!()
         }
     }

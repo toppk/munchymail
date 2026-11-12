@@ -27,6 +27,21 @@ search --count`). The examples below call the binary directly.
 
 ## Getting mail in
 
+Each mail account is separate, with its own directory under `data/`
+holding its database, content store and text index (`data/me@example.org/`,
+`data/me.example@gmail.com/`). Commands act on one account: `--account
+ADDRESS` (or `MUNCHYMAIL_ACCOUNT`) picks it, and may be left out while there
+is only one. Aliases are the account's own addresses, as addresses or Sieve
+patterns:
+
+```
+munchymail account add me@example.org      # creates data/me@example.org/
+munchymail alias add '*@example.org' me@old-isp.example
+munchymail account list                     # accounts and their aliases
+```
+
+Within an account:
+
 ```
 munchymail origin add mail /var/mail/me --host mailhost --note "live dovecot tree: INBOX + folders"
 munchymail origin list
@@ -70,7 +85,9 @@ When the same files only change place (e.g. a backup filed under
 munchymail origin move spool-2021-07 ~/mail-backups/spool-2021-07-07/me
 ```
 
-Global options: `--data DIR` (or `MUNCHYMAIL_DATA`, default `data`).
+Global options: `--data DIR` (or `MUNCHYMAIL_DATA`, default `data`), the
+directory of accounts, and `--account ADDRESS`. Paths below such as
+`data/exports/` are within the account's directory.
 Logs go to stderr; `MUNCHYMAIL_LOG=munchymail=debug` for more. Each file
 read logs how long its lock was waited for and held:
 

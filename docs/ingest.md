@@ -4,11 +4,12 @@ Addendum to `mail-corpus-design.docx`.
 
 ## Writes
 
-munchymail writes only under `data/` (gitignored):
+munchymail writes only under `data/` (gitignored), one directory per account:
 
 ```
-data/email.sqlite
-data/content/aa/aa23…   large immutable objects, by SHA-256
+data/ADDRESS/email.sqlite
+data/ADDRESS/content/aa/aa23…   large immutable objects, by SHA-256
+data/ADDRESS/text/              the text index
 ```
 
 Sources are never written: no dotlocks, temp files, renames, or atime updates.

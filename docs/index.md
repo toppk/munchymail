@@ -1,7 +1,8 @@
 # Index internals
 
-Schema in `src/store.rs`; everything lives in `data/` (`MUNCHYMAIL_DATA` or
-`--data`). Command usage is in `README.md`.
+Schema in `src/store.rs`, one database per account in `data/ADDRESS/`
+(`MUNCHYMAIL_DATA` or `--data` for `data/`); `data/` below means that
+directory. Command usage is in `README.md`.
 
 ## Tables
 
@@ -15,6 +16,7 @@ Schema in `src/store.rs`; everything lives in `data/` (`MUNCHYMAIL_DATA` or
 | `extract` | Derived: text a tool got from a document or image part (`index`, `ocr`), once per part `hash`: `version` (`extract::VERSION`), `tool` with its version, `outcome`, `text` (≤ 1 MiB). New rows set `text_version` NULL on the messages holding that part, so `index` re-indexes them. |
 | `archive_member` | Derived: file names and sizes inside a zip part, keyed by the part's hash (at most 1000 per zip; read from the central directory, nothing decompressed). |
 | `header` | Derived: per artifact, ordered fields; `name` lowercased, `value` unfolded and RFC 2047-decoded; `nth` = occurrence of that name in the message (0 = first, i.e. Sieve `:index` − 1). |
+| `alias` | The account's own addresses as Sieve `:matches` patterns (`alias add`); `account add` adds the account's address. |
 | `origin` | Registered roots (directory tree or single mbox file); `retired_at` set by `origin retire`. |
 | `import_run` | One per origin per `import`. |
 | `file_content` | Whole-file SHA-256, `head_hash` (first 64 KiB), message count, and `parent_content_id` when an earlier content is a byte prefix (a growing mbox across backups). |

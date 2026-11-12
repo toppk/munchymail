@@ -33,6 +33,7 @@ those bytes, and can be thrown away and rebuilt.
 
 | Layer | What it is |
 |---|---|
+| account | One mail account (`me@example.org`, `me.example@gmail.com`) with its own `data/ADDRESS/`: database, objects, text index. Aliases are its own addresses. Everything below is per account. |
 | object | Immutable bytes by SHA-256. Small ones inline in SQLite, large ones in `data/content/aa/<hash>`. |
 | artifact | One exact message: (header object, body object). Header ‖ body is the message. |
 | origin | A place mail was found: a live mailbox tree, a backup set, an export. |
@@ -105,7 +106,8 @@ recorded removals for comparing import runs, `export` (a `.tgz` of matching
 messages with an index), and a separate `mbox-sort` binary that writes
 date-sorted copies (the first code that writes a mail format; never in
 place). Not yet: Maildir, fuzzier logical grouping, and everything from
-phase 2 on (see `docs/TODO.md`).
+phase 2 on (see `docs/TODO.md`). Accounts: each mail account has its own
+data directory and aliases; Gmail is to come in through its API.
 
 ## Open questions
 

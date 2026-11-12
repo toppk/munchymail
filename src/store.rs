@@ -15,11 +15,11 @@ use crate::util::hex;
 /// Objects at most this size live inline in SQLite.
 pub const INLINE_MAX: usize = 16 * 1024;
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// Upgrades from the previous version; index `i` brings version `i + 1` to `i + 2`.
 /// New tables and indexes need no entry: `SCHEMA` creates them if missing.
-const MIGRATIONS: [&str; 5] = [
+const MIGRATIONS: [&str; 6] = [
     "ALTER TABLE origin ADD COLUMN retired_at INTEGER",
     "",
     "ALTER TABLE artifact ADD COLUMN msg_id INTEGER;
@@ -31,6 +31,7 @@ const MIGRATIONS: [&str; 5] = [
     "ALTER TABLE message ADD COLUMN parts_version INTEGER;
      ALTER TABLE message ADD COLUMN parts_problem TEXT;",
     "ALTER TABLE message ADD COLUMN text_version INTEGER",
+    "",
 ];
 
 /// Indexes on columns a migration may have just added.
@@ -129,6 +130,12 @@ CREATE TABLE IF NOT EXISTS header (
 CREATE INDEX IF NOT EXISTS header_name_nth_value ON header (name, nth, value);
 -- header names of a filtered set of messages
 CREATE INDEX IF NOT EXISTS header_artifact_nth_name ON header (artifact_id, nth, name);
+
+-- The account's own addresses: Sieve :matches patterns, e.g. '*@example.org'.
+CREATE TABLE IF NOT EXISTS alias (
+    pattern TEXT PRIMARY KEY,
+    added_at INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS origin (
     origin_id INTEGER PRIMARY KEY,
