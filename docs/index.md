@@ -25,6 +25,8 @@ directory. Command usage is in `README.md`.
 | `gmail_message` | Gmail's record of each message of the `gmail` origin: Gmail id, the artifact of its raw bytes, thread id, `internal_date` (receipt time), current label ids, and `gone_at` when Gmail deleted it (the artifact stays). |
 | `gmail_label` | Gmail's label ids and names per origin. |
 | `gmail_state` | The sync checkpoint: Gmail history id up to which every change is stored, and the run that stored it. |
+| `fold` | A lesser copy (`artifact_id`) joined to `copy_of`'s message although their bytes differ, and why (`reason`, e.g. `takeout final-crlf`, `takeout utf8-damage`); the other copy is the one shown and indexed. Written by Takeout `import`, `gmail sync` and `reconcile`. |
+| `text_forget` | Messages removed because their copies joined another; `index` drops them from `data/text/`. |
 | `removal` | A copy last seen at `path` in `last_seen_run` and absent in `gone_run`; `moved_to` is where it turned up, NULL if nowhere new. Filled by `import` (per origin) and `record-removals`. |
 
 `meta.schema_version` is 6. Opening an older database upgrades it in the

@@ -75,6 +75,17 @@ changes are all stored, and a full listing marks messages gone only once it
 is complete, so an interrupted sync just repeats. `import` leaves the Gmail
 origin to `gmail sync`.
 
+A Google Takeout of the account is an mboxrd origin marked `source =
+"gmail-takeout"` in the config (below). Its copies differ from the API's:
+Takeout adds `X-GM-THRID`/`X-Gmail-*` headers, ends every message with CRLF
+(Gmail-internal mail has none) and writes U+FFFD over 8-bit text in other
+charsets. Each Takeout copy joins its API copy's message when it pairs by
+thread id and Message-ID and differs only in those ways; both copies are
+kept, the API one is shown and indexed, and `fold` records the reason.
+`import` does this as it reads a Takeout, `gmail sync` for each new API
+copy, so the order doesn't matter; `munchymail reconcile` redoes it for
+everything and lists the copies that stay separate.
+
 Within an account:
 
 ```
@@ -95,6 +106,7 @@ mbox = "dovecot"   # as Dovecot reads it: Content-Length honoured, >From kept
 
 [accounts."me.example@gmail.com".origins."takeout-2026-11-12"]
 mbox = "mboxrd"    # one > dropped from each >…>From line (Google Takeout)
+source = "gmail-takeout"   # a Takeout of this account's Gmail (see above)
 ```
 
 An origin is a directory tree (walked; dot-entries like Dovecot's `.imap`

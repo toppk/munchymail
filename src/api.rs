@@ -198,8 +198,8 @@ async fn load(store: &Store, id: i64) -> Result<Stored> {
     })
 }
 
-/// Every stored copy of message `msg`, the one seen most recently (then the
-/// newest stored), and the places of all of them.
+/// Every stored copy of message `msg`, the one to show (not a lesser copy,
+/// then seen most recently, then newest stored), and the places of all of them.
 async fn message_copies(
     store: &Store,
     sightings: &mut Sightings,
@@ -208,24 +208,32 @@ async fn message_copies(
     let mut rows = store
         .conn
         .query(
-            "SELECT artifact_id FROM artifact WHERE msg_id = ?1 ORDER BY artifact_id",
+            "SELECT a.artifact_id, f.artifact_id IS NULL FROM artifact a
+             LEFT JOIN fold f ON f.artifact_id = a.artifact_id
+             WHERE a.msg_id = ?1 ORDER BY a.artifact_id",
             (msg,),
         )
         .await?;
     let mut ids = Vec::new();
+    let mut primary = Vec::new();
     while let Some(r) = rows.next().await? {
         ids.push(r.get::<i64>(0)?);
+        primary.push(r.get::<i64>(1)? != 0);
     }
     drop(rows);
     let mut all = Vec::new();
     let mut best = None;
-    for &id in &ids {
+    for (&id, &primary) in ids.iter().zip(&primary) {
         let locs = sightings.of(id).await?;
-        let key = (locs.iter().map(|l| l.last_seen).max().unwrap_or(0), id);
+        let key = (
+            primary,
+            locs.iter().map(|l| l.last_seen).max().unwrap_or(0),
+            id,
+        );
         best = best.max(Some(key));
         locations::merge(&mut all, locs);
     }
-    let Some((_, chosen)) = best else {
+    let Some((_, _, chosen)) = best else {
         bail!("no message m{msg}; `search --json` lists message ids")
     };
     Ok((ids, chosen, all))

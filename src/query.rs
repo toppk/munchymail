@@ -422,27 +422,29 @@ impl Filter {
 }
 
 /// Keep one artifact per message (`artifact.msg_id`) in TEMP TABLE `table`:
-/// the newest stored copy. Returns how many copies were dropped.
+/// the newest stored copy that is not a lesser one. Returns how many copies were dropped.
 pub async fn fold_copies(conn: &Connection, table: &str) -> Result<u64> {
     let mut rows = conn
         .query(
             &format!(
-                "SELECT t.artifact_id, a.msg_id FROM {table} t
-                 JOIN artifact a ON a.artifact_id = t.artifact_id"
+                "SELECT t.artifact_id, a.msg_id, f.artifact_id IS NULL FROM {table} t
+                 JOIN artifact a ON a.artifact_id = t.artifact_id
+                 LEFT JOIN fold f ON f.artifact_id = t.artifact_id"
             ),
             (),
         )
         .await?;
-    let mut newest: HashMap<i64, i64> = HashMap::new();
+    let mut best: HashMap<i64, (bool, i64)> = HashMap::new();
     let mut all = Vec::new();
     while let Some(r) = rows.next().await? {
         let id: i64 = r.get(0)?;
-        let e = newest.entry(r.get(1)?).or_insert(id);
-        *e = (*e).max(id);
+        let key = (r.get::<i64>(2)? != 0, id);
+        let e = best.entry(r.get(1)?).or_insert(key);
+        *e = (*e).max(key);
         all.push(id);
     }
     drop(rows);
-    let keep: HashSet<i64> = newest.into_values().collect();
+    let keep: HashSet<i64> = best.into_values().map(|(_, id)| id).collect();
     let mut del = conn
         .prepare(&format!("DELETE FROM {table} WHERE artifact_id = ?1"))
         .await?;

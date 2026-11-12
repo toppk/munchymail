@@ -23,6 +23,7 @@ use crate::google::Session;
 use crate::import::{Artifacts, prepare};
 use crate::mbox;
 use crate::store::{Store, now};
+use crate::takeout::{self, Linker};
 
 /// The origin label every Gmail account's sync uses.
 pub const ORIGIN: &str = "gmail";
@@ -39,6 +40,8 @@ pub struct Stats {
     pub new_artifacts: u64,
     pub relabelled: u64,
     pub gone: u64,
+    /// Takeout copies joined to the messages of newly fetched API copies.
+    pub takeout: takeout::Stats,
 }
 
 enum Fetched {
@@ -219,7 +222,8 @@ async fn origin(store: &Store, address: &str) -> Result<i64> {
 
 /// Bring the account's Gmail origin up to date: changes since the last
 /// checkpoint, or everything if there is none or Gmail's history expired.
-pub async fn sync(store: &Store, address: &str, jobs: usize) -> Result<Stats> {
+/// `takeouts`: origins that are Takeouts of this Gmail, whose copies join new API copies.
+pub async fn sync(store: &Store, address: &str, jobs: usize, takeouts: &[i64]) -> Result<Stats> {
     let t = Instant::now();
     let origin_id = origin(store, address).await?;
     let s = Arc::new(Session::open(address)?);
@@ -368,6 +372,8 @@ pub async fn sync(store: &Store, address: &str, jobs: usize) -> Result<Stats> {
         )
         .await?;
     let (mut ins, mut relabel, mut gone) = (ins, relabel, gone);
+    let mut linker = Linker::new(store).await?;
+    let mut fresh = Vec::new();
     let rx = fetch_all(s.clone(), work, jobs);
     store.begin().await?;
     for (n, got) in rx.iter().enumerate() {
@@ -394,6 +400,9 @@ pub async fn sync(store: &Store, address: &str, jobs: usize) -> Result<Stats> {
                 .await?;
                 stats.fetched += 1;
                 stats.new_artifacts += new as u64;
+                if new {
+                    fresh.push(artifact);
+                }
             }
             Fetched::Labels { id, labels } => {
                 relabel
@@ -407,11 +416,14 @@ pub async fn sync(store: &Store, address: &str, jobs: usize) -> Result<Stats> {
             }
         }
         if (n + 1) % BATCH == 0 {
+            stats.takeout.add(linker.from_api(takeouts, &fresh).await?);
+            fresh.clear();
             store.commit().await?;
             info!(done = n + 1, of = total, fetched = stats.fetched, elapsed = ?t.elapsed(), "gmail sync");
             store.begin().await?;
         }
     }
+    stats.takeout.add(linker.from_api(takeouts, &fresh).await?);
     if let Some(ids) = listed {
         store
             .conn

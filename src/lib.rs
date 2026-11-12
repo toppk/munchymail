@@ -19,5 +19,6 @@ pub mod report;
 pub mod sort;
 pub mod source;
 pub mod store;
+pub mod takeout;
 pub mod text;
 pub mod util;

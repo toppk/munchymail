@@ -500,7 +500,12 @@ impl<'a> PartLoader<'a> {
         Ok(PartLoader {
             store,
             first: c
-                .prepare("SELECT min(artifact_id) FROM artifact WHERE msg_id = ?1")
+                .prepare(
+                    "SELECT coalesce(min(CASE WHEN f.artifact_id IS NULL THEN a.artifact_id END),
+                                     min(a.artifact_id))
+                     FROM artifact a LEFT JOIN fold f ON f.artifact_id = a.artifact_id
+                     WHERE a.msg_id = ?1",
+                )
                 .await?,
             sel: c
                 .prepare(

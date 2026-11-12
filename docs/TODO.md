@@ -53,11 +53,12 @@ Roughly in priority order within each section. Phases refer to
     tokens expire after 7 days and unattended sync would break).
 - [x] Takeout: no importer of its own; its `.mbox` imports as an origin of
       the Gmail account (`X-Gmail-Labels` is then just a header).
-- [ ] Takeout vs API (2026-11-12, 19,509 shared): the API copy is the
-      original each time. Read as mboxrd, 16,782 fold; 2,727 don't, as
-      Takeout ends every message with CRLF (Gmail-internal mail has none:
-      2,652) or wrote U+FFFD for 8-bit iso-8859/cp1252 bytes (75, lossy).
-      Decide whether folding ignores that final CRLF.
+- [x] Takeout vs API (2026-11-12, 19,509 shared): the API copy is the
+      original each time. Takeout copies join their API copy's message
+      (`fold`) by thread id and Message-ID when they differ only by Takeout's
+      headers, an added final CRLF (2,652) or U+FFFD for 8-bit bytes (76);
+      one, a raw binary attachment, stays separate. Same result whichever
+      of import and sync comes first (checked on the real data).
 - [ ] Around 2026-12-15, before the next Takeout: send test mail (Gmail web
       to itself and to me@example.org; from example.org a Latin-1 8-bit
       message with `From ` and `>From ` lines) to confirm the above.

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 
 use crate::mbox::Variant;
+use crate::takeout::SOURCE;
 
 /// `$XDG_CONFIG_HOME/munchymail` (default `~/.config/munchymail`); not created.
 pub fn dir() -> Result<PathBuf> {
@@ -40,13 +41,18 @@ impl Config {
         Ok(Config { path, table })
     }
 
+    fn origins(&self, account: &str) -> Option<&toml::Table> {
+        self.table
+            .get("accounts")?
+            .get(account)?
+            .get("origins")?
+            .as_table()
+    }
+
     /// `[accounts."ACCOUNT".origins."ORIGIN"] mbox`; required, there is no default.
     pub fn mbox(&self, account: &str, origin: &str) -> Result<Variant> {
         let v = self
-            .table
-            .get("accounts")
-            .and_then(|a| a.get(account))
-            .and_then(|a| a.get("origins"))
+            .origins(account)
             .and_then(|o| o.get(origin))
             .and_then(|o| o.get("mbox"));
         let Some(v) = v else {
@@ -63,6 +69,33 @@ impl Config {
                 self.path.display()
             ),
         }
+    }
+
+    /// Whether the origin's `source` says it is a Takeout of the account's Gmail.
+    pub fn is_takeout(&self, account: &str, origin: &str) -> Result<bool> {
+        match self
+            .origins(account)
+            .and_then(|o| o.get(origin))
+            .and_then(|o| o.get("source"))
+        {
+            None => Ok(false),
+            Some(v) if v.as_str() == Some(SOURCE) => Ok(true),
+            Some(v) => bail!(
+                "origin {origin:?} of {account}: source = {v} in {} must be \"{SOURCE}\" or absent",
+                self.path.display()
+            ),
+        }
+    }
+
+    /// Labels of the account's origins that are Takeouts of its Gmail.
+    pub fn takeouts(&self, account: &str) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        for label in self.origins(account).into_iter().flat_map(|o| o.keys()) {
+            if self.is_takeout(account, label)? {
+                out.push(label.clone());
+            }
+        }
+        Ok(out)
     }
 
     /// The TOML that sets an origin's variant, for messages.
@@ -82,7 +115,7 @@ mod tests {
         let c = Config::parse(
             PathBuf::from("config.toml"),
             "[accounts.\"a@x.org\".origins.mail]\nmbox = \"dovecot\"\n\
-             [accounts.\"a@x.org\".origins.\"takeout-1\"]\nmbox = \"mboxrd\"\n\
+             [accounts.\"a@x.org\".origins.\"takeout-1\"]\nmbox = \"mboxrd\"\nsource = \"gmail-takeout\"\n\
              [accounts.\"a@x.org\".origins.odd]\nmbox = \"mboxo\"\n",
         )
         .unwrap();
@@ -91,5 +124,7 @@ mod tests {
         assert!(c.mbox("a@x.org", "odd").is_err());
         assert!(c.mbox("a@x.org", "other").is_err());
         assert!(c.mbox("b@x.org", "mail").is_err());
+        assert_eq!(c.takeouts("a@x.org").unwrap(), ["takeout-1"]);
+        assert!(!c.is_takeout("a@x.org", "mail").unwrap());
     }
 }

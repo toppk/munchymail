@@ -20,6 +20,7 @@ use munchymail::message::{TextSource, sanitize};
 use munchymail::query::{Filter, sieve_to_like};
 use munchymail::report::{self, Key};
 use munchymail::store::{Store, now};
+use munchymail::takeout::{self, Linker};
 use munchymail::text::{self, TextQuery};
 use munchymail::util::{hex, ymd, ymd_hm};
 use munchymail::{account, api, export, extract, google, mbox, ocr, parts, source};
@@ -62,6 +63,10 @@ fn effect(command: &str) -> Option<(&'static str, &'static str)> {
             "data/; reads the origins' mail under a shared lock, never writes it",
         ),
         "index" | "ocr" => ("write", "derived indexes in data/"),
+        "reconcile" => (
+            "write",
+            "which message each Takeout copy belongs to, in data/",
+        ),
         "export" => ("write", "data/exports/NAME.tgz, or the -o path"),
         "record-removals" => ("write", "the removal table in data/"),
         "sql" => ("read", "a read-only connection: writes are refused"),
@@ -393,6 +398,13 @@ enum Cmd {
     /// Bring derived indexes (MIME parts, document text, text search) up to
     /// date; `import` does this too.
     Index,
+    /// Join each Takeout copy to its Gmail API copy's message where they differ
+    /// only as Takeout changes mail; `import` and `gmail sync` do this as they go.
+    ///
+    /// Copies pair by thread id and Message-ID. Both stay stored; the API copy
+    /// is the one shown and indexed. Copies that differ in any other way stay
+    /// separate and are listed.
+    Reconcile,
     /// OCR (English) image attachments and PDFs with no text layer into the
     /// text index. Slow; holds the database only between chunks, so other
     /// commands can run meanwhile.
@@ -857,6 +869,52 @@ async fn alias(store: &Store, cmd: AliasCmd, out: &mut impl Write) -> Result<()>
         writeln!(out, "{verb} {p}")?;
     }
     store.commit().await?;
+    Ok(())
+}
+
+async fn reconcile(store: &Store, out: &mut impl Write) -> Result<()> {
+    let address = account_address(store).to_string();
+    let config = Config::load()?;
+    let labels = config.takeouts(&address)?;
+    if labels.is_empty() {
+        bail!(
+            "no origin of {address} is a Takeout; mark one with source = \"{}\" in {}",
+            takeout::SOURCE,
+            config.path.display()
+        );
+    }
+    let Some(gmail) = takeout::gmail_origin(store, &address).await? else {
+        bail!("{address} has no Gmail origin yet; `munchymail gmail sync` makes one");
+    };
+    let mut ids = Vec::new();
+    for origin in takeout::origin_ids(store, &labels).await? {
+        for r in query_rows(
+            store,
+            "SELECT DISTINCT o.artifact_id FROM observation o
+             JOIN file_sighting s ON s.content_id = o.content_id
+             WHERE s.origin_id = ?1 ORDER BY 1",
+            vec![Value::Integer(origin)],
+        )
+        .await?
+        {
+            if let Value::Integer(id) = r[0] {
+                ids.push(id);
+            }
+        }
+    }
+    store.begin().await?;
+    let s = Linker::new(store).await?.from_takeout(gmail, &ids).await?;
+    store.commit().await?;
+    for (why, n) in &s.linked {
+        writeln!(out, "joined\t{why}\t{n}")?;
+    }
+    let unmatched: Vec<String> = s.unmatched.iter().map(i64::to_string).collect();
+    writeln!(
+        out,
+        "separate\t{}\t{}",
+        unmatched.len(),
+        unmatched.join(" ")
+    )?;
     Ok(())
 }
 
@@ -2090,13 +2148,16 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Gmail(GmailCmd::Sync { jobs }) => {
             let t = Instant::now();
             let address = account_address(&store).to_string();
-            let s = munchymail::gmail::sync(&store, &address, jobs.max(1)).await?;
+            let takeouts =
+                takeout::origin_ids(&store, &Config::load()?.takeouts(&address)?).await?;
+            let s = munchymail::gmail::sync(&store, &address, jobs.max(1), &takeouts).await?;
             info!(
                 full = s.full,
                 fetched = s.fetched,
                 new_artifacts = s.new_artifacts,
                 relabelled = s.relabelled,
                 gone = s.gone,
+                takeout_linked = s.takeout.total(),
                 elapsed = ?t.elapsed(),
                 "gmail sync finished"
             );
@@ -2124,10 +2185,15 @@ async fn run(cli: Cli) -> Result<()> {
             for (label, variant) in labels.into_iter().zip(variants) {
                 let t = Instant::now();
                 let mut imp = Importer::new(&store, &label, variant).await?;
+                if config.is_takeout(account_address(&store), &label)? {
+                    imp.takeout_of = takeout::gmail_origin(&store, account_address(&store)).await?;
+                }
                 imp.run().await?;
                 let s = &imp.stats;
                 info!(
                     origin = label.as_str(),
+                    takeout_linked = s.takeout.total(),
+                    takeout_unmatched = s.takeout.unmatched.len(),
                     files = s.files,
                     unchanged = s.known_files,
                     not_mbox = s.skipped,
@@ -2147,6 +2213,11 @@ async fn run(cli: Cli) -> Result<()> {
             info!(elapsed = ?t.elapsed(), "wal checkpoint");
         }
         Cmd::Index => {
+            index(&store).await?;
+            store.checkpoint().await?;
+        }
+        Cmd::Reconcile => {
+            reconcile(&store, &mut out).await?;
             index(&store).await?;
             store.checkpoint().await?;
         }

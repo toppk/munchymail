@@ -14,6 +14,7 @@ use crate::headers::{self, Field, Summary};
 use crate::mbox;
 use crate::source;
 use crate::store::{INLINE_MAX, Store, now};
+use crate::takeout::{self, Linker};
 
 const LOCK_TIMEOUT: Duration = Duration::from_secs(60);
 const HEAD_LEN: usize = 64 * 1024;
@@ -172,6 +173,8 @@ pub struct Stats {
     pub messages: u64,
     pub new_artifacts: u64,
     pub bytes: u64,
+    /// Takeout copies joined to their Gmail API copies' messages.
+    pub takeout: takeout::Stats,
 }
 
 struct Stmts {
@@ -229,6 +232,8 @@ pub struct Importer<'a> {
     pub run_id: i64,
     root: PathBuf,
     variant: mbox::Variant,
+    /// The account's Gmail API origin, when this origin is a Takeout of it.
+    pub takeout_of: Option<i64>,
     pub stats: Stats,
 }
 
@@ -314,6 +319,7 @@ impl<'a> Importer<'a> {
             run_id,
             root: PathBuf::from(root),
             variant,
+            takeout_of: None,
             stats: Stats::default(),
         })
     }
@@ -451,6 +457,7 @@ impl<'a> Importer<'a> {
         let content_id = self.store.conn.last_insert_rowid();
 
         let mut new_artifacts = 0;
+        let mut ids = Vec::with_capacity(content.len());
         for (ordinal, ((m, (h, b)), p)) in parsed
             .messages
             .iter()
@@ -460,6 +467,7 @@ impl<'a> Importer<'a> {
         {
             let (artifact_id, new) = self.stmts.art.put(self.store, h, b, p).await?;
             new_artifacts += new as u64;
+            ids.push(artifact_id);
             self.stmts
                 .ins_observation
                 .execute((
@@ -474,6 +482,13 @@ impl<'a> Importer<'a> {
                 .await?;
         }
 
+        if let Some(gmail) = self.takeout_of {
+            let linked = Linker::new(self.store)
+                .await?
+                .from_takeout(gmail, &ids)
+                .await?;
+            self.stats.takeout.add(linked);
+        }
         self.stats.messages += parsed.messages.len() as u64;
         self.stats.new_artifacts += new_artifacts;
         info!(

@@ -114,12 +114,15 @@ pub async fn index(store: &Store) -> Result<Stats> {
         let (schema, f) = schema();
         (Index::create_in_dir(&path, schema)?, f)
     };
+    forget(store, &index, &f).await?;
     let mut todo = Vec::new();
     let mut rows = store
         .conn
         .query(
-            "SELECT a.msg_id, min(a.artifact_id) FROM artifact a
-             JOIN message m ON m.msg_id = a.msg_id
+            "SELECT a.msg_id, coalesce(min(CASE WHEN f.artifact_id IS NULL THEN a.artifact_id END),
+                                       min(a.artifact_id))
+             FROM artifact a JOIN message m ON m.msg_id = a.msg_id
+             LEFT JOIN fold f ON f.artifact_id = a.artifact_id
              WHERE m.text_version IS NOT ?1 GROUP BY a.msg_id",
             (VERSION,),
         )
@@ -184,6 +187,39 @@ pub async fn index(store: &Store) -> Result<Stats> {
     }
     writer.wait_merging_threads()?;
     Ok(stats)
+}
+
+/// Drop the documents of messages listed in `text_forget`, then the list.
+async fn forget(store: &Store, index: &Index, f: &Fields) -> Result<()> {
+    let mut gone = Vec::new();
+    let mut rows = store
+        .conn
+        .query("SELECT msg_id FROM text_forget", ())
+        .await?;
+    while let Some(r) = rows.next().await? {
+        gone.push(r.get::<i64>(0)?);
+    }
+    drop(rows);
+    if gone.is_empty() {
+        return Ok(());
+    }
+    let mut writer: IndexWriter = index.writer(WRITER_HEAP)?;
+    for &msg in &gone {
+        writer.delete_term(Term::from_field_u64(f.msg, msg as u64));
+    }
+    writer.commit()?;
+    writer.wait_merging_threads()?;
+    store.begin().await?;
+    let mut del = store
+        .conn
+        .prepare("DELETE FROM text_forget WHERE msg_id = ?1")
+        .await?;
+    for &msg in &gone {
+        del.execute((msg,)).await?;
+    }
+    store.commit().await?;
+    info!(messages = gone.len(), "text of removed messages dropped");
+    Ok(())
 }
 
 /// A parsed `--text` query against the index, for filtering and snippets.

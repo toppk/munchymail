@@ -229,6 +229,18 @@ CREATE TABLE IF NOT EXISTS gmail_state (
     synced_at INTEGER NOT NULL
 );
 
+-- A lesser copy joined to another copy's message although their bytes
+-- differ (a Takeout copy of a Gmail API copy); both stay stored.
+CREATE TABLE IF NOT EXISTS fold (
+    artifact_id INTEGER PRIMARY KEY,
+    copy_of INTEGER NOT NULL,
+    -- e.g. 'takeout final-crlf'
+    reason TEXT NOT NULL
+);
+
+-- Messages removed (their copies joined another), still to drop from data/text/.
+CREATE TABLE IF NOT EXISTS text_forget (msg_id INTEGER PRIMARY KEY);
+
 -- a copy last seen at path in last_seen_run and not there in gone_run
 CREATE TABLE IF NOT EXISTS removal (
     artifact_id INTEGER NOT NULL,

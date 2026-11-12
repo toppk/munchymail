@@ -69,8 +69,10 @@ pub async fn index(store: &Store) -> Result<Stats> {
     let mut rows = store
         .conn
         .query(
-            "SELECT a.msg_id, min(a.artifact_id) FROM artifact a
-             JOIN message m ON m.msg_id = a.msg_id
+            "SELECT a.msg_id, coalesce(min(CASE WHEN f.artifact_id IS NULL THEN a.artifact_id END),
+                                       min(a.artifact_id))
+             FROM artifact a JOIN message m ON m.msg_id = a.msg_id
+             LEFT JOIN fold f ON f.artifact_id = a.artifact_id
              WHERE m.parts_version IS NOT ?1 GROUP BY a.msg_id",
             (VERSION,),
         )
