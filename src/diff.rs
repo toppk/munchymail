@@ -38,24 +38,26 @@ impl Msg {
 }
 
 /// Read under the shared lock, split, and keep only hashes and decoded headers.
-pub fn load(path: &Path) -> Result<Vec<Msg>> {
+pub fn load(path: &Path, variant: mbox::Variant) -> Result<Vec<Msg>> {
     let snap = source::read_locked(path, LOCK_TIMEOUT)?;
     let buf = &snap.bytes;
-    let parsed = mbox::split(buf).with_context(|| path.display().to_string())?;
-    Ok(parsed
+    let parsed = mbox::split(buf, variant).with_context(|| path.display().to_string())?;
+    parsed
         .messages
         .par_iter()
         .map(|m| {
-            let header = &buf[m.header.clone()];
-            let fields = headers::fields(header);
-            Msg {
-                header_hash: Sha256::digest(header).into(),
-                body_hash: Sha256::digest(&buf[m.body.clone()]).into(),
+            let (header, body) = parsed
+                .content(buf, m)
+                .with_context(|| path.display().to_string())?;
+            let fields = headers::fields(&header);
+            Ok(Msg {
+                header_hash: Sha256::digest(&header).into(),
+                body_hash: Sha256::digest(&body).into(),
                 message_id: headers::first(&fields, "message-id").map(str::to_string),
                 fields,
-            }
+            })
         })
-        .collect())
+        .collect()
 }
 
 pub struct Diff {

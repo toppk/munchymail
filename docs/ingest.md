@@ -49,13 +49,19 @@ Follows `istream-raw-mbox.c` / `mbox-from.c`:
   accepts; no blank line is required. The preceding newline belongs to the
   separator, not the message. At EOF a final newline after an empty line is
   likewise the separator.
-- `Content-Length:` is honoured only when it points exactly at a valid
+- `dovecot` only: `Content-Length:` is honoured only when it points exactly at a valid
   separator or at a lone trailing newline at EOF, and only to extend a message
   past a `From ` line in its body.
-- Nothing is unescaped: `>From` stays as written. mboxrd/mboxo
-  interpretation is a later, derived step.
+- The caller names the variant (`mbox::Variant`; per origin in
+  `config.toml`, `--mbox` for `scan`/`diff`). `dovecot`: nothing is
+  unescaped, `>From` stays as written, as Dovecot serves it. `mboxrd`: one
+  `>` is dropped from each `>…>From ` line of the stored message and
+  `Content-Length` is ignored; a line starting `From ` refuses the file,
+  since quoting the message back would not rebuild it. Detecting the
+  variant would be a separate, explicit option.
 - Header object = bytes through the empty line ending the headers;
-  body = the rest. Header ‖ body is the exact message.
+  body = the rest. Header ‖ body is the exact message (for `mboxrd`, once
+  unquoted).
 - The file is `preamble ‖ (from_line ‖ header ‖ body ‖ separator)*` with no
   gaps (`Mbox::covers`), so every byte stays attributable.
 

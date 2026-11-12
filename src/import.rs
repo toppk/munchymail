@@ -187,7 +187,9 @@ impl Stmts {
     async fn new(store: &Store) -> Result<Stmts> {
         let c = &store.conn;
         Ok(Stmts {
-            sel_content: c.prepare("SELECT content_id FROM file_content WHERE hash = ?1").await?,
+            sel_content: c
+                .prepare("SELECT content_id, format FROM file_content WHERE hash = ?1")
+                .await?,
             sel_parents: c
                 .prepare(
                     "SELECT content_id, hash, length FROM file_content
@@ -198,7 +200,7 @@ impl Stmts {
                 .prepare(
                     "INSERT INTO file_content
                      (hash, length, head_hash, format, message_count, preamble_length, parent_content_id)
-                     VALUES (?1, ?2, ?3, 'mbox', ?4, ?5, ?6)",
+                     VALUES (?1, ?2, ?3, ?7, ?4, ?5, ?6)",
                 )
                 .await?,
             art: Artifacts::new(store).await?,
@@ -226,6 +228,7 @@ pub struct Importer<'a> {
     pub origin_id: i64,
     pub run_id: i64,
     root: PathBuf,
+    variant: mbox::Variant,
     pub stats: Stats,
 }
 
@@ -266,7 +269,11 @@ fn looks_like_mbox(head: &[u8]) -> bool {
 }
 
 impl<'a> Importer<'a> {
-    pub async fn new(store: &'a Store, label: &str) -> Result<Importer<'a>> {
+    pub async fn new(
+        store: &'a Store,
+        label: &str,
+        variant: mbox::Variant,
+    ) -> Result<Importer<'a>> {
         let mut rows = store
             .conn
             .query(
@@ -306,6 +313,7 @@ impl<'a> Importer<'a> {
             origin_id,
             run_id,
             root: PathBuf::from(root),
+            variant,
             stats: Stats::default(),
         })
     }
@@ -375,13 +383,21 @@ impl<'a> Importer<'a> {
 
         let mut rows = self.stmts.sel_content.query((file_hash.to_vec(),)).await?;
         let known = match rows.next().await? {
-            Some(r) => Some(r.get::<i64>(0)?),
+            Some(r) => Some((r.get::<i64>(0)?, r.get::<String>(1)?)),
             None => None,
         };
         drop(rows);
+        if let Some((_, format)) = &known
+            && format != self.variant.name()
+        {
+            bail!(
+                "these bytes were imported before as {format}, not {}; the config disagrees with that import",
+                self.variant.name()
+            );
+        }
 
         let content_id = match known {
-            Some(id) => {
+            Some((id, _)) => {
                 self.stats.known_files += 1;
                 info!(file = rel, "content already known, sighting only");
                 id
@@ -408,15 +424,16 @@ impl<'a> Importer<'a> {
 
     async fn import_content(&mut self, buf: &[u8], file_hash: &Hash, rel: &str) -> Result<i64> {
         let t0 = Instant::now();
-        let parsed = mbox::split(buf)?;
+        let parsed = mbox::split(buf, self.variant)?;
         let split = t0.elapsed();
         let head_hash = sha256(&buf[..buf.len().min(HEAD_LEN)]);
         let parent = self.find_parent(buf, &head_hash).await?;
-        let prepared: Vec<Prepared> = parsed
+        let content = parsed
             .messages
             .par_iter()
-            .map(|m| prepare(&buf[m.header.clone()], &buf[m.body.clone()]))
-            .collect();
+            .map(|m| parsed.content(buf, m))
+            .collect::<Result<Vec<_>, _>>()?;
+        let prepared: Vec<Prepared> = content.par_iter().map(|(h, b)| prepare(h, b)).collect();
         let t1 = Instant::now();
 
         self.stmts
@@ -428,17 +445,20 @@ impl<'a> Importer<'a> {
                 parsed.messages.len() as i64,
                 parsed.preamble.len() as i64,
                 parent,
+                self.variant.name(),
             ))
             .await?;
         let content_id = self.store.conn.last_insert_rowid();
 
         let mut new_artifacts = 0;
-        for (ordinal, (m, p)) in parsed.messages.iter().zip(&prepared).enumerate() {
-            let (artifact_id, new) = self
-                .stmts
-                .art
-                .put(self.store, &buf[m.header.clone()], &buf[m.body.clone()], p)
-                .await?;
+        for (ordinal, ((m, (h, b)), p)) in parsed
+            .messages
+            .iter()
+            .zip(&content)
+            .zip(&prepared)
+            .enumerate()
+        {
+            let (artifact_id, new) = self.stmts.art.put(self.store, h, b, p).await?;
             new_artifacts += new as u64;
             self.stmts
                 .ins_observation

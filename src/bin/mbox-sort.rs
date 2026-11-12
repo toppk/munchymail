@@ -102,7 +102,8 @@ fn run(cli: Cli) -> Result<()> {
     }
     let snap = source::read_locked(&cli.src, Duration::from_secs(60))?;
     let buf = &snap.bytes;
-    let parsed = mbox::split(buf).with_context(|| cli.src.display().to_string())?;
+    let parsed =
+        mbox::split(buf, mbox::Variant::Dovecot).with_context(|| cli.src.display().to_string())?;
     if !parsed.covers(buf.len()) {
         bail!("split of {} is not byte-exact", cli.src.display());
     }
@@ -147,7 +148,7 @@ fn run(cli: Cli) -> Result<()> {
     info!(out = %out.display(), stripped_uid_headers = stripped, "written");
 
     let written = fs::read(&out)?;
-    let reparsed = mbox::split(&written)?;
+    let reparsed = mbox::split(&written, mbox::Variant::Dovecot)?;
     if !reparsed.covers(written.len()) || reparsed.messages.len() != plan.order.len() {
         bail!(
             "verification failed: {} does not split into {} messages",

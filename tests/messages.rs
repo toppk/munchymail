@@ -13,7 +13,7 @@ const D1: &str = "Date: 01 Oct 2026 09:00:00 +0000";
 const D2: &str = "Date: 02 Oct 2026 09:00:00 +0000";
 
 async fn import(store: &Store) {
-    Importer::new(store, "t")
+    Importer::new(store, "t", munchymail::mbox::Variant::Dovecot)
         .await
         .unwrap()
         .run()

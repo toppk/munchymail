@@ -37,11 +37,7 @@ struct OauthClient {
 
 /// `$XDG_CONFIG_HOME/munchymail/creds` (default `~/.config`), created mode 0700.
 pub fn creds_dir() -> Result<PathBuf> {
-    let base = match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
-        Some(d) => PathBuf::from(d),
-        None => PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".config"),
-    };
-    let dir = base.join("munchymail").join("creds");
+    let dir = crate::config::dir()?.join("creds");
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)

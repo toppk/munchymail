@@ -108,7 +108,7 @@ Subject: Forwarded zebra\n\nnested quokka\n--b--",
         )
         .await
         .unwrap();
-    Importer::new(&store, "t")
+    Importer::new(&store, "t", munchymail::mbox::Variant::Dovecot)
         .await
         .unwrap()
         .run()

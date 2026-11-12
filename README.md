@@ -84,6 +84,19 @@ munchymail import                     # all origins; or: munchymail import mail
 munchymail stats
 ```
 
+Before importing, say how the origin's files quote body lines starting
+`From `, in `~/.config/munchymail/config.toml` (`$XDG_CONFIG_HOME`). A file
+doesn't record it, so there is no default and `import` refuses an origin
+without one:
+
+```toml
+[accounts."me@example.org".origins.mail]
+mbox = "dovecot"   # as Dovecot reads it: Content-Length honoured, >From kept
+
+[accounts."me.example@gmail.com".origins."takeout-2026-11-12"]
+mbox = "mboxrd"    # one > dropped from each >…>From line (Google Takeout)
+```
+
 An origin is a directory tree (walked; dot-entries like Dovecot's `.imap`
 are skipped) or a single mbox file. Files that don't start with a valid
 `From ` line are skipped. Import is idempotent: unchanged files are
@@ -418,8 +431,11 @@ munchymail show ID --where      # every origin/path/offset it was found at, and 
 ### diff: before/after check of one mbox (no database)
 
 ```
-munchymail diff BEFORE AFTER [--moved-to MBOX ...] [--by KEY ...] [-n N] [--list]
+munchymail diff BEFORE AFTER --mbox VARIANT [--moved-to MBOX ...] [--by KEY ...] [-n N] [--list]
 ```
+
+`--mbox` (`dovecot` or `mboxrd`, as in the config above) is required here
+and for `scan`.
 
 Reads both files (shared lock, read-only), splits them and pairs every
 message: **unchanged** (identical bytes), **headers changed** (same body and
@@ -430,7 +446,7 @@ the new copy gets new Dovecot headers), **removed, NOT FOUND**, and
 `report`; `--list` prints every message.
 
 ```
-$ munchymail diff ~/inbox-before-backfill-2026-10-06.mbox /var/mail/me/INBOX \
+$ munchymail diff ~/inbox-before-backfill-2026-10-06.mbox /var/mail/me/INBOX --mbox dovecot \
     --moved-to /var/mail/me/lists/github-project --by from:addr --by list-id
 before   81835  ~/inbox-before-backfill-2026-10-06.mbox
 after    62655  /var/mail/me/INBOX
@@ -523,7 +539,7 @@ left the mailbox are included and marked "gone" in the index.
 
 ```
 munchymail sql "SELECT name, count(*) FROM header WHERE nth = 0 GROUP BY name ORDER BY 2 DESC LIMIT 10"
-munchymail scan --list /var/mail/me/Drafts       # split only, verify byte-exact, no database
+munchymail scan --mbox dovecot --list /var/mail/me/Drafts   # split only, verify byte-exact, no database
 ```
 
 `sql` takes one query (`SELECT`, `WITH`, `VALUES` or `EXPLAIN`) and runs it

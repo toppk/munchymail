@@ -53,11 +53,16 @@ Roughly in priority order within each section. Phases refer to
     tokens expire after 7 days and unattended sync would break).
 - [x] Takeout: no importer of its own; its `.mbox` imports as an origin of
       the Gmail account (`X-Gmail-Labels` is then just a header).
-- [ ] Takeout vs API (2026-11-12, 19,509 shared): 16,617 fold; 2,892 don't.
-      The API copy is the original each time: Takeout is mboxrd (`>From`
-      quoting, reversible), ends every message with CRLF (Gmail-internal
-      mail has none), and in 75 iso-8859/cp1252 messages wrote U+FFFD for
-      8-bit bytes (lossy). Fold copies that differ only in the first two.
+- [ ] Takeout vs API (2026-11-12, 19,509 shared): the API copy is the
+      original each time. Read as mboxrd, 16,782 fold; 2,727 don't, as
+      Takeout ends every message with CRLF (Gmail-internal mail has none:
+      2,652) or wrote U+FFFD for 8-bit iso-8859/cp1252 bytes (75, lossy).
+      Decide whether folding ignores that final CRLF.
+- [ ] Around 2026-12-15, before the next Takeout: send test mail (Gmail web
+      to itself and to me@example.org; from example.org a Latin-1 8-bit
+      message with `From ` and `>From ` lines) to confirm the above.
+- [ ] Optional `--detect` for the mbox variant (writer fingerprints such as
+      Takeout's `X-GM-THRID`); the configured variant stays required.
 - [ ] Sending (later): through the originating account, with the sent copy
       visible there; verify each provider's Sent behaviour (Gmail files API
       sends itself; Dovecot needs an IMAP APPEND or a locked mbox write).

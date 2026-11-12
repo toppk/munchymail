@@ -12,6 +12,7 @@ use tracing_subscriber::EnvFilter;
 use turso::Value;
 
 use munchymail::changes;
+use munchymail::config::Config;
 use munchymail::diff::{self, Msg};
 use munchymail::import::Importer;
 use munchymail::locations;
@@ -420,6 +421,9 @@ enum Cmd {
         before: PathBuf,
         /// The newer copy.
         after: PathBuf,
+        /// How the files quote body lines starting `From `; required, since a file doesn't say.
+        #[arg(long, value_name = "VARIANT")]
+        mbox: mbox::Variant,
         /// Where removed messages may have gone; repeatable.
         #[arg(long = "moved-to", value_name = "MBOX")]
         moved_to: Vec<PathBuf>,
@@ -482,6 +486,9 @@ enum Cmd {
         /// Also list every message's offset, sizes and From_ line.
         #[arg(long)]
         list: bool,
+        /// How the files quote body lines starting `From `; required, since a file doesn't say.
+        #[arg(long, value_name = "VARIANT")]
+        mbox: mbox::Variant,
         /// Mbox files to split.
         paths: Vec<PathBuf>,
     },
@@ -853,6 +860,15 @@ async fn alias(store: &Store, cmd: AliasCmd, out: &mut impl Write) -> Result<()>
     Ok(())
 }
 
+/// The account's address: the name of its data directory.
+fn account_address(store: &Store) -> &str {
+    store
+        .data_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+}
+
 async fn origin(store: &Store, cmd: OriginCmd, out: &mut impl Write) -> Result<()> {
     match cmd {
         OriginCmd::Add {
@@ -878,6 +894,16 @@ async fn origin(store: &Store, cmd: OriginCmd, out: &mut impl Write) -> Result<(
                 .with_context(|| format!("adding origin {label:?}"))?;
             store.commit().await?;
             writeln!(out, "added origin {label} -> {}", root.display())?;
+            let config = Config::load()?;
+            let address = account_address(store);
+            if config.mbox(address, &label).is_err() {
+                writeln!(
+                    out,
+                    "before `import`, say how its mbox files quote `From ` lines in {}:\n\n{}",
+                    config.path.display(),
+                    Config::mbox_entry(address, &label)
+                )?;
+            }
         }
         OriginCmd::Move { label, root } => {
             let root = root
@@ -1584,9 +1610,11 @@ async fn stats(store: &Store, out: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn diff(
     before: &Path,
     after: &Path,
+    variant: mbox::Variant,
     moved_to: &[PathBuf],
     by: &[String],
     limit: usize,
@@ -1597,11 +1625,11 @@ fn diff(
         .iter()
         .map(|k| Key::parse(k))
         .collect::<Result<Vec<_>>>()?;
-    let a = diff::load(before)?;
-    let b = diff::load(after)?;
+    let a = diff::load(before, variant)?;
+    let b = diff::load(after, variant)?;
     let mut elsewhere = Vec::new();
     for p in moved_to {
-        elsewhere.extend(diff::load(p)?);
+        elsewhere.extend(diff::load(p, variant)?);
     }
     let d = diff::compare(&a, &b, &elsewhere);
 
@@ -1935,12 +1963,17 @@ async fn removals(
     Ok(())
 }
 
-fn scan(path: &Path, list: bool, out: &mut impl Write) -> Result<()> {
+fn scan(path: &Path, variant: mbox::Variant, list: bool, out: &mut impl Write) -> Result<()> {
     let snap = source::read_locked(path, Duration::from_secs(30))?;
     let buf = &snap.bytes;
-    let parsed = mbox::split(buf)?;
+    let parsed = mbox::split(buf, variant)?;
     if !parsed.covers(buf.len()) {
         bail!("split does not reproduce the file byte-for-byte");
+    }
+    let mut quoted = 0;
+    for m in &parsed.messages {
+        let (h, b) = parsed.content(buf, m)?;
+        quoted += usize::from(h.len() + b.len() != m.raw().len());
     }
     let cl = parsed
         .messages
@@ -1949,10 +1982,11 @@ fn scan(path: &Path, list: bool, out: &mut impl Write) -> Result<()> {
         .count();
     writeln!(
         out,
-        "{}: {} bytes, {} messages, {cl} via Content-Length, preamble {} bytes{}",
+        "{}: {} bytes, {} messages ({}, {quoted} unquoted), {cl} via Content-Length, preamble {} bytes{}",
         path.display(),
         buf.len(),
         parsed.messages.len(),
+        variant.name(),
         parsed.preamble.len(),
         if snap.changed_during_read {
             ", CHANGED DURING READ"
@@ -1984,13 +2018,14 @@ async fn run(cli: Cli) -> Result<()> {
     if let Cmd::Diff {
         before,
         after,
+        mbox,
         moved_to,
         by,
         limit,
         list,
     } = &cli.cmd
     {
-        diff(before, after, moved_to, by, *limit, *list, &mut out)?;
+        diff(before, after, *mbox, moved_to, by, *limit, *list, &mut out)?;
         return Ok(out.flush()?);
     }
     if let Cmd::Gmail(cmd) = &cli.cmd
@@ -2024,9 +2059,9 @@ async fn run(cli: Cli) -> Result<()> {
         describe(command, *json, &mut out)?;
         return Ok(out.flush()?);
     }
-    if let Cmd::Scan { list, paths } = &cli.cmd {
+    if let Cmd::Scan { list, mbox, paths } = &cli.cmd {
         for p in paths {
-            scan(p, *list, &mut out).with_context(|| p.display().to_string())?;
+            scan(p, *mbox, *list, &mut out).with_context(|| p.display().to_string())?;
         }
         return Ok(out.flush()?);
     }
@@ -2054,12 +2089,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Alias(cmd) => alias(&store, cmd, &mut out).await?,
         Cmd::Gmail(GmailCmd::Sync { jobs }) => {
             let t = Instant::now();
-            let address = store
-                .data_dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_string();
+            let address = account_address(&store).to_string();
             let s = munchymail::gmail::sync(&store, &address, jobs.max(1)).await?;
             info!(
                 full = s.full,
@@ -2086,9 +2116,14 @@ async fn run(cli: Cli) -> Result<()> {
                     labels.push(text(&r[0]));
                 }
             }
-            for label in labels {
+            let config = Config::load()?;
+            let variants = labels
+                .iter()
+                .map(|l| config.mbox(account_address(&store), l))
+                .collect::<Result<Vec<_>>>()?;
+            for (label, variant) in labels.into_iter().zip(variants) {
                 let t = Instant::now();
-                let mut imp = Importer::new(&store, &label).await?;
+                let mut imp = Importer::new(&store, &label, variant).await?;
                 imp.run().await?;
                 let s = &imp.stats;
                 info!(

@@ -1,11 +1,119 @@
 //! Byte-exact mbox splitting, following Dovecot's istream-raw-mbox rules.
 //!
 //! A file is `preamble ++ (from_line ++ header ++ body ++ separator)*`, and the
-//! ranges reproduce the input exactly. Nothing is unescaped or normalised.
+//! ranges reproduce the input exactly. The caller names the [`Variant`]; a file
+//! doesn't say how its writer quoted `From ` lines, so there is no default.
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 use crate::util::days_from_civil;
+
+/// How the file's writer quoted body lines that start with `From `.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Variant {
+    /// As Dovecot reads it: `Content-Length` honoured, `>From` kept as written.
+    Dovecot,
+    /// mboxrd (e.g. Google Takeout): one `>` dropped from each `>…>From ` line.
+    Mboxrd,
+}
+
+impl Variant {
+    pub fn name(self) -> &'static str {
+        match self {
+            Variant::Dovecot => "dovecot",
+            Variant::Mboxrd => "mboxrd",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Variant> {
+        [Variant::Dovecot, Variant::Mboxrd]
+            .into_iter()
+            .find(|v| v.name() == s)
+    }
+}
+
+/// A line starting `From ` that mboxrd would have quoted, so quoting the message back can't rebuild the file.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Unquoted {
+    pub offset: usize,
+}
+
+impl std::fmt::Display for Unquoted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "unquoted 'From ' line at byte {}, so this is not mboxrd",
+            self.offset
+        )
+    }
+}
+
+impl std::error::Error for Unquoted {}
+
+/// Offsets within `b` where a line starts.
+fn line_starts(b: &[u8]) -> impl Iterator<Item = usize> + '_ {
+    std::iter::once(0).chain(
+        b.iter()
+            .enumerate()
+            .filter(|&(i, &c)| c == b'\n' && i + 1 < b.len())
+            .map(|(i, _)| i + 1),
+    )
+}
+
+/// Length of the `>` run before `From ` at the start of `line`, if it is one.
+fn quoted_from(line: &[u8]) -> Option<usize> {
+    let n = line.iter().take_while(|&&c| c == b'>').count();
+    line[n..].starts_with(b"From ").then_some(n)
+}
+
+/// `b` as `variant`'s writer quoted it.
+pub fn quote(variant: Variant, b: &[u8]) -> Cow<'_, [u8]> {
+    if variant == Variant::Dovecot {
+        return Cow::Borrowed(b);
+    }
+    let at: Vec<usize> = line_starts(b)
+        .filter(|&i| quoted_from(&b[i..]).is_some())
+        .collect();
+    if at.is_empty() {
+        return Cow::Borrowed(b);
+    }
+    let mut out = Vec::with_capacity(b.len() + at.len());
+    let mut pos = 0;
+    for i in at {
+        out.extend_from_slice(&b[pos..i]);
+        out.push(b'>');
+        pos = i;
+    }
+    out.extend_from_slice(&b[pos..]);
+    Cow::Owned(out)
+}
+
+/// `b` (from file offset `base`) with `variant`'s quoting undone; `quote` gives `b` back.
+pub fn unquote(variant: Variant, b: &[u8], base: usize) -> Result<Cow<'_, [u8]>, Unquoted> {
+    if variant == Variant::Dovecot {
+        return Ok(Cow::Borrowed(b));
+    }
+    let mut cut = Vec::new();
+    for i in line_starts(b) {
+        match quoted_from(&b[i..]) {
+            Some(0) => return Err(Unquoted { offset: base + i }),
+            Some(_) => cut.push(i),
+            None => {}
+        }
+    }
+    if cut.is_empty() {
+        return Ok(Cow::Borrowed(b));
+    }
+    let mut out = Vec::with_capacity(b.len());
+    let mut pos = 0;
+    for i in cut {
+        out.extend_from_slice(&b[pos..i]);
+        pos = i + 1;
+    }
+    out.extend_from_slice(&b[pos..]);
+    Ok(Cow::Owned(out))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FromLine {
@@ -34,14 +142,29 @@ impl Message {
     }
 }
 
-#[derive(Debug, Default)]
+pub type Bytes<'b> = Cow<'b, [u8]>;
+
+#[derive(Debug)]
 pub struct Mbox {
+    pub variant: Variant,
     /// Bytes before the first `From ` line; Dovecot would refuse such a file.
     pub preamble: Range<usize>,
     pub messages: Vec<Message>,
 }
 
 impl Mbox {
+    /// The message's header and body as its writer was given them.
+    pub fn content<'b>(
+        &self,
+        buf: &'b [u8],
+        m: &Message,
+    ) -> Result<(Bytes<'b>, Bytes<'b>), Unquoted> {
+        Ok((
+            unquote(self.variant, &buf[m.header.clone()], m.header.start)?,
+            unquote(self.variant, &buf[m.body.clone()], m.body.start)?,
+        ))
+    }
+
     /// True when the ranges tile `0..len` with no gaps or overlaps.
     pub fn covers(&self, len: usize) -> bool {
         let mut pos = self.preamble.end;
@@ -340,9 +463,13 @@ fn valid_end(buf: &[u8], p: usize) -> Option<usize> {
     (buf.get(nl) == Some(&b'\n') && from_line_at(buf, nl + 1).is_some()).then_some(nl + 1)
 }
 
-pub fn split(buf: &[u8]) -> Result<Mbox, NotMbox> {
+pub fn split(buf: &[u8], variant: Variant) -> Result<Mbox, NotMbox> {
     if buf.is_empty() {
-        return Ok(Mbox::default());
+        return Ok(Mbox {
+            variant,
+            preamble: 0..0,
+            messages: Vec::new(),
+        });
     }
     let mut from_start = if from_line_at(buf, 0).is_some() {
         0
@@ -350,6 +477,7 @@ pub fn split(buf: &[u8]) -> Result<Mbox, NotMbox> {
         next_from(buf, 0, 0).ok_or(NotMbox)?.1
     };
     let mut mbox = Mbox {
+        variant,
         preamble: 0..from_start,
         messages: Vec::new(),
     };
@@ -363,7 +491,9 @@ pub fn split(buf: &[u8]) -> Result<Mbox, NotMbox> {
         let header_end_at = header_end(buf, &(msg_start..end)).unwrap_or(end);
         let mut used_content_length = false;
         // Content-Length only matters when the body hides a "From " line, so it may only extend.
-        if let Some(len) = content_length(&buf[msg_start..header_end_at]) {
+        if variant == Variant::Dovecot
+            && let Some(len) = content_length(&buf[msg_start..header_end_at])
+        {
             let p = header_end_at.saturating_add(len);
             if p > end
                 && let Some(after) = valid_end(buf, p)
@@ -410,7 +540,7 @@ mod tests {
     }
 
     fn check(buf: &[u8]) -> Mbox {
-        let m = split(buf).unwrap();
+        let m = split(buf, Variant::Dovecot).unwrap();
         assert_eq!(rebuild(buf, &m), buf);
         assert!(m.covers(buf.len()));
         m
@@ -495,11 +625,58 @@ mod tests {
 
     #[test]
     fn preamble_missing_eoh_and_garbage() {
-        assert_eq!(split(b"not an mbox\n").unwrap_err(), NotMbox);
+        assert_eq!(
+            split(b"not an mbox\n", Variant::Dovecot).unwrap_err(),
+            NotMbox
+        );
         let buf = b"junk\nFrom a@x Thu Nov  9 22:33:52 2001\nSubject: no body";
         let m = check(buf);
         assert_eq!(s(buf, &m.preamble), b"junk\n");
         assert_eq!(s(buf, &m.messages[0].header), b"Subject: no body");
         assert!(m.messages[0].body.is_empty());
+    }
+
+    #[test]
+    fn mboxrd_unquotes_and_quotes_back() {
+        let buf = b"From a@x Thu Nov  9 22:33:52 2001\r\nSubject: t\r\n\r\n>From here\r\n>>From there\r\n>not\r\n\r\n";
+        let m = split(buf, Variant::Mboxrd).unwrap();
+        let (h, b) = m.content(buf, &m.messages[0]).unwrap();
+        assert_eq!(&*h, b"Subject: t\r\n\r\n");
+        assert_eq!(&*b, b"From here\r\n>From there\r\n>not\r\n");
+        assert_eq!(
+            &*quote(Variant::Mboxrd, &b),
+            &buf[m.messages[0].body.clone()]
+        );
+        assert!(matches!(
+            m.content(buf, &m.messages[0]).unwrap().1,
+            Cow::Owned(_)
+        ));
+        let d = split(buf, Variant::Dovecot).unwrap();
+        assert_eq!(
+            &*d.content(buf, &d.messages[0]).unwrap().1,
+            &buf[d.messages[0].body.clone()]
+        );
+        let bad = b"From a@x Thu Nov  9 22:33:52 2001\n\nFrom the depths\n";
+        let m = split(bad, Variant::Mboxrd).unwrap();
+        assert_eq!(
+            m.content(bad, &m.messages[0]).unwrap_err(),
+            Unquoted { offset: 35 }
+        );
+    }
+
+    #[test]
+    fn mboxrd_ignores_content_length() {
+        let body = b"x\nFrom a@x Thu Nov  9 22:33:52 2001\ny\n";
+        let mut buf = format!(
+            "From a@x Thu Nov  9 22:33:52 2001\nContent-Length: {}\n\n",
+            body.len()
+        )
+        .into_bytes();
+        buf.extend_from_slice(body);
+        buf.extend_from_slice(b"\nFrom b@x Fri Nov 10 22:33:52 2001\n\nz\n");
+        assert_eq!(split(&buf, Variant::Dovecot).unwrap().messages.len(), 2);
+        let m = split(&buf, Variant::Mboxrd).unwrap();
+        assert_eq!(m.messages.len(), 3);
+        assert!(!m.messages[0].used_content_length);
     }
 }

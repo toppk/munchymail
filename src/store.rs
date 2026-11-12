@@ -15,11 +15,11 @@ use crate::util::hex;
 /// Objects at most this size live inline in SQLite.
 pub const INLINE_MAX: usize = 16 * 1024;
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 /// Upgrades from the previous version; index `i` brings version `i + 1` to `i + 2`.
 /// New tables and indexes need no entry: `SCHEMA` creates them if missing.
-const MIGRATIONS: [&str; 7] = [
+const MIGRATIONS: [&str; 8] = [
     "ALTER TABLE origin ADD COLUMN retired_at INTEGER",
     "",
     "ALTER TABLE artifact ADD COLUMN msg_id INTEGER;
@@ -33,6 +33,7 @@ const MIGRATIONS: [&str; 7] = [
     "ALTER TABLE message ADD COLUMN text_version INTEGER",
     "",
     "",
+    "UPDATE file_content SET format = 'dovecot' WHERE format = 'mbox'",
 ];
 
 /// Indexes on columns a migration may have just added.

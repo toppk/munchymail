@@ -34,7 +34,7 @@ async fn scenario(dir: &std::path::Path) {
         )
         .await
         .unwrap();
-    Importer::new(&store, "t")
+    Importer::new(&store, "t", munchymail::mbox::Variant::Dovecot)
         .await
         .unwrap()
         .run()
@@ -60,7 +60,7 @@ async fn scenario(dir: &std::path::Path) {
     // "a" leaves INBOX: still readable, its location no longer current.
     let a = p2[0].id;
     fs::write(tree.join("INBOX"), inbox[1..].join("\n")).unwrap();
-    Importer::new(&store, "t")
+    Importer::new(&store, "t", munchymail::mbox::Variant::Dovecot)
         .await
         .unwrap()
         .run()

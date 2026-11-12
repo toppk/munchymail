@@ -36,7 +36,7 @@ async fn scenario(dir: &std::path::Path) {
         )
         .await
         .unwrap();
-    Importer::new(&store, "t")
+    Importer::new(&store, "t", munchymail::mbox::Variant::Dovecot)
         .await
         .unwrap()
         .run()

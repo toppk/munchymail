@@ -17,7 +17,9 @@ fn mbox(msgs: &[(&str, &str)]) -> String {
 }
 
 async fn import(store: &Store) -> i64 {
-    let mut imp = Importer::new(store, "t").await.unwrap();
+    let mut imp = Importer::new(store, "t", munchymail::mbox::Variant::Dovecot)
+        .await
+        .unwrap();
     imp.run().await.unwrap();
     changes::record_since_previous(store, imp.origin_id, imp.run_id)
         .await

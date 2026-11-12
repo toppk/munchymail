@@ -1,6 +1,7 @@
 pub mod account;
 pub mod api;
 pub mod changes;
+pub mod config;
 pub mod diff;
 pub mod export;
 pub mod extract;

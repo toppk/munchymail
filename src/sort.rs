@@ -140,7 +140,7 @@ pub fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mbox::split;
+    use crate::mbox::{Variant, split};
 
     const SRC: &[u8] = b"From MAILER_DAEMON  Mon Oct  6 10:00:00 2026\n\
 Date: Mon, 06 Oct 2026 10:00:00 +0000\n\
@@ -174,7 +174,7 @@ body2";
 
     #[test]
     fn sorts_strips_uids_and_drops_pseudo() {
-        let mbox = split(SRC).unwrap();
+        let mbox = split(SRC, Variant::Dovecot).unwrap();
         let p = plan(SRC, &mbox, SortKey::Received);
         assert_eq!(p.pseudo, Some(0));
         assert_eq!(p.order, vec![2, 3, 1]);
@@ -184,7 +184,7 @@ body2";
         let s = String::from_utf8(out.clone()).unwrap();
         assert!(!s.contains("X-UID") && !s.contains("X-IMAP") && !s.contains("continued"));
         assert!(s.contains("X-Keywords: $Label1                     "));
-        let again = split(&out).unwrap();
+        let again = split(&out, Variant::Dovecot).unwrap();
         assert!(again.covers(out.len()));
         let subjects: Vec<_> = again
             .messages
@@ -204,7 +204,7 @@ body2";
     #[test]
     fn ties_keep_file_order() {
         let src = b"From a@x  Mon Oct  6 09:00:00 2026\nSubject: a\n\nA\n\nFrom b@x  Mon Oct  6 09:00:00 2026\nSubject: b\n\nB\n";
-        let mbox = split(src).unwrap();
+        let mbox = split(src, Variant::Dovecot).unwrap();
         let p = plan(src, &mbox, SortKey::Received);
         assert_eq!(p.order, vec![0, 1]);
         assert_eq!(p.out_of_order, 0);
