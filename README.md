@@ -41,7 +41,7 @@ munchymail account list                     # accounts and their aliases
 ```
 
 Gmail accounts sign in to Google with read-only access to mail and
-contacts (sync itself is not built yet). Secrets stay out of `data/`: the
+contacts. Secrets stay out of `data/`: the
 OAuth client JSON (a Desktop app client) goes in
 `~/.config/munchymail/creds/google-client.json` and each account's refresh
 token next to it, all readable only by you:
@@ -50,6 +50,7 @@ token next to it, all readable only by you:
 munchymail account add me.example@gmail.com
 munchymail --account me.example@gmail.com gmail auth   # prints a link; approve in the browser
 munchymail --account me.example@gmail.com gmail status # address, message count, history id, labels
+munchymail --account me.example@gmail.com gmail sync   # new mail and label changes, then index
 ```
 
 `gmail auth` waits for Google's redirect on 127.0.0.1; with the browser on
@@ -57,6 +58,22 @@ another machine, paste the address the browser ended on instead. It refuses
 a sign-in as a different Google account than `--account`. Keep the Google
 Cloud consent screen "In production": in Testing, refresh tokens can expire
 after 7 days.
+
+`gmail sync` keeps a Gmail origin (`gmail`) in the account. The first sync
+lists every message (Spam and Trash included) and fetches each one's exact
+bytes (`format=raw`); later syncs ask Gmail's history for what changed since
+the last one, and fall back to a full listing if that history has expired.
+Each sync is an import run in which every label is a path (its name:
+`INBOX`, `SENT`, `CATEGORY_PROMOTIONS`, your own labels) and mail in neither
+Spam nor Trash is also under `All Mail`; `UNREAD` is state, not a place, and
+is left out. So `--folder INBOX --origin gmail`, `--current`, `read`'s
+locations, `changes --origin gmail` and removals all work as for mbox
+folders. Gmail's record (message id, thread, labels, deletion) is kept in
+`gmail_message` beside, not instead of, the archive: a message Gmail
+deletes stays, marked gone. The checkpoint advances only with a run whose
+changes are all stored, and a full listing marks messages gone only once it
+is complete, so an interrupted sync just repeats. `import` leaves the Gmail
+origin to `gmail sync`.
 
 Within an account:
 

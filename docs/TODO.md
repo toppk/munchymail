@@ -28,10 +28,16 @@ Roughly in priority order within each section. Phases refer to
       a cursor per account; the CLI can do it before the service exists.
 - [x] `gmail auth`/`gmail status`: read-only sign-in, secrets in
       `~/.config/munchymail/creds/`.
-- [ ] Gmail import through the Gmail API into `data/me.example@gmail.com/`,
-      read-only scope: `format=raw` bytes, labels as places (a sighting kind
-      keyed by Gmail message id, since there is no file), incremental via
-      the history API, full listing when history has expired.
+- [x] `gmail sync` through the Gmail API, read-only: `format=raw` bytes,
+      labels as paths of a run, incremental via history, full listing when
+      history has expired.
+- [ ] Run `gmail sync` every few minutes (timer or the service).
+- [ ] First full sync of me.example@gmail.com is quota-bound: Gmail answers
+      "Units per minute per user" errors at ~500 units/min (~100 messages a
+      minute), far under the documented 15,000. Find what else spends this
+      project's per-user quota (other tools, other tools?) or give munchymail its own
+      Google Cloud project. Pacing adapts to whatever is left.
+- [ ] Gmail's batch endpoint (fewer HTTP round trips; same quota cost).
   - Gmail labels and presence are source records, kept apart from the
     archive's own tags and rules; a deletion or label removal in Gmail
     updates the source record and never removes archived mail.

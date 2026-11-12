@@ -51,6 +51,10 @@ fn effect(command: &str) -> Option<(&'static str, &'static str)> {
             "a Google sign-in (read-only scopes) in ~/.config/munchymail/creds/",
         ),
         "gmail status" => ("read", "the Gmail profile and labels, over the network"),
+        "gmail sync" => (
+            "write",
+            "data/ (mail, Gmail's labels and history); only reads Gmail",
+        ),
         "origin add" | "origin retire" | "origin move" => ("write", "the origin table in data/"),
         "import" => (
             "write",
@@ -503,6 +507,13 @@ enum GmailCmd {
     },
     /// Check the sign-in: the mailbox's address, size, history id and labels.
     Status,
+    /// Bring the account up to date with Gmail: changes since the last sync,
+    /// or every message the first time; then index as `import` does.
+    Sync {
+        /// Messages fetched at a time.
+        #[arg(short = 'j', long, default_value_t = 4)]
+        jobs: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -790,8 +801,9 @@ fn gmail(address: &str, cmd: &GmailCmd, out: &mut impl Write) -> Result<()> {
             p
         }
         GmailCmd::Status => google::Session::open(address)?.gmail("profile")?,
+        GmailCmd::Sync { .. } => unreachable!(),
     };
-    let mut s = google::Session::open(address)?;
+    let s = google::Session::open(address)?;
     let labels = s.gmail("labels")?;
     let labels = labels["labels"].as_array().cloned().unwrap_or_default();
     let user = labels.iter().filter(|l| l["type"] == "user").count();
@@ -1981,7 +1993,9 @@ async fn run(cli: Cli) -> Result<()> {
         diff(before, after, moved_to, by, *limit, *list, &mut out)?;
         return Ok(out.flush()?);
     }
-    if let Cmd::Gmail(cmd) = &cli.cmd {
+    if let Cmd::Gmail(cmd) = &cli.cmd
+        && !matches!(cmd, GmailCmd::Sync { .. })
+    {
         let dir = account::resolve(&cli.data, cli.account.as_deref())?;
         let address = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
         gmail(address, cmd, &mut out)?;
@@ -2038,11 +2052,33 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.cmd {
         Cmd::Origin(cmd) => origin(&store, cmd, &mut out).await?,
         Cmd::Alias(cmd) => alias(&store, cmd, &mut out).await?,
+        Cmd::Gmail(GmailCmd::Sync { jobs }) => {
+            let t = Instant::now();
+            let address = store
+                .data_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            let s = munchymail::gmail::sync(&store, &address, jobs.max(1)).await?;
+            info!(
+                full = s.full,
+                fetched = s.fetched,
+                new_artifacts = s.new_artifacts,
+                relabelled = s.relabelled,
+                gone = s.gone,
+                elapsed = ?t.elapsed(),
+                "gmail sync finished"
+            );
+            index(&store).await?;
+            store.checkpoint().await?;
+        }
         Cmd::Import { mut labels } => {
             if labels.is_empty() {
                 for r in query_rows(
                     &store,
-                    "SELECT label FROM origin WHERE retired_at IS NULL ORDER BY origin_id",
+                    "SELECT label FROM origin WHERE retired_at IS NULL AND root NOT LIKE 'gmail:%'
+                     ORDER BY origin_id",
                     vec![],
                 )
                 .await?
@@ -2253,7 +2289,7 @@ async fn run(cli: Cli) -> Result<()> {
         | Cmd::Ocr { .. }
         | Cmd::Describe { .. }
         | Cmd::Account(_)
-        | Cmd::Gmail(_) => {
+        | Cmd::Gmail(GmailCmd::Auth { .. } | GmailCmd::Status) => {
             unreachable!()
         }
     }

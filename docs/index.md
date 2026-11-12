@@ -21,7 +21,10 @@ directory. Command usage is in `README.md`.
 | `import_run` | One per origin per `import`. |
 | `file_content` | Whole-file SHA-256, `head_hash` (first 64 KiB), message count, and `parent_content_id` when an earlier content is a byte prefix (a growing mbox across backups). |
 | `file_sighting` | Content seen at `path` (relative to origin root) in a run, with dev/ino/mtime/ctime. |
-| `observation` | Artifact at byte `offset` in a content, with its `From ` line and separator bytes. |
+| `observation` | Artifact at byte `offset` in a content, with its `From ` line and separator bytes. For a `gmail-label` content (one label's messages at a Gmail sync, `format` = `gmail-label`, hash over its `gmail_id artifact_id` lines) `offset` is the position in date order and `from_line` the Gmail message id. |
+| `gmail_message` | Gmail's record of each message of the `gmail` origin: Gmail id, the artifact of its raw bytes, thread id, `internal_date` (receipt time), current label ids, and `gone_at` when Gmail deleted it (the artifact stays). |
+| `gmail_label` | Gmail's label ids and names per origin. |
+| `gmail_state` | The sync checkpoint: Gmail history id up to which every change is stored, and the run that stored it. |
 | `removal` | A copy last seen at `path` in `last_seen_run` and absent in `gone_run`; `moved_to` is where it turned up, NULL if nowhere new. Filled by `import` (per origin) and `record-removals`. |
 
 `meta.schema_version` is 6. Opening an older database upgrades it in the

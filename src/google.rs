@@ -6,14 +6,14 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use data_encoding::BASE64URL_NOPAD;
 use serde_json::{Value as Json, json};
 use sha2::{Digest, Sha256};
-use tracing::warn;
+use tracing::{debug, warn};
 use ureq::http::Response;
 
 use crate::store::now;
@@ -155,26 +155,39 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
-/// The response body as JSON, or an error with Google's own message.
-fn json_of(mut r: Response<ureq::Body>, what: &str) -> Result<Json> {
-    let status = r.status();
+fn read_body(mut r: Response<ureq::Body>, what: &str) -> Result<(u16, String)> {
+    let status = r.status().as_u16();
     let body = r
         .body_mut()
         .with_config()
-        .limit(64 << 20)
+        .limit(128 << 20)
         .read_to_string()
         .with_context(|| format!("{what}: reading the response"))?;
-    if !status.is_success() {
-        let v: Json = serde_json::from_str(&body).unwrap_or(Json::Null);
-        let msg = v["error"]["message"]
-            .as_str()
-            .or(v["error_description"].as_str())
-            .or(v["error"].as_str())
-            .map(str::to_string)
-            .unwrap_or_else(|| body.chars().take(300).collect());
-        bail!("{what}: HTTP {}: {msg}", status.as_u16());
+    Ok((status, body))
+}
+
+/// Google's own message from an error body.
+fn error_text(body: &str) -> String {
+    let v: Json = serde_json::from_str(body).unwrap_or(Json::Null);
+    v["error"]["message"]
+        .as_str()
+        .or(v["error_description"].as_str())
+        .or(v["error"].as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| body.chars().take(300).collect())
+}
+
+fn parse(status: u16, body: &str, what: &str) -> Result<Json> {
+    if !(200..300).contains(&status) {
+        bail!("{what}: HTTP {status}: {}", error_text(body));
     }
-    serde_json::from_str(&body).with_context(|| format!("{what}: response is not JSON"))
+    serde_json::from_str(body).with_context(|| format!("{what}: response is not JSON"))
+}
+
+/// The response body as JSON, or an error with Google's own message.
+fn json_of(r: Response<ureq::Body>, what: &str) -> Result<Json> {
+    let (status, body) = read_body(r, what)?;
+    parse(status, &body, what)
 }
 
 /// Wait for the browser's redirect, on the listener or pasted on stdin.
@@ -319,14 +332,27 @@ pub fn authorize(address: &str, client: Option<&Path>, out: &mut impl Write) -> 
     Ok(profile)
 }
 
-/// Calls to Google as an account, refreshing the access token as needed.
+/// Calls to Google as an account, refreshing the access token as needed;
+/// shared by fetch threads.
 pub struct Session {
     agent: ureq::Agent,
     client: OauthClient,
     refresh: String,
-    access: Option<(String, Instant)>,
+    access: Mutex<Option<(String, Instant)>>,
+    /// When the next Gmail call may start, and the gap per quota unit.
+    pacing: Mutex<(Instant, Duration)>,
     pub scopes: Vec<String>,
 }
+
+/// Gmail's quota is 15,000 units per user per minute, shared by every app of
+/// the Google project; start at 80% of it and slow down when Gmail says so.
+const FASTEST_UNIT: Duration = Duration::from_millis(5);
+const SLOWEST_UNIT: Duration = Duration::from_secs(1);
+/// How long every thread pauses after a quota error.
+const QUOTA_PAUSE: Duration = Duration::from_secs(10);
+
+/// Retries for rate limits and server errors, each after a pause.
+const RETRIES: u32 = 12;
 
 impl Session {
     pub fn open(address: &str) -> Result<Session> {
@@ -348,7 +374,8 @@ impl Session {
                 .as_str()
                 .context("token file has no refresh_token")?
                 .into(),
-            access: None,
+            access: Mutex::new(None),
+            pacing: Mutex::new((Instant::now(), FASTEST_UNIT)),
             scopes: t["scope"]
                 .as_str()
                 .unwrap_or("")
@@ -358,8 +385,9 @@ impl Session {
         })
     }
 
-    fn access_token(&mut self) -> Result<String> {
-        if let Some((t, until)) = &self.access
+    fn access_token(&self) -> Result<String> {
+        let mut access = self.access.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((t, until)) = &*access
             && Instant::now() < *until
         {
             return Ok(t.clone());
@@ -380,22 +408,89 @@ impl Session {
             .context("no access_token")?
             .to_string();
         let secs = t["expires_in"].as_u64().unwrap_or(3600).saturating_sub(120);
-        self.access = Some((token.clone(), Instant::now() + Duration::from_secs(secs)));
+        *access = Some((token.clone(), Instant::now() + Duration::from_secs(secs)));
         Ok(token)
     }
 
+    /// Wait for this call's share of the quota: history costs 2 units, the rest 5.
+    fn pace(&self, path: &str) {
+        let units = if path.starts_with("history") { 2 } else { 5 };
+        let start = {
+            let mut p = self.pacing.lock().unwrap_or_else(|e| e.into_inner());
+            let start = p.0.max(Instant::now());
+            p.0 = start + p.1 * units;
+            start
+        };
+        std::thread::sleep(start.saturating_duration_since(Instant::now()));
+    }
+
+    /// After a quota error: half the rate and a pause for every thread, once
+    /// per pause however many threads hit the error.
+    fn slow_down(&self) -> Duration {
+        let mut p = self.pacing.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        if p.0 < now + QUOTA_PAUSE / 2 {
+            p.1 = (p.1 * 2).min(SLOWEST_UNIT);
+            p.0 = now + QUOTA_PAUSE;
+        }
+        p.1
+    }
+
+    fn speed_up(&self) {
+        let mut p = self.pacing.lock().unwrap_or_else(|e| e.into_inner());
+        p.1 = (p.1 - p.1 / 16).max(FASTEST_UNIT);
+    }
+
+    /// GET a Gmail API path under users/me, e.g. "profile"; None if it is gone (404).
+    pub fn gmail_opt(&self, path: &str) -> Result<Option<Json>> {
+        let what = format!("Gmail {}", path.split('?').next().unwrap_or(path));
+        for attempt in 0.. {
+            self.pace(path);
+            let token = self.access_token()?;
+            let r = self
+                .agent
+                .get(&format!("{GMAIL}/{path}"))
+                .header("Authorization", &format!("Bearer {token}"))
+                .call();
+            let (status, body) = match r {
+                Ok(r) => read_body(r, &what)?,
+                Err(e) => (0, e.to_string()),
+            };
+            if status == 404 {
+                self.speed_up();
+                return Ok(None);
+            }
+            // Gmail reports per-user rate limits as 403 as well as 429.
+            let busy = status == 0
+                || status == 429
+                || status >= 500
+                || (status == 403 && (body.contains("ateLimitExceeded") || body.contains("uota")));
+            if !busy || attempt >= RETRIES {
+                if status == 0 {
+                    bail!("{what}: {body}");
+                }
+                if (200..300).contains(&status) {
+                    self.speed_up();
+                }
+                return parse(status, &body, &what).map(Some);
+            }
+            let unit = self.slow_down();
+            debug!(
+                path,
+                attempt,
+                status,
+                ?unit,
+                error = error_text(&body),
+                "Gmail busy, slowing down"
+            );
+        }
+        unreachable!()
+    }
+
     /// GET a Gmail API path under users/me, e.g. "profile" or "labels".
-    pub fn gmail(&mut self, path: &str) -> Result<Json> {
-        let token = self.access_token()?;
-        let r = self
-            .agent
-            .get(&format!("{GMAIL}/{path}"))
-            .header("Authorization", &format!("Bearer {token}"))
-            .call()?;
-        json_of(
-            r,
-            &format!("Gmail {}", path.split('?').next().unwrap_or(path)),
-        )
+    pub fn gmail(&self, path: &str) -> Result<Json> {
+        self.gmail_opt(path)?
+            .with_context(|| format!("Gmail {path}: not found"))
     }
 }
 

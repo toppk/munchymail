@@ -25,39 +25,26 @@ fn sha256(b: &[u8]) -> Hash {
 }
 
 /// Everything about one message that can be computed without the database.
-struct Prepared {
+pub(crate) struct Prepared {
     header_hash: Hash,
     body_hash: Hash,
     fields: Vec<Field>,
     summary: Summary,
 }
 
-fn prepare(buf: &[u8], m: &mbox::Message) -> Prepared {
-    let header = &buf[m.header.clone()];
+pub(crate) fn prepare(header: &[u8], body: &[u8]) -> Prepared {
     let fields = headers::fields(header);
     let summary = headers::summary(&fields);
     Prepared {
         header_hash: sha256(header),
-        body_hash: sha256(&buf[m.body.clone()]),
+        body_hash: sha256(body),
         fields,
         summary,
     }
 }
 
-#[derive(Debug, Default)]
-pub struct Stats {
-    pub files: u64,
-    pub skipped: u64,
-    pub known_files: u64,
-    pub messages: u64,
-    pub new_artifacts: u64,
-    pub bytes: u64,
-}
-
-struct Stmts {
-    sel_content: Statement,
-    sel_parents: Statement,
-    ins_content: Statement,
+/// Statements that store one message: its objects, artifact, message and headers.
+pub(crate) struct Artifacts {
     ins_object: Statement,
     ins_artifact: Statement,
     sel_artifact: Statement,
@@ -65,28 +52,12 @@ struct Stmts {
     ins_message: Statement,
     set_message: Statement,
     ins_header: Statement,
-    ins_observation: Statement,
-    ins_sighting: Statement,
 }
 
-impl Stmts {
-    async fn new(store: &Store) -> Result<Stmts> {
+impl Artifacts {
+    pub(crate) async fn new(store: &Store) -> Result<Artifacts> {
         let c = &store.conn;
-        Ok(Stmts {
-            sel_content: c.prepare("SELECT content_id FROM file_content WHERE hash = ?1").await?,
-            sel_parents: c
-                .prepare(
-                    "SELECT content_id, hash, length FROM file_content
-                     WHERE head_hash = ?1 AND length < ?2 AND length >= ?3 ORDER BY length DESC",
-                )
-                .await?,
-            ins_content: c
-                .prepare(
-                    "INSERT INTO file_content
-                     (hash, length, head_hash, format, message_count, preamble_length, parent_content_id)
-                     VALUES (?1, ?2, ?3, 'mbox', ?4, ?5, ?6)",
-                )
-                .await?,
+        Ok(Artifacts {
             ins_object: c
                 .prepare("INSERT OR IGNORE INTO object (hash, length, inline_bytes) VALUES (?1, ?2, ?3)")
                 .await?,
@@ -115,6 +86,122 @@ impl Stmts {
             ins_header: c
                 .prepare("INSERT INTO header (artifact_id, ordinal, name, nth, value) VALUES (?1, ?2, ?3, ?4, ?5)")
                 .await?,
+        })
+    }
+
+    /// The artifact for `header` ‖ `body`, and whether it is new.
+    pub(crate) async fn put(
+        &mut self,
+        store: &Store,
+        header: &[u8],
+        body: &[u8],
+        p: &Prepared,
+    ) -> Result<(i64, bool)> {
+        self.put_object(store, &p.header_hash, header).await?;
+        self.put_object(store, &p.body_hash, body).await?;
+        let s = &p.summary;
+        let inserted = self
+            .ins_artifact
+            .execute((
+                p.header_hash.to_vec(),
+                p.body_hash.to_vec(),
+                (header.len() + body.len()) as i64,
+                s.date,
+                s.from.clone(),
+                s.subject.clone(),
+                s.message_id.clone(),
+            ))
+            .await?;
+        if inserted == 0 {
+            let mut rows = self
+                .sel_artifact
+                .query((p.header_hash.to_vec(), p.body_hash.to_vec()))
+                .await?;
+            return Ok((
+                rows.next().await?.context("artifact vanished")?.get(0)?,
+                false,
+            ));
+        }
+        let id = store.conn.last_insert_rowid();
+        let msg = self.message(store, &p.body_hash, s).await?;
+        self.set_message.execute((msg, id)).await?;
+        let mut seen: HashMap<&str, i64> = HashMap::new();
+        for (i, f) in p.fields.iter().enumerate() {
+            let nth = seen.entry(f.name.as_str()).or_default();
+            self.ins_header
+                .execute((id, i as i64, f.name.as_str(), *nth, f.value.as_str()))
+                .await?;
+            *nth += 1;
+        }
+        Ok((id, true))
+    }
+
+    async fn message(&mut self, store: &Store, body_hash: &Hash, s: &Summary) -> Result<i64> {
+        let key = (body_hash.to_vec(), s.message_id.clone(), s.date);
+        let mut rows = self.sel_message.query(key.clone()).await?;
+        if let Some(r) = rows.next().await? {
+            return Ok(r.get(0)?);
+        }
+        drop(rows);
+        self.ins_message.execute(key).await?;
+        Ok(store.conn.last_insert_rowid())
+    }
+
+    async fn put_object(&mut self, store: &Store, hash: &Hash, bytes: &[u8]) -> Result<()> {
+        let inline = (bytes.len() <= INLINE_MAX).then_some(bytes);
+        let inserted = self
+            .ins_object
+            .execute((
+                hash.to_vec(),
+                bytes.len() as i64,
+                inline.map_or(Value::Null, Value::from),
+            ))
+            .await?;
+        if inserted == 1 && inline.is_none() {
+            store.put_external(hash, bytes)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct Stats {
+    pub files: u64,
+    pub skipped: u64,
+    pub known_files: u64,
+    pub messages: u64,
+    pub new_artifacts: u64,
+    pub bytes: u64,
+}
+
+struct Stmts {
+    sel_content: Statement,
+    sel_parents: Statement,
+    ins_content: Statement,
+    art: Artifacts,
+    ins_observation: Statement,
+    ins_sighting: Statement,
+}
+
+impl Stmts {
+    async fn new(store: &Store) -> Result<Stmts> {
+        let c = &store.conn;
+        Ok(Stmts {
+            sel_content: c.prepare("SELECT content_id FROM file_content WHERE hash = ?1").await?,
+            sel_parents: c
+                .prepare(
+                    "SELECT content_id, hash, length FROM file_content
+                     WHERE head_hash = ?1 AND length < ?2 AND length >= ?3 ORDER BY length DESC",
+                )
+                .await?,
+            ins_content: c
+                .prepare(
+                    "INSERT INTO file_content
+                     (hash, length, head_hash, format, message_count, preamble_length, parent_content_id)
+                     VALUES (?1, ?2, ?3, 'mbox', ?4, ?5, ?6)",
+                )
+                .await?,
+            art: Artifacts::new(store).await?,
             ins_observation: c
                 .prepare(
                     "INSERT INTO observation
@@ -194,6 +281,9 @@ impl<'a> Importer<'a> {
         };
         let origin_id: i64 = row.get(0)?;
         let root: String = row.get(1)?;
+        if root.starts_with("gmail:") {
+            bail!("origin {label:?} is Gmail; `munchymail gmail sync` brings it up to date");
+        }
         if row.get::<i64>(2)? != 0 {
             bail!(
                 "origin {label:?} is retired ({root} may now be another origin's); undo with `origin retire --undo {label}`"
@@ -325,7 +415,7 @@ impl<'a> Importer<'a> {
         let prepared: Vec<Prepared> = parsed
             .messages
             .par_iter()
-            .map(|m| prepare(buf, m))
+            .map(|m| prepare(&buf[m.header.clone()], &buf[m.body.clone()]))
             .collect();
         let t1 = Instant::now();
 
@@ -344,46 +434,12 @@ impl<'a> Importer<'a> {
 
         let mut new_artifacts = 0;
         for (ordinal, (m, p)) in parsed.messages.iter().zip(&prepared).enumerate() {
-            self.put_object(&p.header_hash, &buf[m.header.clone()])
-                .await?;
-            self.put_object(&p.body_hash, &buf[m.body.clone()]).await?;
-            let s = &p.summary;
-            let inserted = self
+            let (artifact_id, new) = self
                 .stmts
-                .ins_artifact
-                .execute((
-                    p.header_hash.to_vec(),
-                    p.body_hash.to_vec(),
-                    m.raw().len() as i64,
-                    s.date,
-                    s.from.clone(),
-                    s.subject.clone(),
-                    s.message_id.clone(),
-                ))
+                .art
+                .put(self.store, &buf[m.header.clone()], &buf[m.body.clone()], p)
                 .await?;
-            let artifact_id = if inserted == 1 {
-                new_artifacts += 1;
-                let id = self.store.conn.last_insert_rowid();
-                let msg = self.message(&p.body_hash, s).await?;
-                self.stmts.set_message.execute((msg, id)).await?;
-                let mut seen: HashMap<&str, i64> = HashMap::new();
-                for (i, f) in p.fields.iter().enumerate() {
-                    let nth = seen.entry(f.name.as_str()).or_default();
-                    self.stmts
-                        .ins_header
-                        .execute((id, i as i64, f.name.as_str(), *nth, f.value.as_str()))
-                        .await?;
-                    *nth += 1;
-                }
-                id
-            } else {
-                let mut rows = self
-                    .stmts
-                    .sel_artifact
-                    .query((p.header_hash.to_vec(), p.body_hash.to_vec()))
-                    .await?;
-                rows.next().await?.context("artifact vanished")?.get(0)?
-            };
+            new_artifacts += new as u64;
             self.stmts
                 .ins_observation
                 .execute((
@@ -411,33 +467,5 @@ impl<'a> Importer<'a> {
             "imported content"
         );
         Ok(content_id)
-    }
-
-    async fn message(&mut self, body_hash: &Hash, s: &Summary) -> Result<i64> {
-        let key = (body_hash.to_vec(), s.message_id.clone(), s.date);
-        let mut rows = self.stmts.sel_message.query(key.clone()).await?;
-        if let Some(r) = rows.next().await? {
-            return Ok(r.get(0)?);
-        }
-        drop(rows);
-        self.stmts.ins_message.execute(key).await?;
-        Ok(self.store.conn.last_insert_rowid())
-    }
-
-    async fn put_object(&mut self, hash: &Hash, bytes: &[u8]) -> Result<()> {
-        let inline = (bytes.len() <= INLINE_MAX).then_some(bytes);
-        let inserted = self
-            .stmts
-            .ins_object
-            .execute((
-                hash.to_vec(),
-                bytes.len() as i64,
-                inline.map_or(Value::Null, Value::from),
-            ))
-            .await?;
-        if inserted == 1 && inline.is_none() {
-            self.store.put_external(hash, bytes)?;
-        }
-        Ok(())
     }
 }

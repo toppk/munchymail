@@ -15,11 +15,11 @@ use crate::util::hex;
 /// Objects at most this size live inline in SQLite.
 pub const INLINE_MAX: usize = 16 * 1024;
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 /// Upgrades from the previous version; index `i` brings version `i + 1` to `i + 2`.
 /// New tables and indexes need no entry: `SCHEMA` creates them if missing.
-const MIGRATIONS: [&str; 6] = [
+const MIGRATIONS: [&str; 7] = [
     "ALTER TABLE origin ADD COLUMN retired_at INTEGER",
     "",
     "ALTER TABLE artifact ADD COLUMN msg_id INTEGER;
@@ -31,6 +31,7 @@ const MIGRATIONS: [&str; 6] = [
     "ALTER TABLE message ADD COLUMN parts_version INTEGER;
      ALTER TABLE message ADD COLUMN parts_problem TEXT;",
     "ALTER TABLE message ADD COLUMN text_version INTEGER",
+    "",
     "",
 ];
 
@@ -193,6 +194,39 @@ CREATE TABLE IF NOT EXISTS observation (
     PRIMARY KEY (content_id, ordinal)
 );
 CREATE INDEX IF NOT EXISTS observation_artifact ON observation (artifact_id);
+
+-- Gmail as the source reports it (gmail sync), kept apart from the archive's
+-- own decisions: a message Gmail deletes stays archived, with gone_at set.
+CREATE TABLE IF NOT EXISTS gmail_label (
+    origin_id INTEGER NOT NULL,
+    label_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    -- system or user
+    type TEXT NOT NULL,
+    PRIMARY KEY (origin_id, label_id)
+);
+CREATE TABLE IF NOT EXISTS gmail_message (
+    gmail_id TEXT PRIMARY KEY,
+    origin_id INTEGER NOT NULL,
+    artifact_id INTEGER NOT NULL,
+    thread_id TEXT NOT NULL,
+    -- when Gmail received it, Unix seconds
+    internal_date INTEGER,
+    -- label ids, sorted, space-separated
+    labels TEXT NOT NULL,
+    -- when Gmail reported it deleted, or a completed full listing lacked it
+    gone_at INTEGER,
+    -- when a sync last asked Gmail about it
+    checked_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS gmail_message_artifact ON gmail_message (artifact_id);
+-- Sync checkpoint: every change up to history_id is stored, as of run_id.
+CREATE TABLE IF NOT EXISTS gmail_state (
+    origin_id INTEGER PRIMARY KEY,
+    history_id TEXT NOT NULL,
+    run_id INTEGER NOT NULL,
+    synced_at INTEGER NOT NULL
+);
 
 -- a copy last seen at path in last_seen_run and not there in gone_run
 CREATE TABLE IF NOT EXISTS removal (

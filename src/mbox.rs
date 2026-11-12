@@ -284,6 +284,12 @@ fn next_from(buf: &[u8], floor: usize, from: usize) -> Option<(usize, usize)> {
     None
 }
 
+/// Header block (through its empty line) and body of one bare message.
+pub fn split_message(raw: &[u8]) -> (Range<usize>, Range<usize>) {
+    let h = header_end(raw, &(0..raw.len())).unwrap_or(raw.len());
+    (0..h, h..raw.len())
+}
+
 /// End of the header block (exclusive), per Dovecot's empty-line test.
 fn header_end(buf: &[u8], r: &Range<usize>) -> Option<usize> {
     (r.start..r.end)
