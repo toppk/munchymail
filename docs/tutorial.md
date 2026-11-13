@@ -19,6 +19,16 @@ changes something (`write`).
 
 # Part 1: using the archive (munchymail)
 
+```
+munchymail overview     # each account's size, and when its mail was last imported or synced
+munchymail accounts     # the accounts and the addresses each sends from
+```
+```
+me@example.org: 18342 messages, newest 2026-11-13 (2 h ago)
+  gmail  synced 2026-11-13 14:02 UTC (2 h ago)
+  mail   imported 2026-11-13 13:49 UTC (2 h ago)
+```
+
 With several accounts, pass `--account ADDRESS` or set `MUNCHYMAIL_ACCOUNT`;
 with one, it is used automatically.
 
@@ -122,6 +132,7 @@ a maildir.
 - `munchymail describe --json` lists every command, its arguments and its
   effect. Scripts and agents should run only `read` commands unless told
   otherwise.
+- `overview --json` and `accounts --json` print one record per account.
 - `search --json` prints JSON Lines: one record per message, then a `page`
   record whose `next` is the cursor for `--after`.
 - `read mN --json` gives one message as JSON. Mail content comes from its

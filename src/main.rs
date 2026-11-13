@@ -26,7 +26,7 @@ use munchymail::report::{self, Key};
 use munchymail::store::{Store, now};
 use munchymail::takeout::{self, Linker};
 use munchymail::text::{self, TextQuery};
-use munchymail::util::{hex, ymd, ymd_hm};
+use munchymail::util::{hex, iso, ymd, ymd_hm};
 use munchymail::{account, api, export, extract, google, mbox, ocr, parts, serve, source};
 
 #[derive(Parser)]
@@ -82,7 +82,9 @@ fn effect(command: &str) -> Option<(&'static str, &'static str)> {
             "its socket in $XDG_RUNTIME_DIR/munchymail/; runs the commands sent to it",
         ),
         "origin list" | "search" | "read" | "top" | "names" | "report" | "profile" | "show"
-        | "attachments" | "stats" | "changes" | "removals" => ("read", READ),
+        | "attachments" | "stats" | "changes" | "removals" | "accounts" | "overview" => {
+            ("read", READ)
+        }
         _ => return None,
     })
 }
@@ -155,7 +157,7 @@ impl Program {
                 (
                     "About the archive",
                     "Counts, and every command described for scripts and agents.",
-                    &["stats", "describe"],
+                    &["overview", "accounts", "stats", "describe"],
                 ),
             ],
             Program::Admin => &[
@@ -675,6 +677,18 @@ enum Cmd {
     },
     /// Corpus counts.
     Stats,
+    /// The accounts and their aliases.
+    Accounts {
+        /// JSON Lines: one `account` record each, with its aliases.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Each account's size and when its mail was last imported or synced.
+    Overview {
+        /// JSON Lines: one `account` record each, with its origins (RFC 3339 times).
+        #[arg(long)]
+        json: bool,
+    },
     /// Run a read-only SQL query.
     ///
     /// Prints rows tab-separated.
@@ -1063,6 +1077,143 @@ async fn query_rows(store: &Store, sql: &str, params: Vec<Value>) -> Result<Vec<
     Ok(out)
 }
 
+/// Each account with its aliases.
+async fn accounts(root: &Path, stores: &Stores, json: bool, out: &mut impl Write) -> Result<()> {
+    let mut rows = Vec::new();
+    for a in account::list(root)? {
+        let aliases = match stores.open(&root.join(&a)).await {
+            Ok(s) => Ok(
+                query_rows(&s, "SELECT pattern FROM alias ORDER BY pattern", vec![])
+                    .await?
+                    .iter()
+                    .map(|r| text(&r[0]))
+                    .collect::<Vec<_>>(),
+            ),
+            Err(e) => Err(format!("{e:#}")),
+        };
+        rows.push((a, aliases));
+    }
+    let width = rows
+        .iter()
+        .map(|(a, _)| a.chars().count())
+        .max()
+        .unwrap_or(0);
+    for (a, aliases) in rows {
+        if json {
+            let v = match aliases {
+                Ok(al) => {
+                    serde_json::json!({"type": "account", "address": a, "aliases": al})
+                }
+                Err(e) => serde_json::json!({"type": "account", "address": a, "error": e}),
+            };
+            writeln!(out, "{v}")?;
+        } else {
+            let aliases = match aliases {
+                Ok(al) => al.join(", "),
+                Err(e) => format!("(not readable now: {e})"),
+            };
+            writeln!(out, "{a:<width$}  {aliases}")?;
+        }
+    }
+    Ok(())
+}
+
+/// Each account's size and how fresh its mail is: when each origin was last
+/// imported or synced.
+async fn overview(root: &Path, stores: &Stores, json: bool, out: &mut impl Write) -> Result<()> {
+    let now = now();
+    let ago = |t: i64| match now - t {
+        s if s < 3600 => format!("{} min ago", s / 60),
+        s if s < 86_400 => format!("{} h ago", s / 3600),
+        s if s < 2 * 86_400 => "1 day ago".to_string(),
+        s => format!("{} days ago", s / 86_400),
+    };
+    let int = |v: &Value| match v {
+        Value::Integer(i) => Some(*i),
+        _ => None,
+    };
+    for a in account::list(root)? {
+        let store = match stores.open(&root.join(&a)).await {
+            Ok(s) => s,
+            Err(e) => {
+                let e = format!("{e:#}");
+                if json {
+                    writeln!(
+                        out,
+                        "{}",
+                        serde_json::json!({"type": "account", "address": a, "error": e})
+                    )?;
+                } else {
+                    writeln!(out, "{a}  (not readable now: {e})\n")?;
+                }
+                continue;
+            }
+        };
+        let totals = query_rows(
+            &store,
+            "SELECT (SELECT count(*) FROM message),
+                    (SELECT max(date) FROM artifact WHERE date <= ?1)",
+            vec![now.into()],
+        )
+        .await?;
+        let (messages, newest) = (int(&totals[0][0]).unwrap_or(0), int(&totals[0][1]));
+        let origins = query_rows(
+            &store,
+            "SELECT g.label, g.root,
+                    (SELECT max(finished_at) FROM import_run r WHERE r.origin_id = g.origin_id),
+                    g.retired_at
+             FROM origin g ORDER BY g.retired_at IS NOT NULL, g.label",
+            vec![],
+        )
+        .await?;
+        if json {
+            let origins: Vec<_> = origins
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "label": text(&r[0]),
+                        "gmail": text(&r[1]).starts_with("gmail:"),
+                        "last_import": int(&r[2]).map(iso),
+                        "retired": int(&r[3]).map(iso),
+                    })
+                })
+                .collect();
+            let v = serde_json::json!({
+                "type": "account",
+                "address": a,
+                "messages": messages,
+                "newest": newest.map(iso),
+                "origins": origins,
+            });
+            writeln!(out, "{v}")?;
+            continue;
+        }
+        let newest = newest.map_or("none".into(), |t| format!("{} ({})", ymd(t), ago(t)));
+        writeln!(out, "{a}: {messages} messages, newest {newest}")?;
+        let width = origins
+            .iter()
+            .map(|r| text(&r[0]).chars().count())
+            .max()
+            .unwrap_or(0);
+        for r in &origins {
+            let label = text(&r[0]);
+            let verb = if text(&r[1]).starts_with("gmail:") {
+                "synced"
+            } else {
+                "imported"
+            };
+            let when = match int(&r[2]) {
+                Some(t) => format!("{verb} {} UTC ({})", ymd_hm(t), ago(t)),
+                None => format!("never {verb}"),
+            };
+            let retired = int(&r[3]).map_or(String::new(), |t| format!(", retired {}", ymd(t)));
+            writeln!(out, "  {label:<width$}  {when}{retired}")?;
+        }
+        writeln!(out)?;
+    }
+    Ok(())
+}
+
 async fn account_cmd(
     root: &Path,
     stores: &Stores,
@@ -1090,46 +1241,7 @@ async fn account_cmd(
             let how = if adopted { "adopted" } else { "added" };
             writeln!(out, "{how} account {a} -> {}", dir.display())?;
         }
-        AccountCmd::List { json } => {
-            let mut rows = Vec::new();
-            for a in account::list(root)? {
-                let aliases = match stores.open(&root.join(&a)).await {
-                    Ok(s) => {
-                        Ok(
-                            query_rows(&s, "SELECT pattern FROM alias ORDER BY pattern", vec![])
-                                .await?
-                                .iter()
-                                .map(|r| text(&r[0]))
-                                .collect::<Vec<_>>(),
-                        )
-                    }
-                    Err(e) => Err(format!("{e:#}")),
-                };
-                rows.push((a, aliases));
-            }
-            let width = rows
-                .iter()
-                .map(|(a, _)| a.chars().count())
-                .max()
-                .unwrap_or(0);
-            for (a, aliases) in rows {
-                if *json {
-                    let v = match aliases {
-                        Ok(al) => {
-                            serde_json::json!({"type": "account", "address": a, "aliases": al})
-                        }
-                        Err(e) => serde_json::json!({"type": "account", "address": a, "error": e}),
-                    };
-                    writeln!(out, "{v}")?;
-                } else {
-                    let aliases = match aliases {
-                        Ok(al) => al.join(", "),
-                        Err(e) => format!("(not readable now: {e})"),
-                    };
-                    writeln!(out, "{a:<width$}  {aliases}")?;
-                }
-            }
-        }
+        AccountCmd::List { json } => accounts(root, stores, *json, out).await?,
     }
     Ok(())
 }
@@ -2608,6 +2720,14 @@ async fn run(cli: Cli, stores: &Stores, out: &mut impl Write) -> Result<()> {
         account_cmd(&cli.data, stores, cmd, out).await?;
         return Ok(out.flush()?);
     }
+    if let Cmd::Accounts { json } = cli.cmd {
+        accounts(&cli.data, stores, json, out).await?;
+        return Ok(out.flush()?);
+    }
+    if let Cmd::Overview { json } = cli.cmd {
+        overview(&cli.data, stores, json, out).await?;
+        return Ok(out.flush()?);
+    }
     if let Cmd::Ocr { limit, jobs } = cli.cmd {
         let t = Instant::now();
         let cpus = std::thread::available_parallelism().map_or(2, |n| n.get());
@@ -2913,6 +3033,8 @@ async fn with_store(cmd: Cmd, store: &Store, out: &mut impl Write) -> Result<()>
         | Cmd::Describe { .. }
         | Cmd::Serve
         | Cmd::Account(_)
+        | Cmd::Accounts { .. }
+        | Cmd::Overview { .. }
         | Cmd::Gmail(GmailCmd::Auth { .. } | GmailCmd::Status) => {
             unreachable!()
         }
