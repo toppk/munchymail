@@ -8,7 +8,7 @@ As agreed with the machine's admin.
 | Current, previous | `~/.local/lib/munchymail/{current,previous} -> releases/…` (relative symlinks) |
 | CLI | `~/.local/bin/{munchymail,mbox-sort} -> ~/.local/lib/munchymail/current/…` |
 | Config, credentials | `~/.config/munchymail/{config.toml,creds/}` |
-| Data root | `~/.local/share/munchymail/` (`--data`, `MUNCHYMAIL_DATA`) |
+| Data root | `~/.local/share/munchymail/`, mode 0700 (`--data`, `MUNCHYMAIL_DATA`) |
 | Socket | `$XDG_RUNTIME_DIR/munchymail/serve.sock` (`MUNCHYMAIL_SOCKET`) |
 | Unit | `~/.config/systemd/user/munchymail.service`, from `contrib/` |
 

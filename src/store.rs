@@ -291,7 +291,7 @@ pub struct Store {
 
 impl Store {
     pub async fn open(data_dir: &Path) -> Result<Store> {
-        fs::create_dir_all(data_dir.join("content"))
+        crate::util::private_dir(&data_dir.join("content"))
             .with_context(|| format!("creating {}", data_dir.display()))?;
         let path = data_dir.join("email.sqlite");
         let db = Builder::new_local(path.to_str().context("non-UTF-8 data path")?)

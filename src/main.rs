@@ -2175,7 +2175,7 @@ fn handle(
 
 fn serve_cmd(data: &Path) -> Result<()> {
     let socket = serve::socket().context("no XDG_RUNTIME_DIR or MUNCHYMAIL_SOCKET to listen on")?;
-    std::fs::create_dir_all(data)?;
+    munchymail::util::private_dir(data)?;
     let root = data.canonicalize()?;
     let listener = serve::bind(&socket)?;
     let stores = Stores::Served(Mutex::default());
