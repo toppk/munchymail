@@ -21,7 +21,7 @@ Roughly in priority order within each section. Phases refer to
       command line over `$XDG_RUNTIME_DIR/munchymail/serve.sock` (reads
       concurrent, writes in turn). Installed per `docs/install.md`.
 - [ ] The service's own work (Gmail sync, mbox scans, OCR after import):
-      to be discussed before building.
+      designed in `docs/sync.md`, after origin roles.
 - [ ] Web UI and Android over HTTP with auth, through `src/api.rs`; the
       socket is same-user only and runs any command.
 
