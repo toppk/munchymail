@@ -10,6 +10,7 @@ reader takes. Everything munchymail writes lives in its data root,
 `~/.local/share/munchymail` (`$XDG_DATA_HOME/munchymail`; `--data` or
 `MUNCHYMAIL_DATA` to use another), called `data/` below.
 
+- `docs/tutorial.md`: a walk through setting up, importing, searching and reading
 - `docs/install.md`: where it is installed and how it runs as a service
 - `docs/design.md`: goals, data model and phases
 - `docs/ingest.md`: how mbox files are read, locked and split
