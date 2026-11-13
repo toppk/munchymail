@@ -1936,9 +1936,19 @@ async fn read(store: &Store, r: api::Ref, json: bool, out: &mut impl Write) -> R
     let date = m
         .date
         .map_or("no date".into(), |t| format!("{} UTC", ymd_hm(t)));
+    // Ids are per account, so hints name it when there are several.
+    let several = store
+        .data_dir
+        .parent()
+        .is_some_and(|root| account::list(root).is_ok_and(|a| a.len() > 1));
+    let acct = if several {
+        format!(" --account {}", account_address(store))
+    } else {
+        String::new()
+    };
     writeln!(
         out,
-        "message m{}, {date}, copy {id} of {}, {} bytes (exact bytes: munchymail show {id} --raw)",
+        "message m{}, {date}, copy {id} of {}, {} bytes (exact bytes: munchymail{acct} show {id} --raw)",
         m.msg,
         m.copies.len(),
         m.raw_bytes
@@ -1993,7 +2003,7 @@ async fn read(store: &Store, r: api::Ref, json: bool, out: &mut impl Write) -> R
     if m.decoded.attachments().next().is_some() {
         writeln!(
             out,
-            "  (save one: munchymail attachment m{} N > FILE)",
+            "  (save one: munchymail{acct} attachment m{} N > FILE)",
             m.msg
         )?;
     }
