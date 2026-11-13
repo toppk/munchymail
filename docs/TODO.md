@@ -14,8 +14,8 @@ Roughly in priority order within each section. Phases refer to
 - [ ] Text inside zips (documents in a zip part); the `.docm`/`.xlsm` here
       are macro-only droppers with no text.
 - [ ] `--text` ranking (`--sort relevance`); today results stay newest first.
-- [ ] `read mN --attachment K`: extracted text (untrusted-wrapped) and a way
-      to save the original bytes.
+- [ ] `read mN --attachment K`: extracted text (untrusted-wrapped); the
+      original bytes are `attachment mN K`.
 - [ ] 7z/rar member names (only zip is listed today); nested zips.
 - [x] `serve`: one process owns the databases; the CLI forwards its
       command line over `$XDG_RUNTIME_DIR/munchymail/serve.sock` (reads
@@ -27,9 +27,10 @@ Roughly in priority order within each section. Phases refer to
 
 ## Accounts and Gmail (phase 5)
 
-- [ ] Cross-account search (a milestone, not an afterthought): `search`
-      and `read` over several or all accounts, merging pages by date with
-      a cursor per account; the CLI can do it before the service exists.
+- [x] Cross-account search: without `--account`, `search` covers every
+      account in turn, newest match first, with an account-naming cursor.
+- [ ] Account-numbered ids (`2:m16596`) so `read`/`show`/`attachment` work
+      across accounts without `--account`; numbers stored, never reused.
 - [x] `gmail auth`/`gmail status`: read-only sign-in, secrets in
       `~/.config/munchymail/creds/`.
 - [x] `gmail sync` through the Gmail API, read-only: `format=raw` bytes,
@@ -39,10 +40,10 @@ Roughly in priority order within each section. Phases refer to
       history.list (2 units) every ~30 s, or users.watch with a Pub/Sub
       pull subscription. Gmail IMAP IDLE needs the full-access
       `https://mail.google.com/` scope (no read-only IMAP scope exists).
-- [x] First full sync of me.example@gmail.com: 19,515 messages in 3 h, held
-      to ~100 messages a minute by "Units per minute per user" errors. The
-      Google project is shared with other tools and other tools; incremental syncs are
-      cheap, so a project of munchymail's own is needed only if that bites.
+- [x] First full sync of a 19.5k-message mailbox: 3 h, held to ~100
+      messages a minute by "Units per minute per user" errors (a Google
+      project shared with other tools); incremental syncs are cheap, so a
+      project of munchymail's own is needed only if that bites.
 - [ ] Gmail's batch endpoint (fewer HTTP round trips; same quota cost).
   - Gmail labels and presence are source records, kept apart from the
     archive's own tags and rules; a deletion or label removal in Gmail
@@ -94,7 +95,7 @@ Roughly in priority order within each section. Phases refer to
 
 ## Import speed
 
-Cold import of the 3.3 GB inbox: lock held 0.89 s, split 1.0 s, hash/parse
+Cold import of a 3.3 GB inbox: lock held 0.89 s, split 1.0 s, hash/parse
 0.18 s, **inserts 30 s**. Already one transaction per file and prepared
 statements reused per run; the cost is ~3M executions, mostly 2.7M header
 rows each updating four B-trees (table, PK, `header_name_nth_value`,
@@ -122,7 +123,7 @@ rows each updating four B-trees (table, PK, `header_name_nth_value`,
 
 - [ ] Fuzzier logical-message grouping beyond `message` (body, Message-ID,
       Date): the same mail with a list footer or a rewritten body, a resend
-      hours later (seen: carriers, device vendors). Use DKIM-signed headers;
+      hours later (seen from carriers and device vendors). Use DKIM-signed headers;
       explicit and reversible; prefer false negatives.
 - [ ] Rule engine with versioned rules and recorded classifications (rule
       language still open: SQL, DSL, or Sieve itself).

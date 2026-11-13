@@ -1,6 +1,8 @@
 # The CLI is the interface; see README.md. These are just conveniences.
 
 set positional-arguments
+# A git-ignored .env may set MUNCHYMAIL_PREFIX and MUNCHYMAIL_BINDIR for `install`.
+set dotenv-load
 
 # Dev runs use the checkout's data/, never the live data root.
 export MUNCHYMAIL_DATA := env("MUNCHYMAIL_DATA", justfile_directory() / "data")
@@ -27,7 +29,7 @@ check:
     cargo clippy --all-targets -- -D warnings
     cargo test --quiet
 
-# Install a release under ~/.local/lib/munchymail (see docs/install.md); --restart restarts the service.
+# Install a release under $MUNCHYMAIL_PREFIX (see docs/install.md); --restart restarts the service.
 install *flags:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -39,17 +41,20 @@ install *flags:
     cargo build --release --quiet
     version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
     name="$version-$(git rev-parse --short HEAD)"
-    home="$HOME/.local/lib/munchymail"
-    install -d "$home/releases/$name" "$HOME/.local/bin" "$HOME/.config/systemd/user"
+    home="${MUNCHYMAIL_PREFIX:-$HOME/.local/lib/munchymail}"; home="${home/#\~/$HOME}"
+    bin="${MUNCHYMAIL_BINDIR:-$HOME/.local/bin}"; bin="${bin/#\~/$HOME}"
+    install -d "$home/releases/$name" "$bin" "$HOME/.config/systemd/user"
     install -m 0755 target/release/munchymail target/release/mbox-sort "$home/releases/$name/"
     ln -sfn munchymail "$home/releases/$name/mmadm"
     old=$(readlink "$home/current" || true)
     if [ -n "$old" ] && [ "$old" != "releases/$name" ]; then ln -sfn "$old" "$home/previous"; fi
     ln -sfn "releases/$name" "$home/current"
     for b in munchymail mmadm mbox-sort; do
-        [ -L "$HOME/.local/bin/$b" ] || [ -e "$HOME/.local/bin/$b" ] || ln -s "$home/current/$b" "$HOME/.local/bin/$b"
+        [ -L "$bin/$b" ] || [ -e "$bin/$b" ] || ln -s "$home/current/$b" "$bin/$b"
     done
-    install -m 0644 contrib/munchymail.service "$HOME/.config/systemd/user/"
+    sed "s|@PREFIX@|$home|" contrib/munchymail.service > "$HOME/.config/systemd/user/munchymail.service.new"
+    chmod 0644 "$HOME/.config/systemd/user/munchymail.service.new"
+    mv "$HOME/.config/systemd/user/munchymail.service.new" "$HOME/.config/systemd/user/munchymail.service"
     if [ "$restart" = no ]; then
         echo "installed $name; to use it: just install --restart, or systemctl --user daemon-reload && systemctl --user restart munchymail"
         exit 0
@@ -58,4 +63,4 @@ install *flags:
     systemctl --user restart munchymail
     sleep 1
     systemctl --user is-active munchymail >/dev/null || { journalctl --user -u munchymail -n 20 --no-pager; exit 1; }
-    echo "installed and restarted $("$HOME/.local/bin/munchymail" --version)"
+    echo "installed and restarted $("$bin/munchymail" --version)"

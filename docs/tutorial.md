@@ -179,9 +179,47 @@ An origin is a place mail is found: a directory tree of mbox files, or a
 single mbox file. Registering one reads nothing yet:
 
 ```
-mmadm origin add mail ~/mail --note "live mbox tree"
-mmadm origin add laptop-2019 /backups/laptop-2019/mail --note "2019 laptop backup"
+mmadm origin add mailhost-dovecot ~/mail --note "live mbox tree"
+mmadm origin add 2019-03-02-laptop-mail ~/mail-backups/2019-03-02-laptop-mail/extracted/mail \
+    --note "old laptop's ~/mail, found 2026; date is the newest file's mtime"
 ```
+
+### Naming origins
+
+munchymail only needs labels to be unique, but a consistent scheme makes a
+long `origin list` readable. We suggest:
+
+| Kind | Pattern | Examples |
+|---|---|---|
+| A live mailbox | `HOST-STORE` | `mailhost-dovecot`, `gmail` |
+| A copy (backup, found file) | `YYYY-MM-DD-HOST-WHAT` | `2021-07-07-mailhost-spool`, `2019-03-02-laptop-mail` |
+| An export | `YYYY-MM-DD-SERVICE` | `2026-11-12-takeout` |
+
+- Lowercase letters, digits and hyphens.
+- The date is when the copy was *taken*, the state of the mail it shows,
+  or failing that the newest file's mtime; not when you found it. Copies
+  then sort by date, and the name says which day's mailbox it is.
+- Name a thing only by what won't change: labels appear in `--origin`, in
+  `config.toml` and in your notes.
+- The note carries the story: where it was found, why the date is believed,
+  and anything left out.
+
+### Keeping found mail
+
+Before importing a backup or a found file, give it a permanent home, one
+directory per copy, named like its origin, e.g. under `~/mail-backups/`:
+
+```
+~/mail-backups/
+  2021-07-07-mailhost-spool/
+    original/var-mail-2021-07-07.tgz   exactly as found; never changed, read-only
+    extracted/me                       what the origin reads, if unpacking was needed
+    SOURCE.md                          where it came from, its SHA-256, what was left out
+```
+
+The origin points into `extracted/`, or into `original/` when the file is
+usable as found. Keep the directory private (0700, files 0600): it is
+mail. Live mailboxes need no such directory; they are their own source.
 
 munchymail needs to know how each origin's files quote body lines that
 start with "From ". Add a section per origin to
@@ -189,11 +227,11 @@ start with "From ". Add a section per origin to
 lines if one is missing:
 
 ```toml
-[accounts."me@example.org".origins.mail]
+[accounts."me@example.org".origins."mailhost-dovecot"]
 mbox = "dovecot"        # Dovecot-written mboxes
 
-[accounts."me@example.org".origins."laptop-2019"]
-mbox = "mboxrd"         # e.g. Google Takeout
+[accounts."me@example.org".origins."2019-03-02-laptop-mail"]
+mbox = "dovecot"        # or "mboxrd", e.g. for a Google Takeout
 ```
 
 ## 3. Import

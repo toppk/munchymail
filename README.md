@@ -33,8 +33,8 @@ The binary has two names. `munchymail` uses the archive (search, read,
 study, export); `mmadm`, a link to it, sets it up and keeps it (accounts,
 origins, imports, Gmail, the service, `sql`). Each refuses the other's
 commands and names the right one. Installed, they are
-`~/.local/bin/munchymail` and `~/.local/bin/mmadm`; use those absolute paths in
-scripts, cron and agents (see `docs/install.md`).
+in `$MUNCHYMAIL_BINDIR` (default `~/.local/bin`); use those absolute paths
+in scripts, cron and agents (see `docs/install.md`).
 
 ## Getting mail in
 
@@ -100,9 +100,9 @@ everything and lists the copies that stay separate.
 Within an account:
 
 ```
-mmadm origin add mail /var/mail/me --host mailhost --note "live dovecot tree: INBOX + folders"
+mmadm origin add mailhost-dovecot /var/mail/me --host mailhost --note "live dovecot tree: INBOX + folders"
 mmadm origin list
-mmadm import                     # all origins; or: mmadm import mail
+mmadm import                     # all origins; or: mmadm import mailhost-dovecot
 munchymail stats
 ```
 
@@ -112,10 +112,10 @@ doesn't record it, so there is no default and `import` refuses an origin
 without one:
 
 ```toml
-[accounts."me@example.org".origins.mail]
+[accounts."me@example.org".origins."mailhost-dovecot"]
 mbox = "dovecot"   # as Dovecot reads it: Content-Length honoured, >From kept
 
-[accounts."me.example@gmail.com".origins."takeout-2026-11-12"]
+[accounts."me.example@gmail.com".origins."2026-11-12-takeout"]
 mbox = "mboxrd"    # one > dropped from each >…>From line (Google Takeout)
 source = "gmail-takeout"   # a Takeout of this account's Gmail (see above)
 ```
@@ -138,7 +138,7 @@ Origins are keyed by root path. When mail moves, add a new origin for the
 new root and retire the old ones; their runs stay as history:
 
 ```
-mmadm origin add mail /var/mail/me --host mailhost --note "INBOX + folders"
+mmadm origin add mailhost-dovecot /var/mail/me --host mailhost --note "INBOX + folders"
 mmadm origin retire inbox          # was /var/mail/me, a single file
 mmadm origin retire home-mail      # was ~/mail
 mmadm origin retire --undo inbox   # if needed
@@ -153,7 +153,7 @@ When the same files only change place (e.g. a backup filed under
 `~/mail-backups/`), keep the origin and repoint it instead:
 
 ```
-mmadm origin move spool-2021-07 ~/mail-backups/spool-2021-07-07/me
+mmadm origin move 2021-07-07-mailhost-spool ~/mail-backups/2021-07-07-mailhost-spool/extracted/me
 ```
 
 Global options: `--data DIR` (or `MUNCHYMAIL_DATA`, default `~/.local/share/munchymail`; `just run` and
@@ -344,7 +344,7 @@ $ munchymail report --origin inbox --since 2026-01-01 --from '*@github.com' \
     -H 'x-github-reason:subscribed' --by 'list-id~^(acme|widgets)/' --by list-id
 scope 18549 messages, matched 5542 (29.9%), 7 groups
   count %scope %match  list-id~^(acme|widgets)/  list-id
-   2537  13.7%  45.8%  match                      acme/anvil <anvil.acme.github.com>
+   2537  13.7%  45.8%  match                      acme/rocket <rocket.acme.github.com>
    ...
      27   0.1%   0.5%  no match                   example/website <website.example.github.com>
 ```
@@ -573,8 +573,8 @@ before runs 1,2  after runs 3,4
   added                 11
 
 == moved (25264) by path, list-id ==
-     7584  me -> lists/github-project  widgets/gear <gear.widgets.github.com>
-     5724  me -> lists/github-project  widgets/rocket <rocket.widgets.github.com>
+     7584  me -> lists/github-project  owner/repo-a <repo-a.owner.github.com>
+     5724  me -> lists/github-project  owner/repo-b <repo-b.owner.github.com>
    ...
 ```
 
@@ -654,7 +654,7 @@ Re-import after moving mail; earlier imports stay as older runs, so the
 index can compare where mail was with where it is now:
 
 ```
-mmadm import mail
+mmadm import mailhost-dovecot
 munchymail changes --origin mail --by list-id               # moved/removed/added since the last import
 munchymail removals --moved false                           # anything found nowhere
 munchymail report --folder lists/github-project --current \

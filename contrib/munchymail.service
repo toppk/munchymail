@@ -1,10 +1,10 @@
-# ~/.config/systemd/user/munchymail.service, installed by `just install`.
+# ~/.config/systemd/user/munchymail.service; `just install` fills in its install prefix.
 [Unit]
 Description=munchymail mail archive (CLI requests over a Unix socket)
 
 [Service]
 Type=simple
-ExecStart=%h/.local/lib/munchymail/current/mmadm serve
+ExecStart=@PREFIX@/current/mmadm serve
 RuntimeDirectory=munchymail
 RuntimeDirectoryMode=0700
 Environment=MUNCHYMAIL_LOG=munchymail=info,warn

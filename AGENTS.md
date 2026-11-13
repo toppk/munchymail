@@ -1,7 +1,8 @@
 # Agents
 
-- The installed CLI is `~/.local/bin/munchymail`; call it by that path where
-  `PATH` may lack `~/.local/bin` (cron, ssh, sandboxes). `munchymail describe
+- The installed CLI is `munchymail` in `just install`'s bin directory
+  (`$MUNCHYMAIL_BINDIR`, default `~/.local/bin`); call it by its full path
+  where `PATH` may lack it (cron, ssh, sandboxes). `munchymail describe
   --json` lists every command, its arguments and its effect (`read`/`write`).
 - `mmadm` (the same binary) sets up and maintains the archive: imports,
   accounts, origins, the service. Don't run it unless the owner asks.

@@ -318,12 +318,11 @@ mod tests {
             "19513".to_string(),
             "2026-11-12".to_string(),
             "→ Jamie P. Example Esquire of Counsel".to_string(),
-            "Project Example: where things stand with the vendor and the contract"
-                .to_string(),
+            "Project Example: where things stand with the vendor and the contract".to_string(),
         ]];
         let lines = layout(&cols, &rows, Some(80));
         assert_eq!(lines[0].chars().count(), 80);
-        assert!(lines[0].starts_with("19513  2026-11-12  → Jamie P. Example Esquire …  Estate"));
+        assert!(lines[0].starts_with("19513  2026-11-12  → Jamie P. Example Esquire …  Project"));
         let narrow = layout(&cols, &rows, Some(60));
         assert_eq!(narrow[0].chars().count(), 60);
         assert_eq!(cut("→ Ann Long-Surname Ex… +2", 16), "→ Ann Long-S… +2");

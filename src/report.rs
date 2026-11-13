@@ -288,8 +288,8 @@ mod tests {
         );
         assert_eq!(g("from:domain", &["\"B, C\" <b@x.org>"]), "x.org");
         assert_eq!(g("x-mailer", &["Foo 1.0", "Bar"]), "Foo 1.0");
-        let re = "references~^<acme/(rocket|anvil)/";
-        assert_eq!(g(re, &["<acme/rocket/pull/1@github.com>"]), MATCH);
+        let re = "references~^<Acme/(rocket|anvil)/";
+        assert_eq!(g(re, &["<acme/Rocket/pull/1@github.com>"]), MATCH);
         assert_eq!(g(re, &["<widgets/gear/pull/1@github.com>"]), NO_MATCH);
         assert_eq!(g("received=*by b*", &["from a by c", "from x by b"]), MATCH);
         assert_eq!(Key::parse(re).unwrap().group(None), NONE);
