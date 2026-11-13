@@ -22,10 +22,14 @@ check:
     cargo clippy --all-targets -- -D warnings
     cargo test --quiet
 
-# Install a release under ~/.local/lib/munchymail (see docs/install.md); doesn't restart the service.
-install:
+# Install a release under ~/.local/lib/munchymail (see docs/install.md); --restart restarts the service.
+install *flags:
     #!/usr/bin/env bash
     set -euo pipefail
+    restart=no
+    for f in "$@"; do
+        case "$f" in --restart) restart=yes ;; *) echo "unknown flag $f; only --restart" >&2; exit 2 ;; esac
+    done
     if [ -n "$(git status --porcelain)" ]; then echo "commit first: releases are named by commit" >&2; exit 1; fi
     cargo build --release --quiet
     version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
@@ -40,4 +44,12 @@ install:
         [ -L "$HOME/.local/bin/$b" ] || [ -e "$HOME/.local/bin/$b" ] || ln -s "$home/current/$b" "$HOME/.local/bin/$b"
     done
     install -m 0644 contrib/munchymail.service "$HOME/.config/systemd/user/"
-    echo "installed $name; to use it: systemctl --user daemon-reload && systemctl --user restart munchymail"
+    if [ "$restart" = no ]; then
+        echo "installed $name; to use it: just install --restart, or systemctl --user daemon-reload && systemctl --user restart munchymail"
+        exit 0
+    fi
+    systemctl --user daemon-reload
+    systemctl --user restart munchymail
+    sleep 1
+    systemctl --user is-active munchymail >/dev/null || { journalctl --user -u munchymail -n 20 --no-pager; exit 1; }
+    echo "installed and restarted $("$HOME/.local/bin/munchymail" --version)"

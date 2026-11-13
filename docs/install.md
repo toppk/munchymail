@@ -20,15 +20,16 @@ manager; cron, `ssh host cmd` and sandboxes should call
 ## Installing a release
 
 ```
-just install                      # needs a clean tree: releases are named by commit
-systemctl --user daemon-reload
-systemctl --user restart munchymail
+just install --restart            # needs a clean tree: releases are named by commit
+munchymail --version              # 0.1.0-<commit>, the release's name
 ```
 
 `just install` copies the binaries into a new release, moves `previous` to
 the old `current`, points `current` at the new one, creates the `~/.local/bin`
-links if missing and copies the unit. It never enables or restarts the unit
-and never deletes old releases. Roll back by pointing `current` at
+links if missing and copies the unit. With `--restart` it then runs
+`systemctl --user daemon-reload` and `restart munchymail`, and shows the
+journal if the service doesn't come back. It never enables the unit and
+never deletes old releases. Roll back by pointing `current` at
 `previous`'s target and restarting.
 
 The service stops at once on SIGTERM; writes are transactional, so an import

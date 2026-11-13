@@ -32,6 +32,7 @@ use munchymail::{account, api, export, extract, google, mbox, ocr, parts, serve,
 #[derive(Parser)]
 #[command(
     about = "Offline mail archive: import, dedupe, search",
+    version = concat!(env!("CARGO_PKG_VERSION"), "-", env!("MUNCHYMAIL_COMMIT")),
     arg_required_else_help = true
 )]
 struct Cli {
@@ -690,7 +691,11 @@ enum AccountCmd {
     /// ADDRESS as its first alias.
     Add { address: String },
     /// List accounts and their aliases.
-    List,
+    List {
+        /// JSON Lines: one `account` record each, with its aliases.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -985,18 +990,44 @@ async fn account_cmd(
             let how = if adopted { "adopted" } else { "added" };
             writeln!(out, "{how} account {a} -> {}", dir.display())?;
         }
-        AccountCmd::List => {
+        AccountCmd::List { json } => {
+            let mut rows = Vec::new();
             for a in account::list(root)? {
                 let aliases = match stores.open(&root.join(&a)).await {
-                    Ok(s) => query_rows(&s, "SELECT pattern FROM alias ORDER BY pattern", vec![])
-                        .await?
-                        .iter()
-                        .map(|r| text(&r[0]))
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    Err(e) => format!("(not readable now: {e:#})"),
+                    Ok(s) => {
+                        Ok(
+                            query_rows(&s, "SELECT pattern FROM alias ORDER BY pattern", vec![])
+                                .await?
+                                .iter()
+                                .map(|r| text(&r[0]))
+                                .collect::<Vec<_>>(),
+                        )
+                    }
+                    Err(e) => Err(format!("{e:#}")),
                 };
-                writeln!(out, "{a}\t{aliases}")?;
+                rows.push((a, aliases));
+            }
+            let width = rows
+                .iter()
+                .map(|(a, _)| a.chars().count())
+                .max()
+                .unwrap_or(0);
+            for (a, aliases) in rows {
+                if *json {
+                    let v = match aliases {
+                        Ok(al) => {
+                            serde_json::json!({"type": "account", "address": a, "aliases": al})
+                        }
+                        Err(e) => serde_json::json!({"type": "account", "address": a, "error": e}),
+                    };
+                    writeln!(out, "{v}")?;
+                } else {
+                    let aliases = match aliases {
+                        Ok(al) => al.join(", "),
+                        Err(e) => format!("(not readable now: {e})"),
+                    };
+                    writeln!(out, "{a:<width$}  {aliases}")?;
+                }
             }
         }
     }
