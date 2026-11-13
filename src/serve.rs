@@ -2,13 +2,15 @@
 //! commands sent over `$XDG_RUNTIME_DIR/munchymail/serve.sock`, so they no
 //! longer queue for the database lock. A request is one JSON line (`argv`,
 //! `cwd`, `account`, `data`); the reply is frames of a tag byte, a big-endian
-//! u32 length and the bytes: stdout, stderr (log lines), then the exit code,
-//! or only a refusal when the service holds another data root.
+//! u32 length and the bytes: stdout, stderr (log lines), a file for the client
+//! to write (its path, then its bytes), then the exit code, or only a refusal
+//! when the service holds another data root.
 
 use std::cell::RefCell;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -22,6 +24,8 @@ const STDOUT: u8 = b'1';
 const STDERR: u8 = b'2';
 const EXIT: u8 = b'x';
 const OTHER_DATA: u8 = b'd';
+const FILE: u8 = b'F';
+const FILE_DATA: u8 = b'f';
 
 /// `$MUNCHYMAIL_SOCKET`, else `$XDG_RUNTIME_DIR/munchymail/serve.sock`; none
 /// without either (cron, ssh without a session), so commands run on their own.
@@ -112,6 +116,71 @@ impl Write for ClientLog {
     }
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+/// A file the client writes, for output the service may not write itself
+/// (it can write only the data root): kept only if the command succeeds.
+pub struct ClientFile(UnixStream);
+
+impl ClientFile {
+    /// When this thread runs a client's request, start sending it `path`.
+    pub fn create(path: &Path) -> Option<io::Result<ClientFile>> {
+        CLIENT.with_borrow(|c| {
+            let s = c.as_ref()?;
+            Some(s.try_clone().and_then(|mut s| {
+                frame(&mut s, FILE, path.as_os_str().as_encoded_bytes())?;
+                Ok(ClientFile(s))
+            }))
+        })
+    }
+}
+
+impl Write for ClientFile {
+    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+        frame(&mut self.0, FILE_DATA, b)?;
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The client's side of a `ClientFile`: a temporary file next to `path`,
+/// renamed into place on success and removed otherwise.
+struct Receiving {
+    path: PathBuf,
+    tmp: PathBuf,
+    file: Option<fs::File>,
+}
+
+impl Receiving {
+    fn start(bytes: &[u8]) -> Result<Receiving> {
+        let path = PathBuf::from(std::ffi::OsStr::from_bytes(bytes));
+        let mut tmp = path.clone().into_os_string();
+        tmp.push(".part");
+        let tmp = PathBuf::from(tmp);
+        let file = fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+        Ok(Receiving {
+            path,
+            tmp,
+            file: Some(file),
+        })
+    }
+
+    fn keep(mut self) -> Result<()> {
+        let file = self.file.take().expect("kept once");
+        file.sync_all()?;
+        fs::rename(&self.tmp, &self.path)
+            .with_context(|| format!("renaming to {}", self.path.display()))
+    }
+}
+
+impl Drop for Receiving {
+    fn drop(&mut self) {
+        if self.file.is_some() {
+            let _ = fs::remove_file(&self.tmp);
+        }
     }
 }
 
@@ -246,6 +315,7 @@ pub fn forward(
     };
     conn.write_all(req.to_line().as_bytes())?;
     let mut conn = BufReader::new(conn);
+    let mut receiving: Option<Receiving> = None;
     loop {
         let mut head = [0u8; 5];
         conn.read_exact(&mut head)
@@ -258,9 +328,20 @@ pub fn forward(
                 r => r?,
             },
             STDERR => stderr.write_all(&bytes)?,
+            FILE if receiving.is_none() => receiving = Some(Receiving::start(&bytes)?),
+            FILE_DATA => match receiving.as_mut().and_then(|r| r.file.as_mut()) {
+                Some(f) => f.write_all(&bytes)?,
+                None => bail!("file bytes from munchymail serve before a file"),
+            },
             EXIT => {
                 stdout.flush()?;
-                return Ok(Some(bytes.first().copied().unwrap_or(1)));
+                let code = bytes.first().copied().unwrap_or(1);
+                if let Some(r) = receiving.take()
+                    && code == 0
+                {
+                    r.keep()?;
+                }
+                return Ok(Some(code));
             }
             OTHER_DATA => {
                 let held = String::from_utf8_lossy(&bytes);
@@ -294,11 +375,19 @@ mod tests {
         std::thread::spawn(move || {
             serve(listener, "/data".into(), |req, reply| {
                 writeln!(reply, "{}", req.argv.join("|")).unwrap();
-                3
+                let mut f = ClientFile::create(&req.cwd.join("out")).unwrap().unwrap();
+                f.write_all(b"file bytes").unwrap();
+                if req.argv[0] == "fail" { 1 } else { 0 }
             })
         });
-        assert_eq!(forward(&sock, &req, &mut out, &mut err).unwrap(), Some(3));
+        req.cwd = dir.clone();
+        assert_eq!(forward(&sock, &req, &mut out, &mut err).unwrap(), Some(0));
         assert_eq!(out, b"a|b c\n");
+        assert_eq!(fs::read(dir.join("out")).unwrap(), b"file bytes");
+        fs::remove_file(dir.join("out")).unwrap();
+        req.argv[0] = "fail".into();
+        assert_eq!(forward(&sock, &req, &mut out, &mut err).unwrap(), Some(1));
+        assert!(!dir.join("out").exists() && !dir.join("out.part").exists());
         req.data = "/other".into();
         assert_eq!(forward(&sock, &req, &mut out, &mut err).unwrap(), None);
         assert!(bind(&sock).is_err());

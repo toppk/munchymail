@@ -3,10 +3,9 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::fs::{self, File};
-use std::path::Path;
+use std::io::Write;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use sha2::{Digest, Sha256};
@@ -55,7 +54,7 @@ fn cell(s: &str) -> String {
     out
 }
 
-/// Write `out` (via a temporary file) with every message matching `filter`.
+/// Write a .tgz of every message matching `filter` to `out`.
 /// Copies of one message (`artifact.msg_id`) are exported once, using the
 /// copy seen most recently. `command` is quoted in index.md as provenance.
 pub async fn write(
@@ -64,7 +63,7 @@ pub async fn write(
     name: &str,
     title: &str,
     command: &str,
-    out: &Path,
+    out: &mut impl Write,
 ) -> Result<Summary> {
     if filter.materialize(&store.conn).await? != "hit" {
         bail!("export needs at least one filter");
@@ -120,11 +119,7 @@ pub async fn write(
     chosen.sort_by_key(|(a, _)| (a.date.is_none(), a.date, a.id));
 
     let width = chosen.len().to_string().len().max(3);
-    let tmp = out.with_extension("tmp");
-    let mut tar = tar::Builder::new(GzEncoder::new(
-        File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?,
-        Compression::default(),
-    ));
+    let mut tar = tar::Builder::new(GzEncoder::new(out, Compression::default()));
     let t = now();
     for dir in [format!("{name}/"), format!("{name}/maildir/")] {
         let mut h = tar::Header::new_ustar();
@@ -192,8 +187,7 @@ pub async fn write(
     h.set_mtime(t as u64);
     h.set_size(index.len() as u64);
     tar.append_data(&mut h, format!("{name}/index.md"), index.as_bytes())?;
-    tar.into_inner()?.finish()?.sync_all()?;
-    fs::rename(&tmp, out).with_context(|| format!("renaming to {}", out.display()))?;
+    tar.into_inner()?.finish()?.flush()?;
     Ok(Summary {
         messages: chosen.len(),
         folded,

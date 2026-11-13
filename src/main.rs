@@ -3008,6 +3008,11 @@ async fn with_store(cmd: Cmd, store: &Store, out: &mut impl Write) -> Result<()>
             if name.is_empty() || name.starts_with('.') || name.contains('/') {
                 bail!("export name {name:?} must be a plain file name");
             }
+            let title = title.unwrap_or_else(|| name.clone());
+            let filter = filter.build(&store.data_dir)?;
+            warn_unindexed(store, &filter).await?;
+            // The service may write only the data root, so -o goes to its client.
+            let client = output.as_deref().and_then(serve::ClientFile::create);
             let path = match output {
                 Some(p) => p,
                 None => {
@@ -3016,10 +3021,39 @@ async fn with_store(cmd: Cmd, store: &Store, out: &mut impl Write) -> Result<()>
                     dir.join(format!("{name}.tgz"))
                 }
             };
-            let title = title.unwrap_or_else(|| name.clone());
-            let filter = filter.build(&store.data_dir)?;
-            warn_unindexed(store, &filter).await?;
-            let s = export::write(store, &filter, &name, &title, &command_line(), &path).await?;
+            let command = command_line();
+            let s = match client {
+                Some(file) => {
+                    let mut w = io::BufWriter::with_capacity(1 << 16, file?);
+                    let s = export::write(store, &filter, &name, &title, &command, &mut w).await?;
+                    w.flush()?;
+                    s
+                }
+                None => {
+                    let tmp = path.with_extension("tgz.part");
+                    let file = std::fs::File::create(&tmp)
+                        .with_context(|| format!("creating {}", tmp.display()))?;
+                    let mut w = io::BufWriter::new(file);
+                    let s = export::write(store, &filter, &name, &title, &command, &mut w).await;
+                    let file = w.into_inner().map_err(io::IntoInnerError::into_error);
+                    match (s, file) {
+                        (Ok(s), Ok(f)) => {
+                            f.sync_all()?;
+                            std::fs::rename(&tmp, &path)
+                                .with_context(|| format!("renaming to {}", path.display()))?;
+                            s
+                        }
+                        (Err(e), _) => {
+                            let _ = std::fs::remove_file(&tmp);
+                            return Err(e);
+                        }
+                        (_, Err(e)) => {
+                            let _ = std::fs::remove_file(&tmp);
+                            return Err(e.into());
+                        }
+                    }
+                }
+            };
             writeln!(
                 out,
                 "wrote {}: {} messages ({} duplicate copies left out)",

@@ -598,7 +598,9 @@ $ munchymail export corp --participant '*@corp.example' --title 'Mail with corp.
 wrote data/exports/corp.tgz: 32 messages (5 duplicate copies left out)
 ```
 
-Writes `data/exports/NAME.tgz`, which unpacks to `NAME/index.md` (a table
+Writes `data/exports/NAME.tgz`, or `-o FILE` (relative to where you ran
+it; under the service the CLI writes it, kept only if the export succeeds),
+which unpacks to `NAME/index.md` (a table
 of date, From, To, subject and current folder, the command that made it,
 and SHA-256 sums) and `NAME/maildir/001`, `002`, ... in date order. Each
 file is one whole message (an `.eml`), byte for byte as stored, without the
