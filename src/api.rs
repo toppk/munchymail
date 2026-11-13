@@ -323,6 +323,38 @@ impl Message {
     }
 }
 
+/// The stored copy `r` names: itself, or the copy `read` shows of a message.
+pub async fn copy(store: &Store, r: Ref) -> Result<i64> {
+    match r {
+        Ref::Message(msg) => {
+            let mut sightings = Sightings::new(store).await?;
+            Ok(message_copies(store, &mut sightings, msg).await?.1)
+        }
+        Ref::Copy(id) => Ok(id),
+    }
+}
+
+/// Attachment `n` of `r`, numbered from 1 as `read` lists them: its file name
+/// as the sender gave it, and its decoded bytes.
+pub async fn attachment(store: &Store, r: Ref, n: usize) -> Result<(Option<String>, Vec<u8>)> {
+    let id = copy(store, r).await?;
+    let s = load(store, id).await?;
+    let count = s.decoded.attachments().count();
+    let Some(index) = s
+        .decoded
+        .parts
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.kind != message::Kind::Body)
+        .map(|(i, _)| i)
+        .nth(n.wrapping_sub(1))
+    else {
+        bail!("{r} has {count} attachments; `read {r}` lists them, numbered from 1");
+    };
+    let bytes = message::leaf(&s.raw, index).context("the part no longer parses")?;
+    Ok((s.decoded.parts[index].filename.clone(), bytes))
+}
+
 pub async fn read(store: &Store, r: Ref) -> Result<Message> {
     let mut sightings = Sightings::new(store).await?;
     let id = match r {

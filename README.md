@@ -285,7 +285,8 @@ folder.
 
 Results come in pages of `-n` (1 to 1000, default 50), newest first by
 `Date:` with ties broken by id, so pages are stable. When there are more,
-the next cursor is logged to stderr (`more results: add --after CURSOR`).
+the next cursor is logged to stderr (`more results: add --after CURSOR`)
+when stdout is a terminal; otherwise only `--json` carries it.
 `--json` prints JSON Lines: one `{"type":"message",...}` record per message
 (copy `id`, `message` id, date, Message-ID, From, To, subject, a
 160-character snippet of the
@@ -369,6 +370,8 @@ Both print counts and percentages of the matching messages.
 munchymail read m1234          # a message: locations, attachments, then headers and text body
 munchymail read 227617         # one stored copy, and only its locations
 munchymail read m1234 --json   # one object: all decoded headers, text, attachments, locations
+munchymail attachment m1234 2 > file.pdf   # attachment 2's decoded bytes; refuses a terminal
+munchymail show m1234 --raw    # show takes a message id too: the copy read shows
 ```
 
 A message id shows the copy seen most recently and the places of every

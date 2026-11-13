@@ -186,7 +186,7 @@ thread_local! {
 }
 
 /// The width rows are fitted to on this thread: the terminal of whoever
-/// asked, or none when output isn't a terminal.
+/// asked, or none when output isn't a terminal (so also whether it is one).
 pub fn width() -> Option<usize> {
     WIDTH.get()
 }
@@ -195,8 +195,12 @@ pub fn set_width(w: Option<usize>) {
     WIDTH.set(w);
 }
 
-/// Columns of the terminal on `fd`; none if it isn't one.
+/// Columns of the terminal on `fd` (80 if it doesn't say); none if it isn't one.
 pub fn terminal_width(fd: std::os::fd::RawFd) -> Option<usize> {
+    // SAFETY: isatty only inspects the descriptor.
+    if unsafe { libc::isatty(fd) } != 1 {
+        return None;
+    }
     let mut ws = libc::winsize {
         ws_row: 0,
         ws_col: 0,
@@ -205,7 +209,11 @@ pub fn terminal_width(fd: std::os::fd::RawFd) -> Option<usize> {
     };
     // SAFETY: TIOCGWINSZ writes one winsize, which ws is.
     let r = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &raw mut ws) };
-    (r == 0 && ws.ws_col > 0).then_some(usize::from(ws.ws_col))
+    Some(if r == 0 && ws.ws_col > 0 {
+        usize::from(ws.ws_col)
+    } else {
+        80
+    })
 }
 
 fn cut(s: &str, n: usize) -> String {

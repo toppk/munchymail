@@ -81,10 +81,9 @@ fn effect(command: &str) -> Option<(&'static str, &'static str)> {
             "write",
             "its socket in $XDG_RUNTIME_DIR/munchymail/; runs the commands sent to it",
         ),
-        "origin list" | "search" | "read" | "top" | "names" | "report" | "profile" | "show"
-        | "attachments" | "stats" | "changes" | "removals" | "accounts" | "overview" => {
-            ("read", READ)
-        }
+        "origin list" | "search" | "read" | "attachment" | "top" | "names" | "report"
+        | "profile" | "show" | "attachments" | "stats" | "changes" | "removals" | "accounts"
+        | "overview" => ("read", READ),
         _ => return None,
     })
 }
@@ -142,7 +141,7 @@ impl Program {
                 (
                     "Find and read",
                     "Search the archive and read what it finds.",
-                    &["search", "read", "show", "export"],
+                    &["search", "read", "attachment", "show", "export"],
                 ),
                 (
                     "Study headers",
@@ -605,12 +604,22 @@ enum Cmd {
         #[arg(short = 'k', long, default_value_t = 6)]
         values: usize,
     },
+    /// Write one attachment's bytes to stdout.
+    ///
+    /// Attachments are numbered as `read` lists them, e.g. `munchymail
+    /// attachment m1234 2 > invoice.pdf`. Refuses to write to a terminal.
+    Attachment {
+        /// Message id (m1234) or copy id.
+        id: api::Ref,
+        /// Which attachment, from 1.
+        n: usize,
+    },
     /// Show one copy's raw headers or bytes.
     ///
     /// Its raw header block by default.
     Show {
-        /// Message id, the first column of `search`.
-        id: i64,
+        /// Copy id (the first column of `search`), or message id mN for the copy `read` shows.
+        id: api::Ref,
         /// Exact raw message bytes (pipe into sieve-test).
         #[arg(long)]
         raw: bool,
@@ -1481,6 +1490,14 @@ enum Listing {
     Json,
 }
 
+/// Tell a person at a terminal how to get the next page; scripts use `--json`'s
+/// `page` record, so a pipe doesn't get the hint mixed into its output.
+fn more(cursor: &str) {
+    if listing::width().is_some() {
+        info!("more results: add --after {cursor}");
+    }
+}
+
 /// `search --columns` and how address columns show.
 struct Columns {
     spec: Option<String>,
@@ -1607,7 +1624,7 @@ async fn search(
             }
         }
         if let Some(n) = next {
-            info!("more results: add --after {n}");
+            more(&n);
         }
         return Ok(());
     }
@@ -1661,7 +1678,7 @@ async fn search(
         if listing == Listing::Json {
             writeln!(out, "{}", api::page_json(hits.len(), next.as_deref()))?;
         } else if let Some(n) = next {
-            info!("more results: add --after {n}");
+            more(&n);
         }
         return Ok(());
     }
@@ -1691,7 +1708,7 @@ async fn search(
         }
     }
     if let Some(n) = next {
-        info!("more results: add --after {n}");
+        more(&n);
     }
     Ok(())
 }
@@ -1759,6 +1776,13 @@ async fn read(store: &Store, r: api::Ref, json: bool, out: &mut impl Write) -> R
         for (name, size) in &a.members {
             writeln!(out, "      {} ({size} bytes)", sanitize(name))?;
         }
+    }
+    if m.decoded.attachments().next().is_some() {
+        writeln!(
+            out,
+            "  (save one: munchymail attachment m{} N > FILE)",
+            m.msg
+        )?;
     }
     if let Some(p) = &m.decoded.problem {
         writeln!(out, "  problem: {p}")?;
@@ -2077,11 +2101,12 @@ async fn report(
 
 async fn show(
     store: &Store,
-    id: i64,
+    id: api::Ref,
     raw: bool,
     provenance: bool,
     out: &mut impl Write,
 ) -> Result<()> {
+    let id = api::copy(store, id).await?;
     let rows = query_rows(
         store,
         "SELECT header_hash, body_hash FROM artifact WHERE artifact_id = ?",
@@ -2775,6 +2800,7 @@ async fn with_store(cmd: Cmd, store: &Store, out: &mut impl Write) -> Result<()>
             | Cmd::Profile { .. }
             | Cmd::Show { .. }
             | Cmd::Read { .. }
+            | Cmd::Attachment { .. }
             | Cmd::Export { .. }
             | Cmd::Attachments { .. }
             | Cmd::Stats
@@ -3003,6 +3029,12 @@ async fn with_store(cmd: Cmd, store: &Store, out: &mut impl Write) -> Result<()>
             )?;
         }
         Cmd::Read { id, json } => read(store, id, json, out).await?,
+        Cmd::Attachment { id, n } => {
+            if listing::width().is_some() {
+                bail!("attachment {n} of {id} is raw bytes; redirect it to a file, e.g. > FILE");
+            }
+            out.write_all(&api::attachment(store, id, n).await?.1)?;
+        }
         Cmd::Stats => stats(store, out).await?,
         Cmd::Sql { query } => {
             for r in sql(store, &query).await? {

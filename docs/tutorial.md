@@ -45,8 +45,9 @@ munchymail search -n 10
 
 The `who` column shows the other side of each message: `→` and the
 recipients of mail you sent, `←` and the sender of mail you received. The
-first number is the copy id. Results are newest first, in pages: when there
-are more, stderr says `more results: add --after CURSOR`.
+first number is the copy id. Results are newest first, in pages of `-n`
+(default 50). At a terminal, stderr says `more results: add --after CURSOR`
+when there are more; scripts get the cursor from `--json`'s `page` record.
 
 Filters can be combined, and all of them must match:
 
@@ -86,12 +87,14 @@ columns = "id,date,who,cc,subject"
 ## 2. Read a message
 
 ```
-munchymail read m1834          # headers, text, attachments, where its copies are
-munchymail show 1834 --raw     # the exact bytes of one copy
+munchymail read m1834                        # headers, text, attachments, where its copies are
+munchymail attachment m1834 2 > invoice.pdf   # attachment 2, as read numbers them
+munchymail show m1834 --raw                   # the exact bytes of the copy read shows
 ```
 
 `mN` names a message, however many copies of it were stored; a bare number
-names one copy.
+(the first column of `search`) names one copy. Every command that takes one
+takes the other.
 
 ## 3. Study headers, e.g. for Sieve rules
 
