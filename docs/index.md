@@ -17,7 +17,7 @@ otherwise); `data/` below means that directory. Command usage is in `README.md`.
 | `archive_member` | Derived: file names and sizes inside a zip part, keyed by the part's hash (at most 1000 per zip; read from the central directory, nothing decompressed). |
 | `header` | Derived: per artifact, ordered fields; `name` lowercased, `value` unfolded and RFC 2047-decoded; `nth` = occurrence of that name in the message (0 = first, i.e. Sieve `:index` − 1). |
 | `alias` | The account's own addresses as Sieve `:matches` patterns (`alias add`); `account add` adds the account's address. |
-| `origin` | Registered roots (directory tree or single mbox file); `retired_at` set by `origin retire`. |
+| `origin` | Registered roots (directory tree or single mbox file); `retired_at` set by `origin retire`; `role` (live, snapshot, export) by `origin role`. |
 | `import_run` | One per origin per `import`. |
 | `file_content` | Whole-file SHA-256, `format` (`dovecot` or `mboxrd`: how its messages were unquoted; `gmail-label`), `head_hash` (first 64 KiB), message count, and `parent_content_id` when an earlier content is a byte prefix (a growing mbox across backups). |
 | `file_sighting` | Content seen at `path` (relative to origin root) in a run, with dev/ino/mtime/ctime. |

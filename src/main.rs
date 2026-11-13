@@ -62,7 +62,9 @@ fn effect(command: &str) -> Option<(&'static str, &'static str)> {
             "write",
             "data/ (mail, Gmail's labels and history); only reads Gmail",
         ),
-        "origin add" | "origin retire" | "origin move" => ("write", "the origin table in data/"),
+        "origin add" | "origin role" | "origin rename" | "origin retire" | "origin move" => {
+            ("write", "the origin table in data/")
+        }
         "import" => (
             "write",
             "data/; reads the origins' mail under a shared lock, never writes it",
@@ -894,7 +896,19 @@ enum OriginCmd {
         /// Free text, e.g. "2019 laptop backup".
         #[arg(long)]
         note: Option<String>,
+        /// What it is; only live origins will be kept in sync.
+        #[arg(long)]
+        role: Option<Role>,
     },
+    /// Say what an origin is: a live mailbox, a snapshot or an export.
+    ///
+    /// Only live origins will be kept in sync; snapshots and exports never
+    /// change.
+    Role { label: String, role: Role },
+    /// Give an origin a new label.
+    ///
+    /// Its history is kept; config.toml's section for it must be renamed too.
+    Rename { label: String, new: String },
     /// Mark an origin finished.
     ///
     /// E.g. its path moved: `import` skips it and `--current` ignores it unless
@@ -911,6 +925,26 @@ enum OriginCmd {
     Move { label: String, root: PathBuf },
     /// List origins and when each was last imported.
     List,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Role {
+    /// A mailbox still in use.
+    Live,
+    /// A copy of a mailbox as it was: a backup, a found file.
+    Snapshot,
+    /// A service's export, e.g. a Google Takeout.
+    Export,
+}
+
+impl Role {
+    fn as_str(self) -> &'static str {
+        match self {
+            Role::Live => "live",
+            Role::Snapshot => "snapshot",
+            Role::Export => "export",
+        }
+    }
 }
 
 /// Filters; all given must match. PATTERNs use Sieve `:matches` (`*`, `?`, ASCII
@@ -1170,7 +1204,7 @@ async fn overview(root: &Path, stores: &Stores, json: bool, out: &mut impl Write
             &store,
             "SELECT g.label, g.root,
                     (SELECT max(finished_at) FROM import_run r WHERE r.origin_id = g.origin_id),
-                    g.retired_at
+                    g.retired_at, g.role
              FROM origin g ORDER BY g.retired_at IS NOT NULL, g.label",
             vec![],
         )
@@ -1184,6 +1218,7 @@ async fn overview(root: &Path, stores: &Stores, json: bool, out: &mut impl Write
                         "gmail": text(&r[1]).starts_with("gmail:"),
                         "last_import": int(&r[2]).map(iso),
                         "retired": int(&r[3]).map(iso),
+                        "role": (!text(&r[4]).is_empty()).then(|| text(&r[4])),
                     })
                 })
                 .collect();
@@ -1216,7 +1251,11 @@ async fn overview(root: &Path, stores: &Stores, json: bool, out: &mut impl Write
                 None => format!("never {verb}"),
             };
             let retired = int(&r[3]).map_or(String::new(), |t| format!(", retired {}", ymd(t)));
-            writeln!(out, "  {label:<width$}  {when}{retired}")?;
+            let role = match text(&r[4]) {
+                r if r.is_empty() => "no role".to_string(),
+                r => r,
+            };
+            writeln!(out, "  {label:<width$}  {role:<8}  {when}{retired}")?;
         }
         writeln!(out)?;
     }
@@ -1381,6 +1420,7 @@ async fn origin(store: &Store, cmd: OriginCmd, out: &mut impl Write) -> Result<(
             root,
             host,
             note,
+            role,
         } => {
             let root = root
                 .canonicalize()
@@ -1392,8 +1432,16 @@ async fn origin(store: &Store, cmd: OriginCmd, out: &mut impl Write) -> Result<(
             store
                 .conn
                 .execute(
-                    "INSERT INTO origin (label, root, host, note, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    (label.as_str(), root.to_string_lossy().as_ref(), host, note, now()),
+                    "INSERT INTO origin (label, root, host, note, created_at, role)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    (
+                        label.as_str(),
+                        root.to_string_lossy().as_ref(),
+                        host,
+                        note,
+                        now(),
+                        role.map(Role::as_str),
+                    ),
                 )
                 .await
                 .with_context(|| format!("adding origin {label:?}"))?;
@@ -1431,6 +1479,54 @@ async fn origin(store: &Store, cmd: OriginCmd, out: &mut impl Write) -> Result<(
             }
             writeln!(out, "origin {label} -> {}", root.display())?;
         }
+        OriginCmd::Role { label, role } => {
+            store.begin().await?;
+            let n = store
+                .conn
+                .execute(
+                    "UPDATE origin SET role = ?1 WHERE label = ?2",
+                    (role.as_str(), label.as_str()),
+                )
+                .await?;
+            store.commit().await?;
+            if n == 0 {
+                bail!("no origin labelled {label:?}; `mmadm origin list` lists them");
+            }
+            writeln!(out, "origin {label} is {}", role.as_str())?;
+        }
+        OriginCmd::Rename { label, new } => {
+            if label == munchymail::gmail::ORIGIN {
+                bail!("the Gmail origin is always {label:?}");
+            }
+            if new.is_empty() || new.contains(['/', '"']) || new.trim() != new {
+                bail!("{new:?} can't be a label; use letters, digits and hyphens");
+            }
+            store.begin().await?;
+            let n = store
+                .conn
+                .execute(
+                    "UPDATE origin SET label = ?1 WHERE label = ?2",
+                    (new.as_str(), label.as_str()),
+                )
+                .await
+                .with_context(|| format!("renaming origin {label:?}; is {new:?} taken?"))?;
+            store.commit().await?;
+            if n == 0 {
+                bail!("no origin labelled {label:?}; `mmadm origin list` lists them");
+            }
+            writeln!(out, "origin {label} is now {new}")?;
+            let config = Config::load()?;
+            let address = account_address(store);
+            if config.has_origin(address, &label) {
+                writeln!(
+                    out,
+                    "in {}, rename its section:\n\n  {}\nto\n  {}",
+                    config.path.display(),
+                    Config::origin_header(address, &label),
+                    Config::origin_header(address, &new),
+                )?;
+            }
+        }
         OriginCmd::Retire { label, undo } => {
             store.begin().await?;
             let n = store
@@ -1452,7 +1548,7 @@ async fn origin(store: &Store, cmd: OriginCmd, out: &mut impl Write) -> Result<(
                 store,
                 "SELECT g.label, g.root, g.host, g.note,
                         (SELECT max(started_at) FROM import_run r WHERE r.origin_id = g.origin_id),
-                        g.retired_at
+                        g.retired_at, g.role
                  FROM origin g ORDER BY g.label",
                 vec![],
             )
@@ -1466,9 +1562,13 @@ async fn origin(store: &Store, cmd: OriginCmd, out: &mut impl Write) -> Result<(
                     Value::Integer(t) => format!("\tretired {}", ymd(t)),
                     _ => String::new(),
                 };
+                let role = match &r[6] {
+                    Value::Text(t) => t.as_str(),
+                    _ => "no role",
+                };
                 writeln!(
                     out,
-                    "{}\t{}\t{}\t{}\tlast import {last}{retired}",
+                    "{}\t{role}\t{}\t{}\t{}\tlast import {last}{retired}",
                     text(&r[0]),
                     text(&r[1]),
                     text(&r[2]),

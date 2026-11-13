@@ -15,14 +15,14 @@ use crate::util::hex;
 /// Objects at most this size live inline in SQLite.
 pub const INLINE_MAX: usize = 16 * 1024;
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 /// How long a `connect`ed connection waits for another's write to finish.
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Upgrades from the previous version; index `i` brings version `i + 1` to `i + 2`.
 /// New tables and indexes need no entry: `SCHEMA` creates them if missing.
-const MIGRATIONS: [&str; 8] = [
+const MIGRATIONS: [&str; 9] = [
     "ALTER TABLE origin ADD COLUMN retired_at INTEGER",
     "",
     "ALTER TABLE artifact ADD COLUMN msg_id INTEGER;
@@ -37,6 +37,8 @@ const MIGRATIONS: [&str; 8] = [
     "",
     "",
     "UPDATE file_content SET format = 'dovecot' WHERE format = 'mbox'",
+    "ALTER TABLE origin ADD COLUMN role TEXT;
+     UPDATE origin SET role = 'live' WHERE root LIKE 'gmail:%' AND role IS NULL;",
 ];
 
 /// Indexes on columns a migration may have just added.
@@ -149,7 +151,9 @@ CREATE TABLE IF NOT EXISTS origin (
     host TEXT,
     note TEXT,
     created_at INTEGER NOT NULL,
-    retired_at INTEGER
+    retired_at INTEGER,
+    -- live, snapshot or export; only live origins will be synced
+    role TEXT
 );
 
 CREATE TABLE IF NOT EXISTS import_run (

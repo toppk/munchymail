@@ -179,10 +179,15 @@ An origin is a place mail is found: a directory tree of mbox files, or a
 single mbox file. Registering one reads nothing yet:
 
 ```
-mmadm origin add mailhost-dovecot ~/mail --note "live mbox tree"
+mmadm origin add mailhost-dovecot ~/mail --role live --note "live mbox tree"
 mmadm origin add 2019-03-02-laptop-mail ~/mail-backups/2019-03-02-laptop-mail/extracted/mail \
-    --note "old laptop's ~/mail, found 2026; date is the newest file's mtime"
+    --role snapshot --note "old laptop's ~/mail, found 2026; date is the newest file's mtime"
 ```
+
+The role says what an origin is: `live` for a mailbox still in use,
+`snapshot` for a copy of one as it was, `export` for a service's export
+such as a Google Takeout. Only live origins will be kept in sync. Set or
+change it later with `mmadm origin role LABEL ROLE`.
 
 ### Naming origins
 
@@ -200,7 +205,8 @@ long `origin list` readable. We suggest:
   or failing that the newest file's mtime; not when you found it. Copies
   then sort by date, and the name says which day's mailbox it is.
 - Name a thing only by what won't change: labels appear in `--origin`, in
-  `config.toml` and in your notes.
+  `config.toml` and in your notes. `mmadm origin rename OLD NEW` exists
+  for mistakes, and prints the `config.toml` line to change with it.
 - The note carries the story: where it was found, why the date is believed,
   and anything left out.
 

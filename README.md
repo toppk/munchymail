@@ -156,6 +156,17 @@ When the same files only change place (e.g. a backup filed under
 mmadm origin move 2021-07-07-mailhost-spool ~/mail-backups/2021-07-07-mailhost-spool/extracted/me
 ```
 
+Each origin has a role: `live` (a mailbox in use), `snapshot` (a copy as it
+was) or `export` (e.g. a Takeout). Only live origins will be kept in sync
+(`docs/sync.md`); the Gmail origin is live from the start. A label can
+change too, and then the origin's `config.toml` section must be renamed
+with it, as `rename` says:
+
+```
+mmadm origin role 2021-07-07-mailhost-spool snapshot
+mmadm origin rename spool-2021 2021-07-07-mailhost-spool
+```
+
 Global options: `--data DIR` (or `MUNCHYMAIL_DATA`, default `~/.local/share/munchymail`; `just run` and
 `cargo run` use the checkout's `data/`), the
 directory of accounts, and `--account ADDRESS`. Paths below such as

@@ -7,7 +7,7 @@ itself.
 
 ## Which origins are synced
 
-Every origin gets a role, stored in the database (schema 7):
+Every origin gets a role, stored in the database (schema 10, built):
 
 | Role | Meaning | Synced |
 |---|---|---|
@@ -16,7 +16,8 @@ Every origin gets a role, stored in the database (schema 7):
 | `export` | a service's export (a Takeout) | never |
 
 An origin with no role is never synced, and neither is a retired one.
-`mmadm origin role LABEL ROLE` sets it.
+`mmadm origin role LABEL ROLE` sets it; the upgrade makes the Gmail origin
+live and leaves the rest unset.
 
 ## Gmail
 

@@ -210,8 +210,8 @@ async fn origin(store: &Store, address: &str) -> Result<i64> {
     store
         .conn
         .execute(
-            "INSERT INTO origin (label, root, host, note, created_at)
-             VALUES (?1, ?2, 'gmail.googleapis.com', 'Gmail API sync', ?3)",
+            "INSERT INTO origin (label, root, host, note, created_at, role)
+             VALUES (?1, ?2, 'gmail.googleapis.com', 'Gmail API sync', ?3, 'live')",
             (ORIGIN, root.as_str(), now()),
         )
         .await?;

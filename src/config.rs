@@ -126,10 +126,20 @@ impl Config {
             .as_str()
     }
 
+    pub fn has_origin(&self, account: &str, origin: &str) -> bool {
+        self.origins(account)
+            .is_some_and(|o| o.contains_key(origin))
+    }
+
+    pub fn origin_header(account: &str, origin: &str) -> String {
+        format!("[accounts.\"{account}\".origins.\"{origin}\"]")
+    }
+
     /// The TOML that sets an origin's variant, for messages.
     pub fn mbox_entry(account: &str, origin: &str) -> String {
         format!(
-            "[accounts.\"{account}\".origins.\"{origin}\"]\nmbox = \"dovecot\"  # or \"mboxrd\" (e.g. Google Takeout)"
+            "{}\nmbox = \"dovecot\"  # or \"mboxrd\" (e.g. Google Takeout)",
+            Self::origin_header(account, origin)
         )
     }
 }
