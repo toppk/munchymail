@@ -84,8 +84,13 @@ would create an empty `~/.local/share/munchymail` first.
 8. At the first OCR or extraction run (the first import or sync bringing
    a PDF or image), `journalctl --user -u munchymail` shows it finished;
    a sandbox failure would stop it with an error, recording nothing.
-9. Optionally `ln -s ~/.local/share/munchymail ~/src/munchymail/data`.
 
-Roll back: stop the unit, `mv` the directory back, run with `--data data`.
-Development runs from the checkout use the live data by default; point
-`MUNCHYMAIL_DATA` at a scratch copy for anything experimental.
+Done 2026-11-13 (`0.1.0-dbd86bb`); step 8 waits for the first such run.
+Roll back: stop the unit, `mv -T` the directory back.
+
+## Development
+
+`just run` and `cargo run` use the checkout's own `data/`, never the live
+data root: a dev build may change the schema, and the live databases are the
+service's. That data root differs from the service's, so those commands run
+directly rather than through it.

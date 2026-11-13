@@ -1,0 +1,3 @@
+# `cargo run` from the checkout uses its own data/, never the live data root.
+[env]
+MUNCHYMAIL_DATA = { value = "data", relative = true }

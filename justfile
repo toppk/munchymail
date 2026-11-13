@@ -2,6 +2,9 @@
 
 set positional-arguments
 
+# Dev runs use the checkout's data/, never the live data root.
+export MUNCHYMAIL_DATA := env("MUNCHYMAIL_DATA", justfile_directory() / "data")
+
 _default:
     @just --list --unsorted
 

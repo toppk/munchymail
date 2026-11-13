@@ -150,7 +150,8 @@ When the same files only change place (e.g. a backup filed under
 munchymail origin move spool-2021-07 ~/mail-backups/spool-2021-07-07/me
 ```
 
-Global options: `--data DIR` (or `MUNCHYMAIL_DATA`, default `data`), the
+Global options: `--data DIR` (or `MUNCHYMAIL_DATA`, default `~/.local/share/munchymail`; `just run` and
+`cargo run` use the checkout's `data/`), the
 directory of accounts, and `--account ADDRESS`. Paths below such as
 `data/exports/` are within the account's directory.
 Logs go to stderr; `MUNCHYMAIL_LOG=munchymail=debug` for more. Each file
