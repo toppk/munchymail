@@ -4,7 +4,8 @@ Addendum to `mail-corpus-design.docx`.
 
 ## Writes
 
-munchymail writes only under `data/` (gitignored), one directory per account:
+munchymail writes only under its data root (`data/` here; see `README.md`),
+one directory per account:
 
 ```
 data/ADDRESS/email.sqlite

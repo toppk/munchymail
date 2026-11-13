@@ -6,8 +6,11 @@ where each copy was found, and lets you slice the result by any header,
 which is mainly for working out Sieve rules against real mail.
 
 Sources are only ever read, under the same shared `fcntl` lock a Dovecot
-reader takes. Everything munchymail writes lives in `data/`.
+reader takes. Everything munchymail writes lives in its data root,
+`~/.local/share/munchymail` (`$XDG_DATA_HOME/munchymail`; `--data` or
+`MUNCHYMAIL_DATA` to use another), called `data/` below.
 
+- `docs/install.md`: where it is installed and how it runs as a service
 - `docs/design.md`: goals, data model and phases
 - `docs/ingest.md`: how mbox files are read, locked and split
 - `docs/index.md`: schema and performance notes
@@ -21,9 +24,11 @@ cargo build --release          # binary: target/release/munchymail
 just check                     # fmt, clippy -D warnings, tests
 ```
 
-Use the release build; debug builds are much slower. The `justfile` only
-has `build`, `check` and `run` (`just run search --count` = `munchymail
-search --count`). The examples below call the binary directly.
+Use the release build; debug builds are much slower. The `justfile` has
+`build`, `check`, `run` (`just run search --count` = `munchymail search
+--count`) and `install`. Installed, the CLI is `~/.local/bin/munchymail`;
+use that absolute path in scripts, cron and agents (see
+`docs/install.md`). The examples below call it as `munchymail`.
 
 ## Getting mail in
 
@@ -205,13 +210,16 @@ so.
 
 A database can be open in only one process at a time, so one long command
 (an import, `ocr`) otherwise makes every other one wait or fail.
-`munchymail serve` opens every account and listens on `data/serve.sock`
-(mode 0600, and only the same user's clients are answered). While it runs, the
+`munchymail serve` opens every account and listens on
+`$XDG_RUNTIME_DIR/munchymail/serve.sock` (or `$MUNCHYMAIL_SOCKET`; mode
+0600, and only the same user's clients are answered). Installed, it runs as
+the systemd user unit `munchymail` (`docs/install.md`). While it runs, the
 other commands send their command line there and print what comes back
 (output, log lines, exit status), so reads run alongside a write and
 writes take turns. With no service running, commands open the database
-themselves as before. `diff`, `scan`, `describe` and `gmail auth`/`status`
-never use it.
+themselves as before, as they do when the service holds a different data
+root or there is no `XDG_RUNTIME_DIR` (cron, ssh without a session).
+`diff`, `scan`, `describe` and `gmail auth`/`status` never use it.
 
 ```
 munchymail serve &                      # until killed; logs to stderr

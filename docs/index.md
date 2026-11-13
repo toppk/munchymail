@@ -1,8 +1,8 @@
 # Index internals
 
 Schema in `src/store.rs`, one database per account in `data/ADDRESS/`
-(`MUNCHYMAIL_DATA` or `--data` for `data/`); `data/` below means that
-directory. Command usage is in `README.md`.
+(`~/.local/share/munchymail` unless `MUNCHYMAIL_DATA` or `--data` says
+otherwise); `data/` below means that directory. Command usage is in `README.md`.
 
 ## Tables
 

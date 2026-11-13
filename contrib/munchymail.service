@@ -1,0 +1,27 @@
+# ~/.config/systemd/user/munchymail.service, installed by `just install`.
+[Unit]
+Description=munchymail mail archive (CLI requests over a Unix socket)
+
+[Service]
+Type=simple
+ExecStart=%h/.local/lib/munchymail/current/munchymail serve
+RuntimeDirectory=munchymail
+RuntimeDirectoryMode=0700
+Environment=MUNCHYMAIL_LOG=munchymail=info,warn
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/munchymail
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

@@ -1,28 +1,37 @@
 //! `munchymail serve`: one process owns the account databases and runs CLI
-//! commands sent over `DATA/serve.sock`, so they no longer queue for the
-//! database lock. A request is one JSON line (`argv`, `cwd`, `account`); the
-//! reply is frames of a tag byte, a big-endian u32 length and the bytes:
-//! stdout, stderr (log lines), then the exit code.
+//! commands sent over `$XDG_RUNTIME_DIR/munchymail/serve.sock`, so they no
+//! longer queue for the database lock. A request is one JSON line (`argv`,
+//! `cwd`, `account`, `data`); the reply is frames of a tag byte, a big-endian
+//! u32 length and the bytes: stdout, stderr (log lines), then the exit code,
+//! or only a refusal when the service holds another data root.
 
 use std::cell::RefCell;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use serde_json::json;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 const STDOUT: u8 = b'1';
 const STDERR: u8 = b'2';
 const EXIT: u8 = b'x';
+const OTHER_DATA: u8 = b'd';
 
-pub fn socket(data: &Path) -> PathBuf {
-    data.join("serve.sock")
+/// `$MUNCHYMAIL_SOCKET`, else `$XDG_RUNTIME_DIR/munchymail/serve.sock`; none
+/// without either (cron, ssh without a session), so commands run on their own.
+pub fn socket() -> Option<PathBuf> {
+    let var = |v| {
+        std::env::var_os(v)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    var("MUNCHYMAIL_SOCKET").or_else(|| Some(var("XDG_RUNTIME_DIR")?.join("munchymail/serve.sock")))
 }
 
 /// One command line to run, as the client parsed it.
@@ -33,11 +42,14 @@ pub struct Request {
     pub cwd: PathBuf,
     /// The client's `--account` or `MUNCHYMAIL_ACCOUNT`.
     pub account: Option<String>,
+    /// The client's data root, canonical; the service runs only its own.
+    pub data: PathBuf,
 }
 
 impl Request {
     fn to_line(&self) -> String {
-        let v = json!({"argv": self.argv, "cwd": self.cwd, "account": self.account});
+        let v =
+            json!({"argv": self.argv, "cwd": self.cwd, "account": self.account, "data": self.data});
         format!("{v}\n")
     }
 
@@ -53,6 +65,7 @@ impl Request {
             argv,
             cwd: PathBuf::from(v["cwd"].as_str().context("no cwd")?),
             account: v["account"].as_str().map(String::from),
+            data: PathBuf::from(v["data"].as_str().context("no data")?),
         })
     }
 }
@@ -130,26 +143,33 @@ fn peer_uid(s: &UnixStream) -> io::Result<u32> {
     Ok(cred.uid)
 }
 
-/// Listen on `socket(data)`, replacing a stale one.
-pub fn bind(data: &Path) -> Result<UnixListener> {
-    let path = socket(data);
+/// Listen on `path`, replacing a stale socket.
+pub fn bind(path: &Path) -> Result<UnixListener> {
+    if let Some(dir) = path.parent() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .with_context(|| format!("creating {}", dir.display()))?;
+    }
     if path.exists() {
-        if UnixStream::connect(&path).is_ok() {
+        if UnixStream::connect(path).is_ok() {
             bail!("already serving on {}", path.display());
         }
-        fs::remove_file(&path).with_context(|| format!("removing stale {}", path.display()))?;
+        fs::remove_file(path).with_context(|| format!("removing stale {}", path.display()))?;
     }
     let listener =
-        UnixListener::bind(&path).with_context(|| format!("binding {}", path.display()))?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        UnixListener::bind(path).with_context(|| format!("binding {}", path.display()))?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     info!(socket = %path.display(), "listening");
     Ok(listener)
 }
 
-/// Serve requests until killed, each on its own thread; `handle` runs one
-/// and returns its exit code.
+/// Serve requests for data root `data` until killed, each on its own thread;
+/// `handle` runs one and returns its exit code.
 pub fn serve(
     listener: UnixListener,
+    data: PathBuf,
     handle: impl Fn(Request, &mut Reply) -> u8 + Send + Sync + 'static,
 ) -> Result<()> {
     // SAFETY: getuid has no preconditions.
@@ -170,8 +190,8 @@ pub fn serve(
                 continue;
             }
         }
-        let handle = handle.clone();
-        std::thread::spawn(move || match answer(conn, &*handle) {
+        let (handle, data) = (handle.clone(), data.clone());
+        std::thread::spawn(move || match answer(conn, &data, &*handle) {
             Err(e)
                 if e.downcast_ref::<io::Error>().map(io::Error::kind)
                     == Some(io::ErrorKind::BrokenPipe) => {}
@@ -182,10 +202,18 @@ pub fn serve(
     Ok(())
 }
 
-fn answer(conn: UnixStream, handle: &impl Fn(Request, &mut Reply) -> u8) -> Result<()> {
+fn answer(
+    mut conn: UnixStream,
+    data: &Path,
+    handle: &impl Fn(Request, &mut Reply) -> u8,
+) -> Result<()> {
     let mut line = String::new();
     BufReader::new(conn.try_clone()?).read_line(&mut line)?;
     let req = Request::parse(&line).context("bad request")?;
+    if req.data != data {
+        frame(&mut conn, OTHER_DATA, data.as_os_str().as_encoded_bytes())?;
+        return Ok(());
+    }
     CLIENT.set(Some(conn.try_clone()?));
     let mut reply = Reply(conn.try_clone()?);
     let code = handle(req, &mut reply);
@@ -194,15 +222,15 @@ fn answer(conn: UnixStream, handle: &impl Fn(Request, &mut Reply) -> u8) -> Resu
     Ok(())
 }
 
-/// Run `req` in the service for `data`, copying its output to `stdout` and
-/// `stderr`; `None` when no service is listening.
+/// Run `req` in the service listening on `socket`, copying its output to
+/// `stdout` and `stderr`; `None` when none is, or it holds another data root.
 pub fn forward(
-    data: &Path,
+    socket: &Path,
     req: &Request,
     stdout: &mut impl Write,
     stderr: &mut impl Write,
 ) -> Result<Option<u8>> {
-    let mut conn = match UnixStream::connect(socket(data)) {
+    let mut conn = match UnixStream::connect(socket) {
         Ok(c) => c,
         Err(e)
             if matches!(
@@ -232,6 +260,11 @@ pub fn forward(
                 stdout.flush()?;
                 return Ok(Some(bytes.first().copied().unwrap_or(1)));
             }
+            OTHER_DATA => {
+                let held = String::from_utf8_lossy(&bytes);
+                debug!(%held, "munchymail serve holds another data root; running here");
+                return Ok(None);
+            }
             t => bail!("unknown frame {t} from munchymail serve"),
         }
     }
@@ -245,24 +278,27 @@ mod tests {
     fn forwards_output_and_exit_code() {
         let dir = std::env::temp_dir().join(format!("munchymail-serve-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let req = Request {
+        let sock = dir.join("run/serve.sock");
+        let mut req = Request {
             argv: vec!["a".into(), "b c".into()],
             cwd: "/x".into(),
             account: None,
+            data: "/data".into(),
         };
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        assert_eq!(forward(&dir, &req, &mut out, &mut err).unwrap(), None);
-        let listener = bind(&dir).unwrap();
+        assert_eq!(forward(&sock, &req, &mut out, &mut err).unwrap(), None);
+        let listener = bind(&sock).unwrap();
         std::thread::spawn(move || {
-            serve(listener, |req, reply| {
+            serve(listener, "/data".into(), |req, reply| {
                 writeln!(reply, "{}", req.argv.join("|")).unwrap();
                 3
             })
         });
-        assert_eq!(forward(&dir, &req, &mut out, &mut err).unwrap(), Some(3));
+        assert_eq!(forward(&sock, &req, &mut out, &mut err).unwrap(), Some(3));
         assert_eq!(out, b"a|b c\n");
-        assert!(bind(&dir).is_err());
+        req.data = "/other".into();
+        assert_eq!(forward(&sock, &req, &mut out, &mut err).unwrap(), None);
+        assert!(bind(&sock).is_err());
         fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -8,13 +8,23 @@ use anyhow::{Context, Result, bail};
 use crate::mbox::Variant;
 use crate::takeout::SOURCE;
 
-/// `$XDG_CONFIG_HOME/munchymail` (default `~/.config/munchymail`); not created.
-pub fn dir() -> Result<PathBuf> {
-    let base = match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+/// `$VAR/munchymail`, or `~/HOME_DIR/munchymail` when VAR is unset, as XDG says.
+fn xdg(var: &str, home_dir: &str) -> Result<PathBuf> {
+    let base = match std::env::var_os(var).filter(|v| !v.is_empty()) {
         Some(d) => PathBuf::from(d),
-        None => PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".config"),
+        None => PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(home_dir),
     };
     Ok(base.join("munchymail"))
+}
+
+/// `$XDG_CONFIG_HOME/munchymail` (default `~/.config/munchymail`); not created.
+pub fn dir() -> Result<PathBuf> {
+    xdg("XDG_CONFIG_HOME", ".config")
+}
+
+/// The default data root: `$XDG_DATA_HOME/munchymail` (`~/.local/share/munchymail`).
+pub fn data_default() -> PathBuf {
+    xdg("XDG_DATA_HOME", ".local/share").unwrap_or_else(|_| PathBuf::from("data"))
 }
 
 pub struct Config {

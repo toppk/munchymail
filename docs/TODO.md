@@ -18,7 +18,8 @@ Roughly in priority order within each section. Phases refer to
       to save the original bytes.
 - [ ] 7z/rar member names (only zip is listed today); nested zips.
 - [x] `serve`: one process owns the databases; the CLI forwards its
-      command line over `data/serve.sock` (reads concurrent, writes in turn).
+      command line over `$XDG_RUNTIME_DIR/munchymail/serve.sock` (reads
+      concurrent, writes in turn). Installed per `docs/install.md`.
 - [ ] The service's own work (Gmail sync, mbox scans, OCR after import):
       to be discussed before building.
 - [ ] Web UI and Android over HTTP with auth, through `src/api.rs`; the

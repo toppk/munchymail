@@ -14,7 +14,7 @@ use tracing_subscriber::{EnvFilter, Layer, fmt};
 use turso::Value;
 
 use munchymail::changes;
-use munchymail::config::Config;
+use munchymail::config::{self, Config};
 use munchymail::diff::{self, Msg};
 use munchymail::import::Importer;
 use munchymail::locations;
@@ -33,8 +33,8 @@ use munchymail::{account, api, export, extract, google, mbox, ocr, parts, serve,
     after_help = "Logging goes to stderr; set MUNCHYMAIL_LOG (e.g. munchymail=debug) to change it."
 )]
 struct Cli {
-    /// Directory holding one directory per account (ADDRESS/email.sqlite, content/, ...).
-    #[arg(long, env = "MUNCHYMAIL_DATA", default_value = "data", global = true)]
+    /// Data root: one directory per account (ADDRESS/email.sqlite, content/, ...).
+    #[arg(long, env = "MUNCHYMAIL_DATA", default_value_os_t = config::data_default(), global = true)]
     data: PathBuf,
     /// Account to use, e.g. me@example.org; needed only when there are several.
     #[arg(long, env = "MUNCHYMAIL_ACCOUNT", global = true)]
@@ -74,7 +74,10 @@ fn effect(command: &str) -> Option<(&'static str, &'static str)> {
         "sql" => ("read", "a read-only connection: writes are refused"),
         "diff" | "scan" => ("read", "the named files; no database"),
         "describe" => ("read", "nothing; no database"),
-        "serve" => ("write", "data/serve.sock; runs the commands sent to it"),
+        "serve" => (
+            "write",
+            "its socket in $XDG_RUNTIME_DIR/munchymail/; runs the commands sent to it",
+        ),
         "origin list" | "search" | "read" | "top" | "names" | "report" | "profile" | "show"
         | "attachments" | "stats" | "changes" | "removals" => ("read", READ),
         _ => return None,
@@ -508,7 +511,8 @@ enum Cmd {
         paths: Vec<PathBuf>,
     },
     /// Hold every account's database and run the commands other munchymail
-    /// processes send to DATA/serve.sock; runs until killed.
+    /// processes send to $XDG_RUNTIME_DIR/munchymail/serve.sock (or
+    /// $MUNCHYMAIL_SOCKET); runs until killed.
     ///
     /// While it runs, commands go to it instead of opening the database, so
     /// reads run alongside a write; writes take turns. `diff`, `scan`,
@@ -2170,16 +2174,17 @@ fn handle(
 }
 
 fn serve_cmd(data: &Path) -> Result<()> {
+    let socket = serve::socket().context("no XDG_RUNTIME_DIR or MUNCHYMAIL_SOCKET to listen on")?;
     std::fs::create_dir_all(data)?;
     let root = data.canonicalize()?;
-    let listener = serve::bind(&root)?;
+    let listener = serve::bind(&socket)?;
     let stores = Stores::Served(Mutex::default());
     for a in account::list(&root)? {
         pollster::block_on(stores.open(&root.join(&a)))?;
         info!(account = a.as_str(), "opened");
     }
     let writes = Mutex::new(());
-    serve::serve(listener, move |req, reply| {
+    serve::serve(listener, root.clone(), move |req, reply| {
         handle(&root, &stores, &writes, req, reply)
     })
 }
@@ -2547,6 +2552,7 @@ fn request(cli: &Cli) -> Option<serve::Request> {
             .collect::<Option<_>>()?,
         cwd: std::env::current_dir().ok()?,
         account: cli.account.clone(),
+        data: cli.data.canonicalize().ok()?,
     })
 }
 
@@ -2572,9 +2578,9 @@ fn main() -> ExitCode {
         )
         .with(to_clients)
         .init();
-    if let Some(req) = request(&cli) {
+    if let (Some(req), Some(socket)) = (request(&cli), serve::socket()) {
         let (mut out, mut err) = (io::stdout().lock(), io::stderr().lock());
-        match serve::forward(&cli.data, &req, &mut out, &mut err) {
+        match serve::forward(&socket, &req, &mut out, &mut err) {
             Ok(Some(code)) => return ExitCode::from(code),
             Ok(None) => {}
             Err(e) => return ExitCode::from(exit_code(Err(e))),
