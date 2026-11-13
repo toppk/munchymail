@@ -284,12 +284,14 @@ message once (its newest copy, with the places of all its copies), as
 folder.
 
 Without `--account` and with several accounts, `search` searches each in
-turn: `default_account` (in `config.toml`) first, then by address. Each
+turn, the account with the newest match first (`default_account` in
+`config.toml` breaks ties), so the latest mail from anyone is on page 1. Each
 account's rows come under `== ADDRESS (N matches)`, `--tsv` gains an
 `account` column, `--json` records an `account` field (after a first
 `matches` record), and `--count` prints each account's count. The cursor
-names the account it is in (`ADDRESS/DATE:ID`), so paging runs through one
-account and on into the next. Ids are the account's own: read one with
+names the account it is in and those still to come
+(`ADDRESS/DATE:ID/NEXT,...`), so paging runs through one account and on into
+the next in the same order, even if new mail arrives meanwhile. Ids are the account's own: read one with
 `--account`. An `--origin` that only one account has just matches nothing
 in the others.
 

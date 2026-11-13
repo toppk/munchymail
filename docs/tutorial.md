@@ -29,11 +29,12 @@ me@example.org: 18342 messages, newest 2026-11-13 (2 h ago)
   mail   imported 2026-11-13 13:49 UTC (2 h ago)
 ```
 
-With several accounts, `search` searches them all, one after another: each
-account's results come under a heading with its match count, newest first,
-and paging continues from one account into the next. Other commands work on
-one account: pass `--account ADDRESS`, set `MUNCHYMAIL_ACCOUNT`, or name a
-default in `~/.config/munchymail/config.toml` (it is also searched first):
+With several accounts, `search` searches them all, one after another, the
+account with the newest match first: each account's results come under a
+heading with its match count, newest first, and paging continues from one
+account into the next. Other commands work on one account: pass `--account
+ADDRESS`, set `MUNCHYMAIL_ACCOUNT`, or name a default in
+`~/.config/munchymail/config.toml`:
 
 ```toml
 default_account = "me@example.org"

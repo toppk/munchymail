@@ -1640,8 +1640,9 @@ async fn search(
     Ok(())
 }
 
-/// Search every account, one after another (`default_account` first, then by
-/// address), each under a heading; the cursor names the account it is in.
+/// Search every account, one after another, the one with the newest match
+/// first, each under a heading. The cursor names the account it is in and the
+/// ones still to come, so the order holds even if new mail arrives meanwhile.
 #[allow(clippy::too_many_arguments)]
 async fn search_all(
     root: &Path,
@@ -1655,28 +1656,27 @@ async fn search_all(
     after: Option<&str>,
     out: &mut impl Write,
 ) -> Result<()> {
-    let mut accounts = account::list(root)?;
-    if let Some(d) = Config::load()?.default_account()
-        && let Some(i) = accounts.iter().position(|a| a == d)
-    {
-        let d = accounts.remove(i);
-        accounts.insert(0, d);
-    }
-    let (start, mut after) = match after {
-        None => (0, None),
+    let accounts = account::list(root)?;
+    let default = Config::load()?.default_account().map(String::from);
+    // ACCOUNT/DATE:ID/NEXT,NEXT: where the page starts, and the accounts after it.
+    let (order, mut after) = match after {
+        None => (None, None),
         Some(c) => {
-            let (a, rest) = c
-                .split_once('/')
-                .context("this cursor is from one account; add its --account")?;
-            let i = accounts
-                .iter()
-                .position(|x| x == a)
-                .with_context(|| format!("the cursor names {a}, which is not an account"))?;
-            (i, (!rest.is_empty()).then(|| rest.to_string()))
+            let mut f = c.splitn(3, '/');
+            let (a, at, rest) = (f.next().unwrap_or(""), f.next(), f.next().unwrap_or(""));
+            let at = at.context("this cursor is from one account; add its --account")?;
+            let order: Vec<String> = std::iter::once(a)
+                .chain(rest.split(',').filter(|r| !r.is_empty()))
+                .map(String::from)
+                .collect();
+            if let Some(x) = order.iter().find(|x| !accounts.contains(x)) {
+                bail!("the cursor names {x}, which is not an account");
+            }
+            (Some(order), (!at.is_empty()).then(|| at.to_string()))
         }
     };
     let mut parts = Vec::new();
-    for a in &accounts {
+    for a in order.as_ref().unwrap_or(&accounts) {
         let store = stores.open(&root.join(a)).await?;
         store.begin().await?;
         let has_origin = match &filter.origin {
@@ -1689,20 +1689,41 @@ async fn search_all(
             .is_empty(),
             None => true,
         };
-        let (f, matches) = if has_origin {
+        let (f, matches, newest) = if has_origin {
             let f = filter.clone().build(&store.data_dir)?;
             warn_unindexed(&store, &f).await?;
             let set = api::matching(&store, &f, unique).await?;
-            let n = query_rows(&store, &format!("SELECT count(*) FROM {set}"), vec![]).await?;
-            (
-                Some(f),
-                u64::try_from(n[0][0].as_integer().copied().unwrap_or(0))?,
+            let from = match set {
+                "hit" => "hit JOIN artifact a ON a.artifact_id = hit.artifact_id",
+                _ => "artifact a",
+            };
+            let r = query_rows(
+                &store,
+                &format!("SELECT count(*), max(a.date) FROM {from}"),
+                vec![],
             )
+            .await?;
+            let n = u64::try_from(r[0][0].as_integer().copied().unwrap_or(0))?;
+            (Some(f), n, r[0][1].as_integer().copied())
         } else {
-            (None, 0)
+            (None, 0, None)
         };
-        parts.push((a.as_str(), store, f, matches));
+        parts.push((a.as_str(), store, f, matches, newest));
     }
+    if order.is_none() {
+        parts.sort_by_key(|p| {
+            (
+                p.3 == 0,
+                std::cmp::Reverse(p.4),
+                default.as_deref() != Some(p.0),
+                p.0,
+            )
+        });
+    }
+    let parts: Vec<_> = parts
+        .into_iter()
+        .map(|(a, s, f, n, _)| (a, s, f, n))
+        .collect();
     if let Some(o) = &filter.origin
         && parts.iter().all(|p| p.2.is_none())
     {
@@ -1715,7 +1736,7 @@ async fn search_all(
             }
             return Ok(());
         }
-        if start == 0 && after.is_none() {
+        if order.is_none() {
             let spread: Vec<_> = parts
                 .iter()
                 .map(|(a, _, _, n)| format!("{a} {n}"))
@@ -1735,7 +1756,7 @@ async fn search_all(
             }
         }
         let (mut shown, mut cursor, mut first) = (0, None, true);
-        for (i, (a, store, f, matches)) in parts.iter().enumerate().skip(start) {
+        for (i, (a, store, f, matches)) in parts.iter().enumerate() {
             let Some(f) = f.as_ref().filter(|_| *matches > 0) else {
                 continue;
             };
@@ -1759,15 +1780,19 @@ async fn search_all(
             .await?;
             first = false;
             shown += n;
+            let later: Vec<&str> = parts[i + 1..]
+                .iter()
+                .filter(|p| p.3 > 0)
+                .map(|p| p.0)
+                .collect();
             if let Some(c) = next {
-                cursor = Some(format!("{a}/{c}"));
+                cursor = Some(format!("{a}/{c}/{}", later.join(",")));
                 break;
             }
             if shown == limit {
-                cursor = parts[i + 1..]
-                    .iter()
-                    .find(|p| p.3 > 0)
-                    .map(|p| format!("{}/", p.0));
+                cursor = later
+                    .split_first()
+                    .map(|(b, rest)| format!("{b}//{}", rest.join(",")));
                 break;
             }
         }

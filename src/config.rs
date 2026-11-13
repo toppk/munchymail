@@ -109,7 +109,7 @@ impl Config {
     }
 
     /// `default_account`: the account commands use without --account; `search`
-    /// still searches every account, this one first.
+    /// still searches every account, and puts this one first on a tie.
     pub fn default_account(&self) -> Option<&str> {
         self.table.get("default_account")?.as_str()
     }

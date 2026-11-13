@@ -11,7 +11,7 @@ pub fn validate(address: &str) -> Result<String> {
     let ok = a.split('@').count() == 2
         && !a.starts_with(['@', '.'])
         && !a.ends_with('@')
-        && !a.contains(['/', '\\'])
+        && !a.contains(['/', '\\', ','])
         && !a.chars().any(|c| c.is_whitespace() || c.is_control());
     if !ok {
         bail!("account {address:?} must be one mail address, e.g. me@example.org");
