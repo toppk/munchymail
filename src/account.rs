@@ -68,7 +68,7 @@ pub fn resolve(root: &Path, account: Option<&str>) -> Result<PathBuf> {
                 root.display()
             ),
             many => bail!(
-                "{} accounts in {} ({}); pick one with --account",
+                "{} accounts in {} ({}); pick one with --account, or set default_account in config.toml",
                 many.len(),
                 root.display(),
                 many.join(", ")

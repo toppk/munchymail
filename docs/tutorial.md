@@ -29,8 +29,18 @@ me@example.org: 18342 messages, newest 2026-11-13 (2 h ago)
   mail   imported 2026-11-13 13:49 UTC (2 h ago)
 ```
 
-With several accounts, pass `--account ADDRESS` or set `MUNCHYMAIL_ACCOUNT`;
-with one, it is used automatically.
+With several accounts, `search` searches them all, one after another: each
+account's results come under a heading with its match count, newest first,
+and paging continues from one account into the next. Other commands work on
+one account: pass `--account ADDRESS`, set `MUNCHYMAIL_ACCOUNT`, or name a
+default in `~/.config/munchymail/config.toml` (it is also searched first):
+
+```toml
+default_account = "me@example.org"
+```
+
+Ids are per account, so read a result with its heading's account:
+`munchymail --account me@example.org read m1834`.
 
 ## 1. Find mail
 
@@ -136,6 +146,8 @@ a maildir.
   effect. Scripts and agents should run only `read` commands unless told
   otherwise.
 - `overview --json` and `accounts --json` print one record per account.
+- Across several accounts, `search --json` starts with a `matches` record
+  (each account's count), and each message record has an `account`.
 - `search --json` prints JSON Lines: one record per message, then a `page`
   record whose `next` is the cursor for `--after`.
 - `read mN --json` gives one message as JSON. Mail content comes from its

@@ -108,6 +108,12 @@ impl Config {
         Ok(out)
     }
 
+    /// `default_account`: the account commands use without --account; `search`
+    /// still searches every account, this one first.
+    pub fn default_account(&self) -> Option<&str> {
+        self.table.get("default_account")?.as_str()
+    }
+
     /// `search`'s columns: `[accounts."ACCOUNT".listing] columns`, else `[listing] columns`.
     pub fn listing_columns(&self, account: &str) -> Option<&str> {
         let account = self

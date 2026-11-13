@@ -283,6 +283,16 @@ message once (its newest copy, with the places of all its copies), as
 `export` counts them, and `--current` leaves out copies no longer in any
 folder.
 
+Without `--account` and with several accounts, `search` searches each in
+turn: `default_account` (in `config.toml`) first, then by address. Each
+account's rows come under `== ADDRESS (N matches)`, `--tsv` gains an
+`account` column, `--json` records an `account` field (after a first
+`matches` record), and `--count` prints each account's count. The cursor
+names the account it is in (`ADDRESS/DATE:ID`), so paging runs through one
+account and on into the next. Ids are the account's own: read one with
+`--account`. An `--origin` that only one account has just matches nothing
+in the others.
+
 Results come in pages of `-n` (1 to 1000, default 50), newest first by
 `Date:` with ties broken by id, so pages are stable. When there are more,
 the next cursor is logged to stderr (`more results: add --after CURSOR`)

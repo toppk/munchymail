@@ -1490,6 +1490,20 @@ enum Listing {
     Json,
 }
 
+impl Listing {
+    /// From `search`'s flags, which clap keeps to at most one.
+    fn of(headers: bool, raw: bool, long: bool, tsv: bool, json: bool) -> Listing {
+        match (headers, raw, long, tsv, json) {
+            (true, ..) => Listing::Headers,
+            (_, true, ..) => Listing::Raw,
+            (_, _, true, ..) => Listing::Long,
+            (_, _, _, true, _) => Listing::Tsv,
+            (.., true) => Listing::Json,
+            _ => Listing::Summary,
+        }
+    }
+}
+
 /// Tell a person at a terminal how to get the next page; scripts use `--json`'s
 /// `page` record, so a pipe doesn't get the hint mixed into its output.
 fn more(cursor: &str) {
@@ -1579,6 +1593,17 @@ async fn rows(
     Ok((out, next))
 }
 
+/// One account's part of a `search` page.
+struct Part<'a> {
+    /// The account, when several are searched: a heading, a column or a field.
+    account: Option<&'a str>,
+    /// How many match in it, for its heading.
+    matches: u64,
+    /// Whether it starts the page, so TSV's header row goes first.
+    first: bool,
+}
+
+/// One page of `search`: how many rows it held, and the next cursor.
 #[allow(clippy::too_many_arguments)]
 async fn search(
     store: &Store,
@@ -1592,9 +1617,197 @@ async fn search(
     out: &mut impl Write,
 ) -> Result<()> {
     warn_unindexed(store, &filter).await?;
-    if matches!(listing, Listing::Summary | Listing::Tsv) && !count {
+    if count {
+        let set = api::matching(store, &filter, unique).await?;
+        let rows = query_rows(store, &format!("SELECT count(*) FROM {set}"), vec![]).await?;
+        writeln!(out, "{}", text(&rows[0][0]))?;
+        return Ok(());
+    }
+    let part = Part {
+        account: None,
+        matches: 0,
+        first: true,
+    };
+    let (n, next) = search_part(
+        store, &filter, listing, &columns, unique, limit, after, part, out,
+    )
+    .await?;
+    if listing == Listing::Json {
+        writeln!(out, "{}", api::page_json(n, next.as_deref()))?;
+    } else if let Some(c) = next {
+        more(&c);
+    }
+    Ok(())
+}
+
+/// Search every account, one after another (`default_account` first, then by
+/// address), each under a heading; the cursor names the account it is in.
+#[allow(clippy::too_many_arguments)]
+async fn search_all(
+    root: &Path,
+    stores: &Stores,
+    filter: FilterArgs,
+    listing: Listing,
+    columns: Columns,
+    unique: bool,
+    count: bool,
+    limit: usize,
+    after: Option<&str>,
+    out: &mut impl Write,
+) -> Result<()> {
+    let mut accounts = account::list(root)?;
+    if let Some(d) = Config::load()?.default_account()
+        && let Some(i) = accounts.iter().position(|a| a == d)
+    {
+        let d = accounts.remove(i);
+        accounts.insert(0, d);
+    }
+    let (start, mut after) = match after {
+        None => (0, None),
+        Some(c) => {
+            let (a, rest) = c
+                .split_once('/')
+                .context("this cursor is from one account; add its --account")?;
+            let i = accounts
+                .iter()
+                .position(|x| x == a)
+                .with_context(|| format!("the cursor names {a}, which is not an account"))?;
+            (i, (!rest.is_empty()).then(|| rest.to_string()))
+        }
+    };
+    let mut parts = Vec::new();
+    for a in &accounts {
+        let store = stores.open(&root.join(a)).await?;
+        store.begin().await?;
+        let has_origin = match &filter.origin {
+            Some(o) => !query_rows(
+                &store,
+                "SELECT 1 FROM origin WHERE label = ?",
+                vec![o.clone().into()],
+            )
+            .await?
+            .is_empty(),
+            None => true,
+        };
+        let (f, matches) = if has_origin {
+            let f = filter.clone().build(&store.data_dir)?;
+            warn_unindexed(&store, &f).await?;
+            let set = api::matching(&store, &f, unique).await?;
+            let n = query_rows(&store, &format!("SELECT count(*) FROM {set}"), vec![]).await?;
+            (
+                Some(f),
+                u64::try_from(n[0][0].as_integer().copied().unwrap_or(0))?,
+            )
+        } else {
+            (None, 0)
+        };
+        parts.push((a.as_str(), store, f, matches));
+    }
+    if let Some(o) = &filter.origin
+        && parts.iter().all(|p| p.2.is_none())
+    {
+        bail!("no origin labelled {o:?} in any account; `mmadm origin list` lists them");
+    }
+    let r = async {
+        if count {
+            for (a, _, _, n) in &parts {
+                writeln!(out, "{n:>7}  {a}")?;
+            }
+            return Ok(());
+        }
+        if start == 0 && after.is_none() {
+            let spread: Vec<_> = parts
+                .iter()
+                .map(|(a, _, _, n)| format!("{a} {n}"))
+                .collect();
+            if listing == Listing::Json {
+                let v: Vec<_> = parts
+                    .iter()
+                    .map(|(a, _, _, n)| serde_json::json!({"account": a, "matches": n}))
+                    .collect();
+                writeln!(
+                    out,
+                    "{}",
+                    serde_json::json!({"type": "matches", "accounts": v})
+                )?;
+            } else if listing::width().is_some() {
+                info!("matches: {}", spread.join(", "));
+            }
+        }
+        let (mut shown, mut cursor, mut first) = (0, None, true);
+        for (i, (a, store, f, matches)) in parts.iter().enumerate().skip(start) {
+            let Some(f) = f.as_ref().filter(|_| *matches > 0) else {
+                continue;
+            };
+            let part = Part {
+                account: Some(a),
+                matches: *matches,
+                first,
+            };
+            let left = limit - shown;
+            let (n, next) = search_part(
+                store,
+                f,
+                listing,
+                &columns,
+                unique,
+                left,
+                after.take().as_deref(),
+                part,
+                out,
+            )
+            .await?;
+            first = false;
+            shown += n;
+            if let Some(c) = next {
+                cursor = Some(format!("{a}/{c}"));
+                break;
+            }
+            if shown == limit {
+                cursor = parts[i + 1..]
+                    .iter()
+                    .find(|p| p.3 > 0)
+                    .map(|p| format!("{}/", p.0));
+                break;
+            }
+        }
+        if listing == Listing::Json {
+            writeln!(out, "{}", api::page_json(shown, cursor.as_deref()))?;
+        } else if let Some(c) = cursor {
+            more(&c);
+        }
+        Ok(())
+    }
+    .await;
+    for (_, store, _, _) in &parts {
+        store.settle().await?;
+    }
+    r
+}
+
+/// One account's rows of a `search` page, with `part`'s heading or account
+/// column; how many it wrote and that account's next cursor.
+#[allow(clippy::too_many_arguments)]
+async fn search_part(
+    store: &Store,
+    filter: &Filter,
+    listing: Listing,
+    columns: &Columns,
+    unique: bool,
+    limit: usize,
+    after: Option<&str>,
+    part: Part<'_>,
+    out: &mut impl Write,
+) -> Result<(usize, Option<String>)> {
+    if let (Some(a), Listing::Summary | Listing::Long | Listing::Headers | Listing::Raw) =
+        (part.account, listing)
+    {
+        let s = if part.matches == 1 { "" } else { "es" };
+        writeln!(out, "== {a} ({} match{s})", part.matches)?;
+    }
+    if matches!(listing, Listing::Summary | Listing::Tsv) {
         let tsv = listing == Listing::Tsv;
-        let spec = match columns.spec {
+        let spec = match columns.spec.clone() {
             Some(c) => c,
             None if tsv => listing::TSV_DEFAULT.into(),
             None => Config::load()?
@@ -1605,36 +1818,48 @@ async fn search(
         let cols = Column::parse_list(&spec)?;
         let (rows, next) = rows(
             store,
-            &filter,
+            filter,
             &cols,
             (unique, limit, after),
             columns.addresses,
             !tsv,
         )
         .await?;
+        let n = rows.len();
         if tsv {
-            let names: Vec<_> = cols.iter().map(Column::name).collect();
-            writeln!(out, "{}", names.join("\t"))?;
+            if part.first {
+                let mut names: Vec<_> = cols.iter().map(Column::name).collect();
+                if part.account.is_some() {
+                    names.insert(0, "account");
+                }
+                writeln!(out, "{}", names.join("\t"))?;
+            }
             for r in rows {
-                writeln!(out, "{}", r.join("\t"))?;
+                match part.account {
+                    Some(a) => writeln!(out, "{a}\t{}", r.join("\t"))?,
+                    None => writeln!(out, "{}", r.join("\t"))?,
+                }
             }
         } else {
             for line in listing::layout(&cols, &rows, listing::width()) {
                 writeln!(out, "{line}")?;
             }
         }
-        if let Some(n) = next {
-            more(&n);
-        }
-        return Ok(());
+        return Ok((n, next));
     }
     if let Listing::Long | Listing::Json = listing {
-        let (hits, next) = api::search(store, &filter, unique, limit, after).await?;
+        let (hits, next) = api::search(store, filter, unique, limit, after).await?;
         for h in &hits {
             let date = h.date.map_or("?".into(), ymd_hm);
             let folder = locations::folder(&h.locations);
             match listing {
-                Listing::Json => writeln!(out, "{}", h.to_json())?,
+                Listing::Json => {
+                    let mut v = h.to_json();
+                    if let Some(a) = part.account {
+                        v["account"] = a.into();
+                    }
+                    writeln!(out, "{v}")?
+                }
                 _ => {
                     let one = |s: &str| sanitize(s).replace(['\t', '\n'], " ");
                     writeln!(out, "{:>7}  {date}  {}", h.id, one(&folder))?;
@@ -1675,20 +1900,11 @@ async fn search(
                 }
             }
         }
-        if listing == Listing::Json {
-            writeln!(out, "{}", api::page_json(hits.len(), next.as_deref()))?;
-        } else if let Some(n) = next {
-            more(&n);
-        }
-        return Ok(());
+        return Ok((hits.len(), next));
     }
-    let set = api::matching(store, &filter, unique).await?;
-    if count {
-        let rows = query_rows(store, &format!("SELECT count(*) FROM {set}"), vec![]).await?;
-        writeln!(out, "{}", text(&rows[0][0]))?;
-        return Ok(());
-    }
+    let set = api::matching(store, filter, unique).await?;
     let (ids, next) = api::page(store, set, limit, after).await?;
+    let n = ids.len();
     for id in ids {
         let rows = query_rows(
             store,
@@ -1707,10 +1923,7 @@ async fn search(
             }
         }
     }
-    if let Some(n) = next {
-        more(&n);
-    }
-    Ok(())
+    Ok((n, next))
 }
 
 async fn read(store: &Store, r: api::Ref, json: bool, out: &mut impl Write) -> Result<()> {
@@ -2719,7 +2932,46 @@ fn serve_cmd(data: &Path) -> Result<()> {
     })
 }
 
-async fn run(cli: Cli, stores: &Stores, out: &mut impl Write) -> Result<()> {
+async fn run(mut cli: Cli, stores: &Stores, out: &mut impl Write) -> Result<()> {
+    let per_account = !matches!(
+        cli.cmd,
+        Cmd::Diff { .. }
+            | Cmd::Scan { .. }
+            | Cmd::Describe { .. }
+            | Cmd::Serve
+            | Cmd::Account(_)
+            | Cmd::Accounts { .. }
+            | Cmd::Overview { .. }
+    );
+    if per_account && cli.account.is_none() && account::list(&cli.data)?.len() > 1 {
+        if let Cmd::Search {
+            filter,
+            headers,
+            raw,
+            long,
+            tsv,
+            columns,
+            addresses,
+            json,
+            after,
+            unique,
+            count,
+            limit,
+        } = cli.cmd
+        {
+            let listing = Listing::of(headers, raw, long, tsv, json);
+            let columns = Columns {
+                spec: columns,
+                addresses,
+            };
+            let (unique, after) = (unique, after.as_deref());
+            return search_all(
+                &cli.data, stores, filter, listing, columns, unique, count, limit, after, out,
+            )
+            .await;
+        }
+        cli.account = Config::load()?.default_account().map(String::from);
+    }
     if let Cmd::Diff {
         before,
         after,
@@ -2918,14 +3170,7 @@ async fn with_store(cmd: Cmd, store: &Store, out: &mut impl Write) -> Result<()>
             count,
             limit,
         } => {
-            let listing = match (headers, raw, long, tsv, json) {
-                (true, ..) => Listing::Headers,
-                (_, true, ..) => Listing::Raw,
-                (_, _, true, ..) => Listing::Long,
-                (_, _, _, true, _) => Listing::Tsv,
-                (.., true) => Listing::Json,
-                _ => Listing::Summary,
-            };
+            let listing = Listing::of(headers, raw, long, tsv, json);
             search(
                 store,
                 filter.build(&store.data_dir)?,
