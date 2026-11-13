@@ -558,7 +558,7 @@ after    62655  /var/mail/me/INBOX
 ### changes: what changed between import runs
 
 ```
-munchymail changes --origin mail [--by KEY ...] [-n N] [--list]
+munchymail changes --origin LABEL [--by KEY ...] [-n N] [--list]
 munchymail changes BEFORE AFTER [--rename OLD=NEW ...] ...
 ```
 
@@ -666,7 +666,7 @@ index can compare where mail was with where it is now:
 
 ```
 mmadm import mailhost-dovecot
-munchymail changes --origin mail --by list-id               # moved/removed/added since the last import
+munchymail changes --origin mailhost-dovecot --by list-id               # moved/removed/added since the last import
 munchymail removals --moved false                           # anything found nowhere
 munchymail report --folder lists/github-project --current \
   --by 'x-github-reason~^(subscribed|push|review_requested|team_mention)$' \

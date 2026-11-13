@@ -64,3 +64,20 @@ install *flags:
     sleep 1
     systemctl --user is-active munchymail >/dev/null || { journalctl --user -u munchymail -n 20 --no-pager; exit 1; }
     echo "installed and restarted $("$bin/munchymail" --version)"
+
+# Delete installed releases other than `current` and `previous`; --dry-run lists them.
+prune *flags:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dry=no
+    for f in "$@"; do
+        case "$f" in --dry-run) dry=yes ;; *) echo "unknown flag $f; only --dry-run" >&2; exit 2 ;; esac
+    done
+    home="${MUNCHYMAIL_PREFIX:-$HOME/.local/lib/munchymail}"; home="${home/#\~/$HOME}"
+    cur=$(readlink "$home/current") || { echo "no $home/current; nothing pruned" >&2; exit 1; }
+    prev=$(readlink "$home/previous" || true)
+    for d in "$home"/releases/*/; do
+        r="releases/$(basename "$d")"
+        [ "$r" = "$cur" ] || [ "$r" = "$prev" ] && continue
+        if [ "$dry" = yes ]; then echo "would delete $r"; else rm -r "$d"; echo "deleted $r"; fi
+    done

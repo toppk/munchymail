@@ -38,7 +38,8 @@ the old `current`, points `current` at the new one, creates the CLI links if
 missing and installs the unit with the prefix filled in. With `--restart` it then runs
 `systemctl --user daemon-reload` and `restart munchymail`, and shows the
 journal if the service doesn't come back. It never enables the unit and
-never deletes old releases. Roll back by pointing `current` at
+never deletes old releases; `just prune` deletes all but `current` and
+`previous` (`--dry-run` lists them first). Roll back by pointing `current` at
 `previous`'s target and restarting. The first time, enable it:
 `systemctl --user enable --now munchymail`.
 

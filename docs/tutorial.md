@@ -127,8 +127,8 @@ messages match and what share of the whole that is.
 munchymail remembers every import, so it can say how mailboxes changed:
 
 ```
-munchymail changes --origin mail      # between the origin's last two imports
-munchymail removals --folder INBOX    # messages that left a folder, and where they went
+munchymail changes --origin mailhost-dovecot   # between the origin's last two imports
+munchymail removals --folder INBOX             # messages that left a folder, and where they went
 ```
 
 ## 5. Keep a copy for someone
