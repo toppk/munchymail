@@ -11,7 +11,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use rayon::prelude::*;
 use tracing::{info, warn};
 use turso::{Statement, Value};
@@ -165,7 +165,7 @@ impl Tools {
         .filter_map(|(t, a)| probe(t, a))
         .collect();
         if Command::new("bwrap").arg("--version").output().is_err() {
-            warn!("bwrap not found; PDF, .doc, .xls and .rtf attachments are not extracted");
+            warn!("bwrap not found; PDF, .doc, .xls and .rtf attachments wait until it is");
             m.clear();
             m.insert("bwrap", String::new());
         }
@@ -181,6 +181,34 @@ impl Tools {
 
     fn sandbox(&self) -> bool {
         !self.0.contains_key("bwrap")
+    }
+}
+
+const NO_START: &str = "failed: starting bwrap";
+
+/// Check the sandbox runs here before any part's outcome depends on it: a
+/// sandbox that can't start is the machine's problem and is never recorded.
+pub(crate) fn probe(tmp: &Path) -> Result<()> {
+    let dir = tmp.join(format!("probe-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let r = sandboxed(b"", &["/usr/bin/true"], &dir, LIMITS);
+    let _ = std::fs::remove_dir(&dir);
+    match r {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            bail!("the bwrap sandbox doesn't run here ({e}); nothing recorded, fix it and rerun")
+        }
+    }
+}
+
+/// Stop before recording a batch in which the sandbox failed to start.
+pub(crate) fn check_started(results: &[Extracted]) -> Result<()> {
+    match results.iter().find(|e| e.outcome.starts_with(NO_START)) {
+        Some(e) => bail!(
+            "{}; nothing recorded for this batch, rerun when fixed",
+            e.outcome
+        ),
+        None => Ok(()),
     }
 }
 
@@ -248,9 +276,7 @@ pub(crate) fn sandboxed(
             Ok(())
         });
     }
-    let mut child = c
-        .spawn()
-        .map_err(|e| format!("failed: starting bwrap: {e}"))?;
+    let mut child = c.spawn().map_err(|e| format!("{NO_START}: {e}"))?;
     let drain = |r: Option<Box<dyn Read + Send>>, cap: usize| {
         std::thread::spawn(move || {
             let mut out = Vec::new();
@@ -446,6 +472,17 @@ pub async fn run(store: &Store) -> Result<Stats> {
     }
     let tools = Tools::find();
     let tmp = store.data_dir.join("tmp");
+    let in_process = |f: &Format| {
+        matches!(
+            f,
+            Format::Docx | Format::Xlsx | Format::Pptx | Format::OpenDocument
+        )
+    };
+    if !tools.sandbox() {
+        todo.retain(|(.., f)| in_process(f));
+    } else if todo.iter().any(|(.., f)| !in_process(f)) {
+        probe(&tmp)?;
+    }
     let mut load = PartLoader::new(store).await?;
     let mut rec = Recorder::new(store).await?;
     for batch in todo.chunks(BATCH) {
@@ -457,14 +494,6 @@ pub async fn run(store: &Store) -> Result<Stats> {
             .par_iter()
             .enumerate()
             .map(|(i, (_, f, bytes))| {
-                if !tools.sandbox()
-                    && !matches!(
-                        f,
-                        Format::Docx | Format::Xlsx | Format::Pptx | Format::OpenDocument
-                    )
-                {
-                    return done("bwrap".into(), Err("failed: bwrap not found".into()));
-                }
                 let dir = tmp.join(format!("extract-{}-{i}", std::process::id()));
                 let e = std::fs::create_dir_all(&dir)
                     .map_err(|e| format!("failed: {}: {e}", dir.display()))
@@ -473,6 +502,7 @@ pub async fn run(store: &Store) -> Result<Stats> {
                 e.unwrap_or_else(|e| done("munchymail".into(), Err(e)))
             })
             .collect();
+        check_started(&results)?;
         store.begin().await?;
         for ((hash, _, _), e) in docs.iter().zip(&results) {
             rec.record(hash, e).await?;
@@ -594,6 +624,19 @@ pub async fn texts(store: &Store, msg: i64) -> Result<Vec<(usize, String)>> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn sandbox_start_failures_are_not_outcomes() {
+        let ok = done("t".into(), Err("failed: exit status: 1: bad pdf".into()));
+        assert!(check_started(&[ok]).is_ok());
+        let no = done("t".into(), Err(format!("{NO_START}: No such file")));
+        assert!(check_started(&[no]).is_err());
+        if Command::new("bwrap").arg("--version").output().is_ok() {
+            let tmp = std::env::temp_dir().join(format!("munchymail-probe-{}", std::process::id()));
+            probe(&tmp).unwrap();
+            std::fs::remove_dir_all(&tmp).unwrap();
+        }
+    }
 
     fn zip_of(files: &[(&str, &str)]) -> Vec<u8> {
         let mut z = zip::ZipWriter::new(Cursor::new(Vec::new()));

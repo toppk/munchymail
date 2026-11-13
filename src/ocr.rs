@@ -191,6 +191,7 @@ pub async fn run(
     );
     let pool = rayon::ThreadPoolBuilder::new().num_threads(jobs).build()?;
     let tmp = data_dir.join("tmp");
+    extract::probe(&tmp)?;
     for chunk in queue.chunks(CHUNK) {
         let mut inputs = Vec::with_capacity(chunk.len());
         {
@@ -215,6 +216,7 @@ pub async fn run(
                 })
                 .collect()
         });
+        extract::check_started(&results)?;
         let store = open(&connect).await?;
         let mut rec = Recorder::new(&store).await?;
         store.begin().await?;

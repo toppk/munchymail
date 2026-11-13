@@ -15,11 +15,10 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=%h/.local/share/munchymail
-ProtectKernelTunables=yes
+# bwrap mounts a fresh /proc (refused once ProtectKernelTunables/Logs overmount it) and sets up loopback over netlink.
 ProtectKernelModules=yes
-ProtectKernelLogs=yes
 ProtectControlGroups=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 LockPersonality=yes
 SystemCallArchitectures=native
 

@@ -36,9 +36,15 @@ or OCR run loses only the file or chunk in progress. Restart it when idle.
 
 ## The unit
 
-Hardened like the other user units, minus `RestrictNamespaces` (OCR and
-document extraction run tools in bwrap, which makes namespaces) and
-`MemoryDenyWriteExecute` (untested with tesseract and ocrmypdf). It may
+Hardened like the other user units, minus what bwrap (which runs the OCR
+and document tools) can't work under: `RestrictNamespaces` (it makes
+namespaces), `ProtectKernelTunables` and `ProtectKernelLogs` (they overmount
+parts of `/proc`, so the kernel refuses bwrap's fresh `/proc`), and with
+`AF_NETLINK` allowed (it sets up loopback in its network namespace).
+`MemoryDenyWriteExecute` is left out as untested with tesseract and
+ocrmypdf. Before each OCR or extraction run munchymail starts the sandbox
+once with `/usr/bin/true`; if that fails the run stops with an error and
+records nothing, so a broken sandbox never marks attachments as failed. It may
 read anything and writes only the data root. If `serve` ever refreshes Gmail
 tokens itself, `~/.config/munchymail/creds` joins `ReadWritePaths`.
 
@@ -58,16 +64,27 @@ would create an empty `~/.local/share/munchymail` first.
    and fails if one with contents is there).
 5. `munchymail account list` and `munchymail --account me.example@gmail.com
    stats` match the counts from before (19,516 messages).
-6. `systemctl --user daemon-reload && systemctl --user enable --now
+6. Check bwrap inside the unit's sandbox, with no munchymail or data
+   (prints `bwrap-ok`; checked 2026-11-12):
+
+   ```
+   systemd-run --user --wait --pipe --collect -q \
+     -p NoNewPrivileges=yes -p PrivateTmp=yes -p ProtectSystem=strict \
+     -p ProtectHome=read-only -p ProtectKernelModules=yes -p ProtectControlGroups=yes \
+     -p "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK" \
+     -p LockPersonality=yes -p SystemCallArchitectures=native \
+     bwrap --ro-bind /usr /usr --symlink usr/lib /lib --symlink usr/lib64 /lib64 \
+       --symlink usr/bin /bin --symlink usr/sbin /sbin --proc /proc --dev /dev \
+       --tmpfs /tmp --unshare-all --die-with-parent --new-session --clearenv \
+       --setenv PATH /usr/bin /usr/bin/true && echo bwrap-ok
+   ```
+7. `systemctl --user daemon-reload && systemctl --user enable --now
    munchymail`; `munchymail search -n 3` is then answered by it
    (`journalctl --user -u munchymail`).
-7. Check bwrap works inside the unit. `ocr` and document extraction only
-   run tools on parts not yet done, so check at the first import or sync
-   that brings a PDF or image (or `munchymail ocr -n 1` if anything is
-   queued): `journalctl --user -u munchymail` shows the run, and no new
-   bwrap failures appear in `munchymail sql "SELECT outcome, count(*) FROM
-   extract GROUP BY 1"`.
-8. Optionally `ln -s ~/.local/share/munchymail ~/src/munchymail/data`.
+8. At the first OCR or extraction run (the first import or sync bringing
+   a PDF or image), `journalctl --user -u munchymail` shows it finished;
+   a sandbox failure would stop it with an error, recording nothing.
+9. Optionally `ln -s ~/.local/share/munchymail ~/src/munchymail/data`.
 
 Roll back: stop the unit, `mv` the directory back, run with `--data data`.
 Development runs from the checkout use the live data by default; point
