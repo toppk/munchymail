@@ -44,12 +44,13 @@ pub struct Request {
     pub account: Option<String>,
     /// The client's data root, canonical; the service runs only its own.
     pub data: PathBuf,
+    /// The client's terminal width, if its output is one.
+    pub width: Option<usize>,
 }
 
 impl Request {
     fn to_line(&self) -> String {
-        let v =
-            json!({"argv": self.argv, "cwd": self.cwd, "account": self.account, "data": self.data});
+        let v = json!({"argv": self.argv, "cwd": self.cwd, "account": self.account, "data": self.data, "width": self.width});
         format!("{v}\n")
     }
 
@@ -66,6 +67,7 @@ impl Request {
             cwd: PathBuf::from(v["cwd"].as_str().context("no cwd")?),
             account: v["account"].as_str().map(String::from),
             data: PathBuf::from(v["data"].as_str().context("no data")?),
+            width: v["width"].as_u64().map(|w| w as usize),
         })
     }
 }
@@ -284,6 +286,7 @@ mod tests {
             cwd: "/x".into(),
             account: None,
             data: "/data".into(),
+            width: None,
         };
         let (mut out, mut err) = (Vec::new(), Vec::new());
         assert_eq!(forward(&sock, &req, &mut out, &mut err).unwrap(), None);

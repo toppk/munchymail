@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -17,6 +18,7 @@ use munchymail::changes;
 use munchymail::config::{self, Config};
 use munchymail::diff::{self, Msg};
 use munchymail::import::Importer;
+use munchymail::listing::{self, Column};
 use munchymail::locations;
 use munchymail::message::{TextSource, sanitize};
 use munchymail::query::{Filter, sieve_to_like};
@@ -29,11 +31,11 @@ use munchymail::{account, api, export, extract, google, mbox, ocr, parts, serve,
 
 #[derive(Parser)]
 #[command(
-    about = "Offline mail corpus: import, dedupe, search",
-    after_help = "Logging goes to stderr; set MUNCHYMAIL_LOG (e.g. munchymail=debug) to change it."
+    about = "Offline mail archive: import, dedupe, search",
+    arg_required_else_help = true
 )]
 struct Cli {
-    /// Data root: one directory per account (ADDRESS/email.sqlite, content/, ...).
+    /// Data root, one directory per account.
     #[arg(long, env = "MUNCHYMAIL_DATA", default_value_os_t = config::data_default(), global = true)]
     data: PathBuf,
     /// Account to use, e.g. me@example.org; needed only when there are several.
@@ -106,6 +108,107 @@ fn leaves(cmd: &clap::Command) -> Vec<(String, &clap::Command)> {
     out
 }
 
+/// The command line's top-level commands by what they're for, with what the
+/// group is about for the long help.
+const GROUPS: &[(&str, &str, &[&str])] = &[
+    (
+        "Find and read",
+        "Search the archive and read what it finds.",
+        &["search", "read", "show", "export"],
+    ),
+    (
+        "Study headers",
+        "Which headers carry what, for writing Sieve rules against real mail.",
+        &["top", "names", "report", "profile", "attachments"],
+    ),
+    (
+        "Bring mail in",
+        "Mail sources are only read; everything is written to the data root.",
+        &["import", "gmail", "index", "reconcile", "ocr"],
+    ),
+    (
+        "Set up",
+        "Accounts, the addresses they send from, and where their mail is.",
+        &["account", "alias", "origin"],
+    ),
+    (
+        "History",
+        "How mailboxes changed between imports, or between two mbox files.",
+        &["changes", "removals", "record-removals", "diff"],
+    ),
+    (
+        "Plumbing",
+        "Counts, raw queries, checks, the service, and a description for scripts.",
+        &["stats", "sql", "scan", "describe", "serve"],
+    ),
+];
+
+const CONCEPTS: &str = "\
+How it fits together:
+  Accounts  One per mail address, each with its own database in the data root.
+  Origins   Places mail is read from, never written; `import` keeps every copy
+            and where it was found.
+  Patterns  Sieve :matches, so * and ?, case-insensitive; without a wildcard
+            a pattern matches anywhere in the value.
+  Service   While `munchymail serve` runs (the systemd unit), commands go to
+            it, so they don't wait for each other.
+  Scripts   `munchymail describe --json` gives every command, argument and
+            effect; `search --json` and `read --json` for mail.
+
+Logging goes to stderr; MUNCHYMAIL_LOG (e.g. munchymail=debug) changes it.";
+
+/// The grouped command list; `long` adds what each group is for, each
+/// command's effect, and the subcommands.
+fn command_list(cmd: &clap::Command, long: bool) -> String {
+    let mut out = String::new();
+    for (title, about, names) in GROUPS {
+        out.push_str(&format!("{title}:\n"));
+        if long {
+            out.push_str(&format!("  {about}\n"));
+        }
+        for name in *names {
+            let Some(sub) = cmd.find_subcommand(name) else {
+                continue;
+            };
+            let about = sub.get_about().map(|a| a.to_string()).unwrap_or_default();
+            if !long {
+                out.push_str(&format!("  {name:<16} {about}\n"));
+                continue;
+            }
+            let rows = if sub.has_subcommands() {
+                leaves(sub)
+                    .into_iter()
+                    .map(|(p, c)| (format!("{name} {p}"), c.get_about().map(|a| a.to_string())))
+                    .collect()
+            } else {
+                vec![(name.to_string(), Some(about))]
+            };
+            for (path, about) in rows {
+                let kind = effect_of(&path).0;
+                out.push_str(&format!(
+                    "  {path:<16} {kind:<5}  {}\n",
+                    about.unwrap_or_default()
+                ));
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// The command line as parsed: effects on each command, and the top-level
+/// help grouped, brief for -h and fuller for --help.
+fn command() -> clap::Command {
+    let cmd = Cli::command();
+    let (brief, long) = (command_list(&cmd, false), command_list(&cmd, true));
+    with_effects(cmd, "")
+        .help_template("{about-with-newline}\n{usage-heading} {usage}\n\n{before-help}Options:\n{options}{after-help}")
+        .before_help(brief)
+        .before_long_help(long)
+        .after_help("`munchymail --help` says more; `munchymail help COMMAND` for one command.")
+        .after_long_help(CONCEPTS)
+}
+
 /// Put each command's effect first in its `--help` line.
 fn with_effects(cmd: clap::Command, prefix: &str) -> clap::Command {
     let names: Vec<String> = cmd
@@ -142,6 +245,28 @@ fn arg_json(a: &clap::Arg) -> serde_json::Value {
         "values": if takes_value { a.get_possible_values() } else { Vec::new() }.iter().map(|v| v.get_name().to_string()).collect::<Vec<_>>(),
         "env": a.get_env().map(|e| e.to_string_lossy()),
     })
+}
+
+/// `text` indented, as one line, or word-wrapped to the terminal when there is one.
+fn wrap(text: &str, indent: usize) -> String {
+    let pad = " ".repeat(indent);
+    let words = text.split_whitespace();
+    let Some(width) = listing::width() else {
+        return format!("{pad}{}", words.collect::<Vec<_>>().join(" "));
+    };
+    let mut lines = vec![pad.clone()];
+    for w in words {
+        let line = lines.last_mut().expect("never empty");
+        if line.len() > indent && line.chars().count() + 1 + w.chars().count() > width {
+            lines.push(format!("{pad}{w}"));
+        } else {
+            if line.len() > indent {
+                line.push(' ');
+            }
+            line.push_str(w);
+        }
+    }
+    lines.join("\n")
 }
 
 fn describe(only: &[String], json: bool, out: &mut impl Write) -> Result<()> {
@@ -210,11 +335,8 @@ fn describe(only: &[String], json: bool, out: &mut impl Write) -> Result<()> {
             } else {
                 format!(" ({})", notes.join(", "))
             };
-            writeln!(
-                out,
-                "    {flag}{notes}  {}",
-                s(&a["help"]).replace('\n', " ")
-            )?;
+            writeln!(out, "    {flag}{notes}")?;
+            writeln!(out, "{}", wrap(&s(&a["help"]), 8))?;
         }
         Ok(())
     };
@@ -230,13 +352,11 @@ fn describe(only: &[String], json: bool, out: &mut impl Write) -> Result<()> {
             s(&c["effect"]),
             s(&c["effect_detail"])
         )?;
-        writeln!(out, "  {}", s(&c["about"]).replace('\n', " "))?;
+        writeln!(out, "{}", wrap(&s(&c["about"]), 2))?;
         if !c["details"].is_null() && !want.is_empty() {
-            writeln!(
-                out,
-                "  {}",
-                s(&c["details"]).replace("\n\n", "\n  ").replace('\n', " ")
-            )?;
+            for para in s(&c["details"]).split("\n\n") {
+                writeln!(out, "{}", wrap(para, 2))?;
+            }
         }
         args(out, &c["args"])?;
     }
@@ -245,20 +365,27 @@ fn describe(only: &[String], json: bool, out: &mut impl Write) -> Result<()> {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Manage accounts: one per mail address, each with its own data/ADDRESS/.
+    /// Add and list accounts, one per mail address.
+    ///
+    /// Each account has its own database in data/ADDRESS/.
     #[command(subcommand)]
     Account(AccountCmd),
-    /// The account's own addresses, for telling mail it sent from mail it got.
+    /// The account's own addresses.
+    ///
+    /// They tell mail it sent from mail it got, e.g. for `search`'s who column.
     #[command(subcommand)]
     Alias(AliasCmd),
-    /// Gmail, through Google's API (read-only).
+    /// Sync a Gmail account through Google's API.
+    ///
+    /// Access is read-only: nothing in Gmail is changed.
     #[command(subcommand)]
     Gmail(GmailCmd),
-    /// Manage origins: places mail is found (live trees, backups, exports).
+    /// Places mail is found: live trees, backups, exports.
     #[command(subcommand)]
     Origin(OriginCmd),
-    /// Import every mbox under the given origins, or all origins if none given.
+    /// Import the origins' mbox files.
     ///
+    /// Imports every mbox under the given origins, or all origins if none given.
     /// Each file is read under a shared fcntl lock (as Dovecot readers do) and
     /// never written. Re-importing unchanged files only records a new sighting.
     Import {
@@ -275,12 +402,23 @@ enum Cmd {
         /// Print each full raw message.
         #[arg(long, conflicts_with = "count")]
         raw: bool,
-        /// Several lines per message: folder, date, From, To, subject, body size, attachments.
-        #[arg(long, conflicts_with_all = ["headers", "raw", "count", "tsv", "json"])]
+        /// Several lines per message: folder, date, From, To, Cc, subject, body size, attachments.
+        #[arg(long, conflicts_with_all = ["headers", "raw", "count", "tsv", "json", "columns"])]
         long: bool,
-        /// The same as --long as tab-separated columns with a header row.
+        /// Tab-separated, untruncated, with a header row; default columns id,
+        /// message, time, folder, from, to, subject, size, attachments, message-id, snippet.
         #[arg(long, conflicts_with_all = ["headers", "raw", "count", "json"])]
         tsv: bool,
+        /// Comma-separated columns: id, message, date, time, who, subject, folder,
+        /// size, attachments, message-id, snippet, or any header name (to, cc,
+        /// list-id, ...). Default id,date,who,subject, or `[listing] columns` in
+        /// config.toml. `who` is → the recipients of mail you sent (From is an
+        /// alias), else ← the sender.
+        #[arg(long, value_name = "LIST", conflicts_with_all = ["headers", "raw", "count", "json"])]
+        columns: Option<String>,
+        /// Show addresses rather than names in who, from, to, cc, ...
+        #[arg(long)]
+        addresses: bool,
         /// JSON Lines: one `message` record each (with snippet and locations),
         /// then a `page` record whose `next` is the --after cursor, or null.
         #[arg(long, conflicts_with_all = ["headers", "raw", "count", "long"])]
@@ -299,8 +437,9 @@ enum Cmd {
         #[arg(short = 'n', long, default_value_t = 50)]
         limit: usize,
     },
-    /// Read one message: where it is, attachments, decoded headers and text body.
+    /// Read one message: headers, text, attachments.
     ///
+    /// Also shows where its copies were found.
     /// Mail text is marked as untrusted; control characters are replaced.
     Read {
         /// Message id (m1234, kept across header rewrites) or copy id (227617).
@@ -309,7 +448,9 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Most common values of a header among matching messages (any occurrence).
+    /// Most common values of a header.
+    ///
+    /// Among matching messages, counting any occurrence of the header.
     Top {
         /// Header name, e.g. list-id.
         name: String,
@@ -319,7 +460,7 @@ enum Cmd {
         #[arg(short = 'n', long, default_value_t = 30)]
         limit: i64,
     },
-    /// Header names and how many matching messages carry each.
+    /// Header names and how many messages carry each.
     Names {
         /// Only header names matching this Sieve pattern, e.g. 'x-*'.
         #[arg(long, value_name = "PATTERN")]
@@ -330,7 +471,7 @@ enum Cmd {
         #[arg(short = 'n', long, default_value_t = 100)]
         limit: i64,
     },
-    /// Count matching messages grouped by one or more header keys.
+    /// Count messages grouped by header keys.
     ///
     /// %scope is against every message in the --origin/--folder/--since/--before
     /// scope; %match is against those also passing the header filters.
@@ -348,8 +489,9 @@ enum Cmd {
         #[arg(long)]
         tsv: bool,
     },
-    /// Every header among matching messages with its value distribution:
-    /// categorical headers first, then constants, then near-unique identifiers.
+    /// Every header with its value distribution.
+    ///
+    /// Categorical headers first, then constants, then near-unique identifiers.
     Profile {
         /// Only header names matching this Sieve pattern, e.g. 'x-*'.
         #[arg(long, value_name = "PATTERN")]
@@ -360,7 +502,9 @@ enum Cmd {
         #[arg(short = 'k', long, default_value_t = 6)]
         values: usize,
     },
-    /// Show one message: its raw header block by default.
+    /// Show one copy's raw headers or bytes.
+    ///
+    /// Its raw header block by default.
     Show {
         /// Message id, the first column of `search`.
         id: i64,
@@ -371,9 +515,10 @@ enum Cmd {
         #[arg(long = "where")]
         provenance: bool,
     },
-    /// Write matching messages to data/exports/NAME.tgz for someone to keep:
-    /// NAME/index.md (a table of the messages) and NAME/maildir/001, 002, ...
+    /// Write matching messages to a .tgz to keep.
     ///
+    /// data/exports/NAME.tgz holds NAME/index.md (a table of the messages) and
+    /// NAME/maildir/001, 002, ...
     /// Copies of one message (same body, Message-ID and Date) are exported once.
     Export {
         /// Name of the export and of the directory it unpacks to.
@@ -387,8 +532,9 @@ enum Cmd {
         #[arg(long)]
         title: Option<String>,
     },
-    /// MIME parts of matching messages by type, most common first: what
-    /// senders declared, what the bytes are (magic numbers), or where they differ.
+    /// Attachments by type, most common first.
+    ///
+    /// What senders declared, what the bytes are (magic numbers), or where they differ.
     Attachments {
         #[command(flatten)]
         filter: FilterArgs,
@@ -401,19 +547,23 @@ enum Cmd {
         #[arg(short = 'n', long, default_value_t = 30)]
         limit: usize,
     },
-    /// Bring derived indexes (MIME parts, document text, text search) up to
-    /// date; `import` does this too.
+    /// Bring derived indexes up to date.
+    ///
+    /// MIME parts, document text and text search; `import` does this too.
     Index,
-    /// Join each Takeout copy to its Gmail API copy's message where they differ
-    /// only as Takeout changes mail; `import` and `gmail sync` do this as they go.
+    /// Join Takeout copies to their Gmail API copies.
+    ///
+    /// Where they differ only as Takeout changes mail; `import` and `gmail
+    /// sync` do this as they go.
     ///
     /// Copies pair by thread id and Message-ID. Both stay stored; the API copy
     /// is the one shown and indexed. Copies that differ in any other way stay
     /// separate and are listed.
     Reconcile,
-    /// OCR (English) image attachments and PDFs with no text layer into the
-    /// text index. Slow; holds the database only between chunks, so other
-    /// commands can run meanwhile (or alongside it under `serve`).
+    /// OCR images and scanned PDFs for text search.
+    ///
+    /// English, into the text index. Slow; holds the database only between
+    /// chunks, so other commands can run meanwhile (or alongside it under `serve`).
     Ocr {
         /// At most this many images and PDFs this run.
         #[arg(short = 'n', long)]
@@ -424,13 +574,16 @@ enum Cmd {
     },
     /// Corpus counts.
     Stats,
-    /// Run SQL against the index and print rows tab-separated.
+    /// Run a read-only SQL query.
+    ///
+    /// Prints rows tab-separated.
     Sql {
         /// One SQL statement; see docs/index.md for the schema.
         query: String,
     },
-    /// Compare two snapshots of an mbox message by message; no database.
+    /// Compare two mbox snapshots; no database.
     ///
+    /// Message by message.
     /// Messages pair up as unchanged (identical bytes), headers changed (same
     /// body and Message-ID), removed (moved if found in a --moved-to file,
     /// otherwise not found) or added.
@@ -455,8 +608,9 @@ enum Cmd {
         #[arg(long)]
         list: bool,
     },
-    /// What changed between import runs, message by message, from the index.
+    /// What changed between import runs.
     ///
+    /// Message by message, from the index.
     /// Within each path, messages pair up as in `diff`. A message gone from one
     /// path and new at another is moved; gone and new nowhere is removed.
     /// Files identical on both sides are skipped.
@@ -473,13 +627,15 @@ enum Cmd {
         #[arg(long)]
         list: bool,
     },
-    /// Store the removed and moved messages between two snapshots, as `changes`
-    /// pairs them, in the removal table; `import` does this per origin.
+    /// Store removals between two import runs.
+    ///
+    /// The removed and moved messages, as `changes` pairs them, go in the
+    /// removal table; `import` does this per origin.
     RecordRemovals {
         #[command(flatten)]
         runs: Runs,
     },
-    /// Recorded removals: messages that left a path, newest first.
+    /// Messages that left a path, newest first.
     Removals {
         /// Only paths matching this Sieve :matches pattern, e.g. INBOX.
         #[arg(long)]
@@ -490,8 +646,10 @@ enum Cmd {
         #[arg(short = 'n', long, default_value_t = 50)]
         limit: usize,
     },
-    /// Commands, their arguments and what each may change, generated from
-    /// the definitions that parse them.
+    /// Every command's arguments and effect, for scripts.
+    ///
+    /// What each may change, generated from the definitions that parse them;
+    /// `--json` for agents.
     Describe {
         /// Only this command, e.g. `search` or `origin add`.
         command: Vec<String>,
@@ -499,7 +657,9 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Split mbox files and check they reproduce byte-for-byte; no database.
+    /// Check mbox files split and rejoin exactly.
+    ///
+    /// Splits them and checks they reproduce byte-for-byte; no database.
     Scan {
         /// Also list every message's offset, sizes and From_ line.
         #[arg(long)]
@@ -510,7 +670,9 @@ enum Cmd {
         /// Mbox files to split.
         paths: Vec<PathBuf>,
     },
-    /// Hold every account's database and run the commands other munchymail
+    /// Hold the databases; run commands sent to it.
+    ///
+    /// Holds every account's database and runs the commands other munchymail
     /// processes send to $XDG_RUNTIME_DIR/munchymail/serve.sock (or
     /// $MUNCHYMAIL_SOCKET); runs until killed.
     ///
@@ -522,7 +684,9 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum AccountCmd {
-    /// Create data/ADDRESS/ (or adopt the database already there) and add
+    /// Create an account.
+    ///
+    /// Creates data/ADDRESS/ (or adopts the database already there) and adds
     /// ADDRESS as its first alias.
     Add { address: String },
     /// List accounts and their aliases.
@@ -531,17 +695,23 @@ enum AccountCmd {
 
 #[derive(Subcommand)]
 enum GmailCmd {
-    /// Sign the account in to Google in a browser, with read-only access to
-    /// Gmail and contacts, and keep the token in ~/.config/munchymail/creds/.
+    /// Sign in to Google in a browser.
+    ///
+    /// Read-only access to Gmail and contacts; the token is kept in
+    /// ~/.config/munchymail/creds/.
     Auth {
         /// OAuth client JSON (Desktop app) to copy into the creds directory first.
         #[arg(long, value_name = "FILE")]
         client: Option<PathBuf>,
     },
-    /// Check the sign-in: the mailbox's address, size, history id and labels.
+    /// Check the sign-in.
+    ///
+    /// Shows the mailbox's address, size, history id and labels.
     Status,
-    /// Bring the account up to date with Gmail: changes since the last sync,
-    /// or every message the first time; then index as `import` does.
+    /// Bring the account up to date with Gmail.
+    ///
+    /// Changes since the last sync, or every message the first time; then
+    /// indexes as `import` does.
     Sync {
         /// Messages fetched at a time.
         #[arg(short = 'j', long, default_value_t = 4)]
@@ -582,7 +752,9 @@ struct Runs {
 
 #[derive(Subcommand)]
 enum OriginCmd {
-    /// Register a place mail is found; nothing is read until `import`.
+    /// Register a place mail is found.
+    ///
+    /// Nothing is read until `import`.
     Add {
         /// Short unique name used by --origin and import.
         label: String,
@@ -595,15 +767,19 @@ enum OriginCmd {
         #[arg(long)]
         note: Option<String>,
     },
-    /// Mark an origin finished (e.g. its path moved): `import` skips it and
-    /// `--current` ignores it unless named with `--origin`; its runs stay queryable.
+    /// Mark an origin finished.
+    ///
+    /// E.g. its path moved: `import` skips it and `--current` ignores it unless
+    /// named with `--origin`; its runs stay queryable.
     Retire {
         label: String,
         /// Make it active again.
         #[arg(long)]
         undo: bool,
     },
-    /// Point an origin at its new path after the files were moved; history is kept.
+    /// Point an origin at its new path.
+    ///
+    /// After the files were moved; history is kept.
     Move { label: String, root: PathBuf },
     /// List origins and when each was last imported.
     List,
@@ -1062,11 +1238,93 @@ enum Listing {
     Json,
 }
 
+/// `search --columns` and how address columns show.
+struct Columns {
+    spec: Option<String>,
+    addresses: bool,
+}
+
+/// One row of cells per matching message, each on one line; `terminal`
+/// shows people rather than raw address headers.
+async fn rows(
+    store: &Store,
+    filter: &Filter,
+    cols: &[Column],
+    (unique, limit, after): (bool, usize, Option<&str>),
+    addresses: bool,
+    terminal: bool,
+) -> Result<(Vec<Vec<String>>, Option<String>)> {
+    let own: Vec<String> = if cols.contains(&Column::Who) {
+        let rows = query_rows(store, "SELECT pattern FROM alias", vec![]).await?;
+        rows.iter().map(|r| text(&r[0])).collect()
+    } else {
+        Vec::new()
+    };
+    let (hits, next) = if cols.iter().any(Column::needs_decoding) {
+        let (hits, next) = api::search(store, filter, unique, limit, after).await?;
+        (hits.into_iter().map(|h| (h.id, Some(h))).collect(), next)
+    } else {
+        let set = api::matching(store, filter, unique).await?;
+        let (ids, next) = api::page(store, set, limit, after).await?;
+        (
+            ids.into_iter().map(|id| (id, None)).collect::<Vec<_>>(),
+            next,
+        )
+    };
+    let one = |s: &str| sanitize(s).replace(['\t', '\n'], " ");
+    let mut out = Vec::with_capacity(hits.len());
+    for (id, hit) in hits {
+        let a = &query_rows(
+            store,
+            "SELECT msg_id, date, subject, message_id FROM artifact WHERE artifact_id = ?",
+            vec![id.into()],
+        )
+        .await?[0];
+        let date = match a[1] {
+            Value::Integer(t) => Some(t),
+            _ => None,
+        };
+        let mut row = Vec::with_capacity(cols.len());
+        for c in cols {
+            let hit = || hit.as_ref().context("column needs the decoded message");
+            row.push(one(&match c {
+                Column::Id => id.to_string(),
+                Column::Message => format!("m{}", text(&a[0])),
+                Column::Date => date.map_or("?".into(), ymd),
+                Column::Time => date.map_or("?".into(), ymd_hm),
+                Column::Who => {
+                    let from = store.first_header(id, "from").await?;
+                    let to = store.first_header(id, "to").await?;
+                    let cc = store.first_header(id, "cc").await?;
+                    listing::who(&from, &[&to, &cc], &own, addresses, terminal)
+                }
+                Column::Subject => text(&a[2]),
+                Column::Folder => locations::folder(&hit()?.locations),
+                Column::Size => hit()?.body_bytes.to_string(),
+                Column::Attachments => hit()?.attachments.to_string(),
+                Column::MessageId => text(&a[3]),
+                Column::Snippet => hit()?.snippet.clone(),
+                Column::Header(h) => {
+                    let v = store.first_header(id, h).await?;
+                    if terminal && listing::is_address_header(h) {
+                        listing::people(&v, addresses).join(", ")
+                    } else {
+                        v
+                    }
+                }
+            }));
+        }
+        out.push(row);
+    }
+    Ok((out, next))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn search(
     store: &Store,
     filter: Filter,
     listing: Listing,
+    columns: Columns,
     unique: bool,
     count: bool,
     limit: usize,
@@ -1074,41 +1332,58 @@ async fn search(
     out: &mut impl Write,
 ) -> Result<()> {
     warn_unindexed(store, &filter).await?;
-    if let Listing::Long | Listing::Tsv | Listing::Json = listing {
-        let (hits, next) = api::search(store, &filter, unique, limit, after).await?;
-        if listing == Listing::Tsv {
-            writeln!(
-                out,
-                "id\tmessage\tdate\tfolder\tfrom\tto\tsubject\tbody_bytes\tattachments\tmessage_id\tsnippet"
-            )?;
+    if matches!(listing, Listing::Summary | Listing::Tsv) && !count {
+        let tsv = listing == Listing::Tsv;
+        let spec = match columns.spec {
+            Some(c) => c,
+            None if tsv => listing::TSV_DEFAULT.into(),
+            None => Config::load()?
+                .listing_columns(account_address(store))
+                .unwrap_or(listing::DEFAULT)
+                .into(),
+        };
+        let cols = Column::parse_list(&spec)?;
+        let (rows, next) = rows(
+            store,
+            &filter,
+            &cols,
+            (unique, limit, after),
+            columns.addresses,
+            !tsv,
+        )
+        .await?;
+        if tsv {
+            let names: Vec<_> = cols.iter().map(Column::name).collect();
+            writeln!(out, "{}", names.join("\t"))?;
+            for r in rows {
+                writeln!(out, "{}", r.join("\t"))?;
+            }
+        } else {
+            for line in listing::layout(&cols, &rows, listing::width()) {
+                writeln!(out, "{line}")?;
+            }
         }
+        if let Some(n) = next {
+            info!("more results: add --after {n}");
+        }
+        return Ok(());
+    }
+    if let Listing::Long | Listing::Json = listing {
+        let (hits, next) = api::search(store, &filter, unique, limit, after).await?;
         for h in &hits {
             let date = h.date.map_or("?".into(), ymd_hm);
             let folder = locations::folder(&h.locations);
             match listing {
                 Listing::Json => writeln!(out, "{}", h.to_json())?,
-                Listing::Tsv => {
-                    let clean = |s: &str| sanitize(s).replace(['\t', '\n'], " ");
-                    writeln!(
-                        out,
-                        "{}\tm{}\t{date}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                        h.id,
-                        h.msg,
-                        clean(&folder),
-                        clean(&h.from),
-                        clean(&h.to),
-                        clean(&h.subject),
-                        h.body_bytes,
-                        h.attachments,
-                        clean(h.message_id.as_deref().unwrap_or("")),
-                        clean(&h.snippet)
-                    )?;
-                }
                 _ => {
                     let one = |s: &str| sanitize(s).replace(['\t', '\n'], " ");
                     writeln!(out, "{:>7}  {date}  {}", h.id, one(&folder))?;
                     writeln!(out, "         From: {}", one(&h.from))?;
                     writeln!(out, "         To:   {}", one(&h.to))?;
+                    let cc = store.first_header(h.id, "cc").await?;
+                    if !cc.is_empty() {
+                        writeln!(out, "         Cc:   {}", one(&cc))?;
+                    }
                     writeln!(out, "         {}", one(&h.subject))?;
                     writeln!(
                         out,
@@ -1163,27 +1438,13 @@ async fn search(
         )
         .await?;
         let r = &rows[0];
-        if let Listing::Headers | Listing::Raw = listing {
-            writeln!(out, "==> {} <==", text(&r[0]))?;
-            if let (Value::Blob(h), Value::Blob(b)) = (&r[4], &r[5]) {
-                out.write_all(&store.object(h).await?)?;
-                if listing == Listing::Raw {
-                    out.write_all(&store.object(b).await?)?;
-                    writeln!(out)?;
-                }
+        writeln!(out, "==> {} <==", text(&r[0]))?;
+        if let (Value::Blob(h), Value::Blob(b)) = (&r[4], &r[5]) {
+            out.write_all(&store.object(h).await?)?;
+            if listing == Listing::Raw {
+                out.write_all(&store.object(b).await?)?;
+                writeln!(out)?;
             }
-        } else {
-            let date = match r[1] {
-                Value::Integer(t) => ymd(t),
-                _ => "----------".into(),
-            };
-            writeln!(
-                out,
-                "{:>7}  {date}  {:<32}  {}",
-                text(&r[0]),
-                truncate(&sanitize(&text(&r[2])), 32),
-                sanitize(&text(&r[3]))
-            )?;
         }
     }
     if let Some(n) = next {
@@ -2156,13 +2417,14 @@ fn handle(
 ) -> u8 {
     let r = (|| {
         let argv = std::iter::once("munchymail".to_string()).chain(req.argv);
-        let matches = with_effects(Cli::command(), "").try_get_matches_from(argv)?;
+        let matches = command().try_get_matches_from(argv)?;
         let mut cli = Cli::from_arg_matches(&matches)?;
         if matches!(cli.cmd, Cmd::Serve) {
             bail!("already serving");
         }
         cli.data = root.to_path_buf();
         cli.account = req.account;
+        listing::set_width(req.width);
         absolutize(&mut cli.cmd, &req.cwd);
         let _turn = (effect_of(&command_path(&matches)).0 != "read")
             .then(|| writes.lock().unwrap_or_else(PoisonError::into_inner));
@@ -2371,6 +2633,8 @@ async fn with_store(cmd: Cmd, store: &Store, out: &mut impl Write) -> Result<()>
             raw,
             long,
             tsv,
+            columns,
+            addresses,
             json,
             after,
             unique,
@@ -2389,6 +2653,10 @@ async fn with_store(cmd: Cmd, store: &Store, out: &mut impl Write) -> Result<()>
                 store,
                 filter.build(&store.data_dir)?,
                 listing,
+                Columns {
+                    spec: columns,
+                    addresses,
+                },
                 unique,
                 count,
                 limit,
@@ -2553,11 +2821,12 @@ fn request(cli: &Cli) -> Option<serve::Request> {
         cwd: std::env::current_dir().ok()?,
         account: cli.account.clone(),
         data: cli.data.canonicalize().ok()?,
+        width: listing::width(),
     })
 }
 
 fn main() -> ExitCode {
-    let matches = with_effects(Cli::command(), "").get_matches();
+    let matches = command().get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     let filter = || {
         EnvFilter::try_from_env("MUNCHYMAIL_LOG")
@@ -2578,6 +2847,7 @@ fn main() -> ExitCode {
         )
         .with(to_clients)
         .init();
+    listing::set_width(listing::terminal_width(io::stdout().as_raw_fd()));
     if let (Some(req), Some(socket)) = (request(&cli), serve::socket()) {
         let (mut out, mut err) = (io::stdout().lock(), io::stderr().lock());
         match serve::forward(&socket, &req, &mut out, &mut err) {
@@ -2609,6 +2879,17 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["commands"][0]["effect"], "write");
         assert!(describe(&["nope".into()], false, &mut out).is_err());
+    }
+
+    #[test]
+    fn every_command_is_in_one_help_group() {
+        command().debug_assert();
+        let grouped: Vec<&str> = GROUPS.iter().flat_map(|g| g.2.iter().copied()).collect();
+        for sub in Cli::command().get_subcommands() {
+            let n = grouped.iter().filter(|g| **g == sub.get_name()).count();
+            assert_eq!(n, 1, "{} is in {n} help groups", sub.get_name());
+        }
+        assert_eq!(grouped.len(), Cli::command().get_subcommands().count());
     }
 
     #[test]

@@ -9,6 +9,7 @@ pub mod gmail;
 pub mod google;
 pub mod headers;
 pub mod import;
+pub mod listing;
 pub mod locations;
 pub mod mbox;
 pub mod message;

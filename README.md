@@ -241,16 +241,37 @@ munchymail search --has list-unsubscribe --raw -n 1        # whole raw messages
 munchymail search --participant '*@corp.example' --long     # folder, From, To, size, attachments
 munchymail search --participant '*@corp.example' --tsv -n 1000 > corp.tsv
 munchymail search --participant '*@corp.example' --unique --json -n 20   # for agents
+munchymail search --folder SENT --columns date,to,cc,subject              # pick columns
 ```
 
-Output is `id  date  from  subject`, newest first. The id is a stored
-copy's, what `show` takes; see [Messages and copies](#messages-and-copies).
-`--long` adds, per message, the folders it is in now (or "gone; last seen
+Output is `id  date  who  subject`, newest first, fitted to the terminal's
+width. `who` is the other side: `→` and the recipients (To and Cc; the
+first name and `+N` for the rest) when From is one of the account's
+aliases, `→ (self)` for mail to itself, else `←` and the sender. The id is
+a stored copy's, what `show` takes; see [Messages and copies](#messages-and-copies).
+
+`--columns` picks the columns: `id`, `message` (mN), `date`, `time`, `who`,
+`subject`, `folder`, `size`, `attachments`, `message-id`, `snippet`, or any
+header name (`to`, `cc`, `list-id`, ...: its first value; address headers
+show names, or addresses with `--addresses`). The default can be set in
+`~/.config/munchymail/config.toml`, for all accounts or one:
+
+```toml
+[listing]
+columns = "id,date,who,subject"
+
+[accounts."me@gmail.com".listing]
+columns = "id,date,who,cc,subject"
+```
+
+`--tsv` prints the columns tab-separated and untruncated with a header row;
+its default is id, message, time, folder, from, to, subject, size,
+attachments, message-id and snippet. `--long` adds, per message, the folders it is in now (or "gone; last seen
 in PATH DATE"), date and time (UTC), the message id and Message-ID, From,
-To, body size in bytes as stored (MIME-encoded), the number of attachments
+To, Cc, body size in bytes as stored (MIME-encoded), the number of attachments
 (parts with a file name or `Content-Disposition: attachment`), the snippet
 (with `--text`, where it matched, matched words in «»), and `problem` if it
-didn't decode; `--tsv` gives the same as columns. Folder is per stored copy: a copy whose headers Dovecot later
+didn't decode. Folder is per stored copy: a copy whose headers Dovecot later
 rewrote shows as gone, next to its current copy; `--unique` lists each
 message once (its newest copy, with the places of all its copies), as
 `export` counts them, and `--current` leaves out copies no longer in any

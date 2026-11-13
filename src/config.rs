@@ -108,6 +108,18 @@ impl Config {
         Ok(out)
     }
 
+    /// `search`'s columns: `[accounts."ACCOUNT".listing] columns`, else `[listing] columns`.
+    pub fn listing_columns(&self, account: &str) -> Option<&str> {
+        let account = self
+            .table
+            .get("accounts")
+            .and_then(|a| a.get(account)?.get("listing"));
+        account
+            .or_else(|| self.table.get("listing"))?
+            .get("columns")?
+            .as_str()
+    }
+
     /// The TOML that sets an origin's variant, for messages.
     pub fn mbox_entry(account: &str, origin: &str) -> String {
         format!(
