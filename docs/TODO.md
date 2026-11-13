@@ -17,9 +17,12 @@ Roughly in priority order within each section. Phases refer to
 - [ ] `read mN --attachment K`: extracted text (untrusted-wrapped) and a way
       to save the original bytes.
 - [ ] 7z/rar member names (only zip is listed today); nested zips.
-- [ ] Move search/read behind a service (one process owns the database;
-      the CLI over a Unix socket, later the web UI). `src/api.rs` is the
-      layer it will wrap.
+- [x] `serve`: one process owns the databases; the CLI forwards its
+      command line over `data/serve.sock` (reads concurrent, writes in turn).
+- [ ] The service's own work (Gmail sync, mbox scans, OCR after import):
+      to be discussed before building.
+- [ ] Web UI and Android over HTTP with auth, through `src/api.rs`; the
+      socket is same-user only and runs any command.
 
 ## Accounts and Gmail (phase 5)
 

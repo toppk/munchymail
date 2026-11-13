@@ -2,13 +2,15 @@ use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use tracing::{error, info, warn};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer, fmt};
 use turso::Value;
 
 use munchymail::changes;
@@ -23,7 +25,7 @@ use munchymail::store::{Store, now};
 use munchymail::takeout::{self, Linker};
 use munchymail::text::{self, TextQuery};
 use munchymail::util::{hex, ymd, ymd_hm};
-use munchymail::{account, api, export, extract, google, mbox, ocr, parts, source};
+use munchymail::{account, api, export, extract, google, mbox, ocr, parts, serve, source};
 
 #[derive(Parser)]
 #[command(
@@ -72,6 +74,7 @@ fn effect(command: &str) -> Option<(&'static str, &'static str)> {
         "sql" => ("read", "a read-only connection: writes are refused"),
         "diff" | "scan" => ("read", "the named files; no database"),
         "describe" => ("read", "nothing; no database"),
+        "serve" => ("write", "data/serve.sock; runs the commands sent to it"),
         "origin list" | "search" | "read" | "top" | "names" | "report" | "profile" | "show"
         | "attachments" | "stats" | "changes" | "removals" => ("read", READ),
         _ => return None,
@@ -407,7 +410,7 @@ enum Cmd {
     Reconcile,
     /// OCR (English) image attachments and PDFs with no text layer into the
     /// text index. Slow; holds the database only between chunks, so other
-    /// commands can run meanwhile.
+    /// commands can run meanwhile (or alongside it under `serve`).
     Ocr {
         /// At most this many images and PDFs this run.
         #[arg(short = 'n', long)]
@@ -504,6 +507,13 @@ enum Cmd {
         /// Mbox files to split.
         paths: Vec<PathBuf>,
     },
+    /// Hold every account's database and run the commands other munchymail
+    /// processes send to DATA/serve.sock; runs until killed.
+    ///
+    /// While it runs, commands go to it instead of opening the database, so
+    /// reads run alongside a write; writes take turns. `diff`, `scan`,
+    /// `describe` and `gmail auth`/`status` always run on their own.
+    Serve,
 }
 
 #[derive(Subcommand)]
@@ -768,7 +778,12 @@ async fn query_rows(store: &Store, sql: &str, params: Vec<Value>) -> Result<Vec<
     Ok(out)
 }
 
-async fn account_cmd(root: &Path, cmd: &AccountCmd, out: &mut impl Write) -> Result<()> {
+async fn account_cmd(
+    root: &Path,
+    stores: &Stores,
+    cmd: &AccountCmd,
+    out: &mut impl Write,
+) -> Result<()> {
     match cmd {
         AccountCmd::Add { address } => {
             let a = account::validate(address)?;
@@ -777,7 +792,7 @@ async fn account_cmd(root: &Path, cmd: &AccountCmd, out: &mut impl Write) -> Res
             }
             let dir = root.join(&a);
             let adopted = dir.join("email.sqlite").exists();
-            let store = Store::open(&dir).await?;
+            let store = stores.open(&dir).await?;
             store.begin().await?;
             store
                 .conn
@@ -792,7 +807,7 @@ async fn account_cmd(root: &Path, cmd: &AccountCmd, out: &mut impl Write) -> Res
         }
         AccountCmd::List => {
             for a in account::list(root)? {
-                let aliases = match Store::open(&root.join(&a)).await {
+                let aliases = match stores.open(&root.join(&a)).await {
                     Ok(s) => query_rows(&s, "SELECT pattern FROM alias ORDER BY pattern", vec![])
                         .await?
                         .iter()
@@ -2070,9 +2085,106 @@ fn scan(path: &Path, variant: mbox::Variant, list: bool, out: &mut impl Write) -
     Ok(())
 }
 
-async fn run(cli: Cli) -> Result<()> {
-    let stdout = io::stdout();
-    let mut out = io::BufWriter::new(stdout.lock());
+/// Where commands get account databases: opened by this process, or new
+/// connections to the ones `serve` holds.
+enum Stores {
+    Direct,
+    Served(Mutex<HashMap<PathBuf, Store>>),
+}
+
+impl Stores {
+    async fn open(&self, dir: &Path) -> Result<Store> {
+        match self {
+            Stores::Direct => Store::open(dir).await,
+            Stores::Served(held) => {
+                let mut held = held.lock().unwrap_or_else(PoisonError::into_inner);
+                if !held.contains_key(dir) {
+                    let store = pollster::block_on(Store::open(dir))?;
+                    held.insert(dir.to_path_buf(), store);
+                }
+                held[dir].connect()
+            }
+        }
+    }
+}
+
+/// Commands that never open a database, so never go to `serve`.
+fn runs_alone(cmd: &Cmd) -> bool {
+    matches!(
+        cmd,
+        Cmd::Diff { .. }
+            | Cmd::Scan { .. }
+            | Cmd::Describe { .. }
+            | Cmd::Serve
+            | Cmd::Gmail(GmailCmd::Auth { .. } | GmailCmd::Status)
+    )
+}
+
+/// The command's path, e.g. `origin add`.
+fn command_path(mut m: &clap::ArgMatches) -> String {
+    let mut path = Vec::new();
+    while let Some((name, sub)) = m.subcommand() {
+        path.push(name);
+        m = sub;
+    }
+    path.join(" ")
+}
+
+/// Start the request's relative paths from the client's directory.
+fn absolutize(cmd: &mut Cmd, cwd: &Path) {
+    let path = match cmd {
+        Cmd::Export {
+            output: Some(p), ..
+        } => p,
+        Cmd::Origin(OriginCmd::Add { root, .. } | OriginCmd::Move { root, .. }) => root,
+        _ => return,
+    };
+    *path = cwd.join(&*path);
+}
+
+/// Run one request of `serve`; writes wait for each other, reads don't.
+fn handle(
+    root: &Path,
+    stores: &Stores,
+    writes: &Mutex<()>,
+    req: serve::Request,
+    reply: &mut serve::Reply,
+) -> u8 {
+    let r = (|| {
+        let argv = std::iter::once("munchymail".to_string()).chain(req.argv);
+        let matches = with_effects(Cli::command(), "").try_get_matches_from(argv)?;
+        let mut cli = Cli::from_arg_matches(&matches)?;
+        if matches!(cli.cmd, Cmd::Serve) {
+            bail!("already serving");
+        }
+        cli.data = root.to_path_buf();
+        cli.account = req.account;
+        absolutize(&mut cli.cmd, &req.cwd);
+        let _turn = (effect_of(&command_path(&matches)).0 != "read")
+            .then(|| writes.lock().unwrap_or_else(PoisonError::into_inner));
+        let mut out = io::BufWriter::new(reply);
+        pollster::block_on(run(cli, stores, &mut out))?;
+        Ok(out.flush()?)
+    })();
+    exit_code(r)
+}
+
+fn serve_cmd(data: &Path) -> Result<()> {
+    std::fs::create_dir_all(data)?;
+    let root = data.canonicalize()?;
+    let listener = serve::bind(&root)?;
+    let stores = Stores::Served(Mutex::default());
+    for a in account::list(&root)? {
+        pollster::block_on(stores.open(&root.join(&a)))?;
+        info!(account = a.as_str(), "opened");
+    }
+    let writes = Mutex::new(());
+    serve::serve(listener, move |req, reply| {
+        handle(&root, &stores, &writes, req, reply)
+    })
+}
+
+async fn run(cli: Cli, stores: &Stores, out: &mut impl Write) -> Result<()> {
     if let Cmd::Diff {
         before,
         after,
@@ -2083,7 +2195,7 @@ async fn run(cli: Cli) -> Result<()> {
         list,
     } = &cli.cmd
     {
-        diff(before, after, *mbox, moved_to, by, *limit, *list, &mut out)?;
+        diff(before, after, *mbox, moved_to, by, *limit, *list, out)?;
         return Ok(out.flush()?);
     }
     if let Cmd::Gmail(cmd) = &cli.cmd
@@ -2091,18 +2203,19 @@ async fn run(cli: Cli) -> Result<()> {
     {
         let dir = account::resolve(&cli.data, cli.account.as_deref())?;
         let address = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        gmail(address, cmd, &mut out)?;
+        gmail(address, cmd, out)?;
         return Ok(out.flush()?);
     }
     if let Cmd::Account(cmd) = &cli.cmd {
-        account_cmd(&cli.data, cmd, &mut out).await?;
+        account_cmd(&cli.data, stores, cmd, out).await?;
         return Ok(out.flush()?);
     }
     if let Cmd::Ocr { limit, jobs } = cli.cmd {
         let t = Instant::now();
         let cpus = std::thread::available_parallelism().map_or(2, |n| n.get());
         let dir = account::resolve(&cli.data, cli.account.as_deref())?;
-        let s = ocr::run(&dir, limit, jobs.unwrap_or(cpus / 2).max(1)).await?;
+        let connect = async || stores.open(&dir).await;
+        let s = ocr::run(connect, &dir, limit, jobs.unwrap_or(cpus / 2).max(1)).await?;
         info!(
             queued = s.queued,
             done = s.done,
@@ -2114,18 +2227,29 @@ async fn run(cli: Cli) -> Result<()> {
         return Ok(out.flush()?);
     }
     if let Cmd::Describe { command, json } = &cli.cmd {
-        describe(command, *json, &mut out)?;
+        describe(command, *json, out)?;
         return Ok(out.flush()?);
     }
     if let Cmd::Scan { list, mbox, paths } = &cli.cmd {
         for p in paths {
-            scan(p, *mbox, *list, &mut out).with_context(|| p.display().to_string())?;
+            scan(p, *mbox, *list, out).with_context(|| p.display().to_string())?;
         }
         return Ok(out.flush()?);
     }
-    let store = Store::open(&account::resolve(&cli.data, cli.account.as_deref())?).await?;
+    if let Cmd::Serve = cli.cmd {
+        return serve_cmd(&cli.data);
+    }
+    let store = stores
+        .open(&account::resolve(&cli.data, cli.account.as_deref())?)
+        .await?;
+    let r = with_store(cli.cmd, &store, out).await;
+    let settled = store.settle().await;
+    r.and(settled)
+}
+
+async fn with_store(cmd: Cmd, store: &Store, out: &mut impl Write) -> Result<()> {
     let read_txn = matches!(
-        cli.cmd,
+        cmd,
         Cmd::Search { .. }
             | Cmd::Top { .. }
             | Cmd::Names { .. }
@@ -2142,15 +2266,14 @@ async fn run(cli: Cli) -> Result<()> {
     if read_txn {
         store.begin().await?;
     }
-    match cli.cmd {
-        Cmd::Origin(cmd) => origin(&store, cmd, &mut out).await?,
-        Cmd::Alias(cmd) => alias(&store, cmd, &mut out).await?,
+    match cmd {
+        Cmd::Origin(cmd) => origin(store, cmd, out).await?,
+        Cmd::Alias(cmd) => alias(store, cmd, out).await?,
         Cmd::Gmail(GmailCmd::Sync { jobs }) => {
             let t = Instant::now();
-            let address = account_address(&store).to_string();
-            let takeouts =
-                takeout::origin_ids(&store, &Config::load()?.takeouts(&address)?).await?;
-            let s = munchymail::gmail::sync(&store, &address, jobs.max(1), &takeouts).await?;
+            let address = account_address(store).to_string();
+            let takeouts = takeout::origin_ids(store, &Config::load()?.takeouts(&address)?).await?;
+            let s = munchymail::gmail::sync(store, &address, jobs.max(1), &takeouts).await?;
             info!(
                 full = s.full,
                 fetched = s.fetched,
@@ -2161,13 +2284,13 @@ async fn run(cli: Cli) -> Result<()> {
                 elapsed = ?t.elapsed(),
                 "gmail sync finished"
             );
-            index(&store).await?;
+            index(store).await?;
             store.checkpoint().await?;
         }
         Cmd::Import { mut labels } => {
             if labels.is_empty() {
                 for r in query_rows(
-                    &store,
+                    store,
                     "SELECT label FROM origin WHERE retired_at IS NULL AND root NOT LIKE 'gmail:%'
                      ORDER BY origin_id",
                     vec![],
@@ -2180,13 +2303,13 @@ async fn run(cli: Cli) -> Result<()> {
             let config = Config::load()?;
             let variants = labels
                 .iter()
-                .map(|l| config.mbox(account_address(&store), l))
+                .map(|l| config.mbox(account_address(store), l))
                 .collect::<Result<Vec<_>>>()?;
             for (label, variant) in labels.into_iter().zip(variants) {
                 let t = Instant::now();
-                let mut imp = Importer::new(&store, &label, variant).await?;
-                if config.is_takeout(account_address(&store), &label)? {
-                    imp.takeout_of = takeout::gmail_origin(&store, account_address(&store)).await?;
+                let mut imp = Importer::new(store, &label, variant).await?;
+                if config.is_takeout(account_address(store), &label)? {
+                    imp.takeout_of = takeout::gmail_origin(store, account_address(store)).await?;
                 }
                 imp.run().await?;
                 let s = &imp.stats;
@@ -2204,21 +2327,21 @@ async fn run(cli: Cli) -> Result<()> {
                     "import finished"
                 );
                 let t = Instant::now();
-                changes::record_since_previous(&store, imp.origin_id, imp.run_id).await?;
+                changes::record_since_previous(store, imp.origin_id, imp.run_id).await?;
                 info!(elapsed = ?t.elapsed(), "removals recorded");
             }
-            index(&store).await?;
+            index(store).await?;
             let t = Instant::now();
             store.checkpoint().await?;
             info!(elapsed = ?t.elapsed(), "wal checkpoint");
         }
         Cmd::Index => {
-            index(&store).await?;
+            index(store).await?;
             store.checkpoint().await?;
         }
         Cmd::Reconcile => {
-            reconcile(&store, &mut out).await?;
-            index(&store).await?;
+            reconcile(store, out).await?;
+            index(store).await?;
             store.checkpoint().await?;
         }
         Cmd::Attachments {
@@ -2228,12 +2351,12 @@ async fn run(cli: Cli) -> Result<()> {
             limit,
         } => {
             attachments(
-                &store,
+                store,
                 filter.build(&store.data_dir)?,
                 by,
                 all_parts,
                 limit,
-                &mut out,
+                out,
             )
             .await?
         }
@@ -2258,14 +2381,14 @@ async fn run(cli: Cli) -> Result<()> {
                 _ => Listing::Summary,
             };
             search(
-                &store,
+                store,
                 filter.build(&store.data_dir)?,
                 listing,
                 unique,
                 count,
                 limit,
                 after.as_deref(),
-                &mut out,
+                out,
             )
             .await?
         }
@@ -2275,13 +2398,13 @@ async fn run(cli: Cli) -> Result<()> {
             limit,
         } => {
             top(
-                &store,
+                store,
                 "value",
                 Some(&name),
                 None,
                 filter.build(&store.data_dir)?,
                 limit,
-                &mut out,
+                out,
             )
             .await?
         }
@@ -2291,13 +2414,13 @@ async fn run(cli: Cli) -> Result<()> {
             limit,
         } => {
             top(
-                &store,
+                store,
                 "name",
                 None,
                 like.as_deref(),
                 filter.build(&store.data_dir)?,
                 limit,
-                &mut out,
+                out,
             )
             .await?
         }
@@ -2306,28 +2429,18 @@ async fn run(cli: Cli) -> Result<()> {
             filter,
             limit,
             tsv,
-        } => {
-            report(
-                &store,
-                &by,
-                filter.build(&store.data_dir)?,
-                limit,
-                tsv,
-                &mut out,
-            )
-            .await?
-        }
+        } => report(store, &by, filter.build(&store.data_dir)?, limit, tsv, out).await?,
         Cmd::Profile {
             like,
             filter,
             values,
         } => {
             profile(
-                &store,
+                store,
                 like.as_deref(),
                 filter.build(&store.data_dir)?,
                 values,
-                &mut out,
+                out,
             )
             .await?
         }
@@ -2335,7 +2448,7 @@ async fn run(cli: Cli) -> Result<()> {
             id,
             raw,
             provenance,
-        } => show(&store, id, raw, provenance, &mut out).await?,
+        } => show(store, id, raw, provenance, out).await?,
         Cmd::Export {
             name,
             filter,
@@ -2355,8 +2468,8 @@ async fn run(cli: Cli) -> Result<()> {
             };
             let title = title.unwrap_or_else(|| name.clone());
             let filter = filter.build(&store.data_dir)?;
-            warn_unindexed(&store, &filter).await?;
-            let s = export::write(&store, &filter, &name, &title, &command_line(), &path).await?;
+            warn_unindexed(store, &filter).await?;
+            let s = export::write(store, &filter, &name, &title, &command_line(), &path).await?;
             writeln!(
                 out,
                 "wrote {}: {} messages ({} duplicate copies left out)",
@@ -2365,10 +2478,10 @@ async fn run(cli: Cli) -> Result<()> {
                 s.folded
             )?;
         }
-        Cmd::Read { id, json } => read(&store, id, json, &mut out).await?,
-        Cmd::Stats => stats(&store, &mut out).await?,
+        Cmd::Read { id, json } => read(store, id, json, out).await?,
+        Cmd::Stats => stats(store, out).await?,
         Cmd::Sql { query } => {
-            for r in sql(&store, &query).await? {
+            for r in sql(store, &query).await? {
                 writeln!(out, "{}", r.iter().map(text).collect::<Vec<_>>().join("\t"))?;
             }
         }
@@ -2377,11 +2490,11 @@ async fn run(cli: Cli) -> Result<()> {
             by,
             limit,
             list,
-        } => changes_cmd(&store, runs, &by, limit, list, &mut out).await?,
+        } => changes_cmd(store, runs, &by, limit, list, out).await?,
         Cmd::RecordRemovals { runs } => {
-            let (.., c) = compare(&store, runs).await?;
+            let (.., c) = compare(store, runs).await?;
             store.begin().await?;
-            let n = changes::record(&store, &c).await?;
+            let n = changes::record(store, &c).await?;
             store.commit().await?;
             writeln!(out, "recorded {n} new removals")?;
         }
@@ -2389,11 +2502,12 @@ async fn run(cli: Cli) -> Result<()> {
             folder,
             moved,
             limit,
-        } => removals(&store, folder, moved, limit, &mut out).await?,
+        } => removals(store, folder, moved, limit, out).await?,
         Cmd::Scan { .. }
         | Cmd::Diff { .. }
         | Cmd::Ocr { .. }
         | Cmd::Describe { .. }
+        | Cmd::Serve
         | Cmd::Account(_)
         | Cmd::Gmail(GmailCmd::Auth { .. } | GmailCmd::Status) => {
             unreachable!()
@@ -2405,29 +2519,73 @@ async fn run(cli: Cli) -> Result<()> {
     Ok(out.flush()?)
 }
 
-fn main() -> ExitCode {
-    let filter = EnvFilter::try_from_env("MUNCHYMAIL_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("munchymail=info,warn"));
-    tracing_subscriber::fmt()
-        .with_ansi(io::stderr().is_terminal())
-        .with_env_filter(filter)
-        .with_writer(io::stderr)
-        .init();
-    let matches = with_effects(Cli::command(), "").get_matches();
-    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
-    match pollster::block_on(run(cli)) {
-        Ok(()) => ExitCode::SUCCESS,
+fn exit_code(r: Result<()>) -> u8 {
+    match r {
+        Ok(()) => 0,
         Err(e)
             if e.downcast_ref::<io::Error>()
                 .is_some_and(|e| e.kind() == io::ErrorKind::BrokenPipe) =>
         {
-            ExitCode::SUCCESS
+            0
         }
         Err(e) => {
             error!("{e:#}");
-            ExitCode::FAILURE
+            1
         }
     }
+}
+
+/// The request to send `serve`, if this command line can go there.
+fn request(cli: &Cli) -> Option<serve::Request> {
+    if runs_alone(&cli.cmd) {
+        return None;
+    }
+    Some(serve::Request {
+        argv: std::env::args_os()
+            .skip(1)
+            .map(|a| a.into_string().ok())
+            .collect::<Option<_>>()?,
+        cwd: std::env::current_dir().ok()?,
+        account: cli.account.clone(),
+    })
+}
+
+fn main() -> ExitCode {
+    let matches = with_effects(Cli::command(), "").get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    let filter = || {
+        EnvFilter::try_from_env("MUNCHYMAIL_LOG")
+            .unwrap_or_else(|_| EnvFilter::new("munchymail=info,warn"))
+    };
+    let to_clients = matches!(cli.cmd, Cmd::Serve).then(|| {
+        fmt::layer()
+            .with_ansi(false)
+            .with_writer(serve::ClientLog)
+            .with_filter(filter())
+    });
+    tracing_subscriber::registry()
+        .with(
+            fmt::layer()
+                .with_ansi(io::stderr().is_terminal())
+                .with_writer(io::stderr)
+                .with_filter(filter()),
+        )
+        .with(to_clients)
+        .init();
+    if let Some(req) = request(&cli) {
+        let (mut out, mut err) = (io::stdout().lock(), io::stderr().lock());
+        match serve::forward(&cli.data, &req, &mut out, &mut err) {
+            Ok(Some(code)) => return ExitCode::from(code),
+            Ok(None) => {}
+            Err(e) => return ExitCode::from(exit_code(Err(e))),
+        }
+    }
+    let r = pollster::block_on(async {
+        let mut out = io::BufWriter::new(io::stdout().lock());
+        run(cli, &Stores::Direct, &mut out).await?;
+        Ok(out.flush()?)
+    });
+    ExitCode::from(exit_code(r))
 }
 
 #[cfg(test)]

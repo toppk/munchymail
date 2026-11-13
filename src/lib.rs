@@ -16,6 +16,7 @@ pub mod ocr;
 pub mod parts;
 pub mod query;
 pub mod report;
+pub mod serve;
 pub mod sort;
 pub mod source;
 pub mod store;

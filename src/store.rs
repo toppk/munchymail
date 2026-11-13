@@ -17,6 +17,9 @@ pub const INLINE_MAX: usize = 16 * 1024;
 
 const SCHEMA_VERSION: i64 = 9;
 
+/// How long a `connect`ed connection waits for another's write to finish.
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Upgrades from the previous version; index `i` brings version `i + 1` to `i + 2`.
 /// New tables and indexes need no entry: `SCHEMA` creates them if missing.
 const MIGRATIONS: [&str; 8] = [
@@ -279,7 +282,7 @@ async fn adds_existing_column(conn: &Connection, stmt: &str) -> Result<bool> {
 }
 
 pub struct Store {
-    _db: Database,
+    db: Database,
     pub conn: Connection,
     pub data_dir: PathBuf,
     /// External objects written since the last commit, not yet synced.
@@ -299,7 +302,7 @@ impl Store {
                 let e = anyhow::Error::from(e);
                 if held {
                     e.context(format!(
-                        "another munchymail process (import, index, ocr, or a long query) holds {}; wait for it, or see which with `fuser -v {}`",
+                        "another munchymail process (serve, import, index, ocr, or a long query) holds {}; wait for it, or see which with `fuser -v {}`",
                         path.display(),
                         path.display()
                     ))
@@ -355,11 +358,31 @@ impl Store {
         conn.execute_batch(LATE_SCHEMA).await?;
         conn.execute("COMMIT", ()).await?;
         Ok(Store {
-            _db: db,
+            db,
             conn,
             data_dir: data_dir.to_path_buf(),
             unsynced: Cell::new(false),
         })
+    }
+
+    /// Another connection to the same database, for a request of `serve`.
+    pub fn connect(&self) -> Result<Store> {
+        let conn = self.db.connect()?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        Ok(Store {
+            db: self.db.clone(),
+            conn,
+            data_dir: self.data_dir.clone(),
+            unsynced: Cell::new(false),
+        })
+    }
+
+    /// Roll back a transaction a failed command left open.
+    pub async fn settle(&self) -> Result<()> {
+        if !self.conn.is_autocommit()? {
+            self.rollback().await?;
+        }
+        Ok(())
     }
 
     pub fn content_path(&self, hash: &[u8]) -> PathBuf {

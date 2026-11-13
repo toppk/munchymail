@@ -201,6 +201,27 @@ that fixes them or lists valid values, e.g. an unknown `--origin` points
 at `origin list`, and a database held by another munchymail process says
 so.
 
+### serve: one process holding the databases
+
+A database can be open in only one process at a time, so one long command
+(an import, `ocr`) otherwise makes every other one wait or fail.
+`munchymail serve` opens every account and listens on `data/serve.sock`
+(mode 0600, and only the same user's clients are answered). While it runs, the
+other commands send their command line there and print what comes back
+(output, log lines, exit status), so reads run alongside a write and
+writes take turns. With no service running, commands open the database
+themselves as before. `diff`, `scan`, `describe` and `gmail auth`/`status`
+never use it.
+
+```
+munchymail serve &                      # until killed; logs to stderr
+munchymail search --text invoice -n 5   # answered by the service
+```
+
+The service uses its own `MUNCHYMAIL_LOG`, not the client's. It doesn't sync
+or scan on its own yet. The protocol (one JSON request line, then framed
+replies) is described at the top of `src/serve.rs`.
+
 ### search: list messages
 
 ```
@@ -405,7 +426,8 @@ words with confidence 40 or more; smaller images are icons and logos),
 each once per distinct file, sandboxed as above with 2 GiB and 120 s per
 image or 900 s per PDF. It takes the database only to load each chunk of
 64 and to record it and update the text index, so other commands can run
-in between (they fail with "File is locked" only during those moments);
+in between (they fail with "File is locked" only during those moments;
+under `serve` they just run);
 `ocr` itself waits up to 10 minutes for a lock another process holds. The
 whole archive here (86 scanned PDFs, about 1,000 images) took under 2
 minutes on 16 processes. Results go in

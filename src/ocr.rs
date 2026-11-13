@@ -54,11 +54,11 @@ pub struct Stats {
     pub failed: u64,
 }
 
-async fn open(data_dir: &Path) -> Result<Store> {
+async fn open(connect: &impl AsyncFn() -> Result<Store>) -> Result<Store> {
     let start = Instant::now();
     let mut warned = false;
     loop {
-        match Store::open(data_dir).await {
+        match connect().await {
             Ok(s) => return Ok(s),
             Err(e) if start.elapsed() < LOCK_WAIT => {
                 if !warned {
@@ -159,11 +159,17 @@ fn ocr(job: &Job, bytes: &[u8], tmp: &Path, tools: &(String, String)) -> Extract
 }
 
 /// OCR up to `limit` queued parts, `jobs` at a time, recording each chunk and
-/// bringing the text index up to date after it.
-pub async fn run(data_dir: &Path, limit: Option<usize>, jobs: usize) -> Result<Stats> {
+/// bringing the text index up to date after it. The database is reopened
+/// through `connect` for each step, so others can use it in between.
+pub async fn run(
+    connect: impl AsyncFn() -> Result<Store>,
+    data_dir: &Path,
+    limit: Option<usize>,
+    jobs: usize,
+) -> Result<Stats> {
     let t = Instant::now();
     let mut queue = {
-        let store = open(data_dir).await?;
+        let store = open(&connect).await?;
         queue(&store).await?
     };
     if let Some(n) = limit {
@@ -188,7 +194,7 @@ pub async fn run(data_dir: &Path, limit: Option<usize>, jobs: usize) -> Result<S
     for chunk in queue.chunks(CHUNK) {
         let mut inputs = Vec::with_capacity(chunk.len());
         {
-            let store = open(data_dir).await?;
+            let store = open(&connect).await?;
             let mut load = PartLoader::new(&store).await?;
             for j in chunk {
                 inputs.push(load.bytes(j.msg, j.ordinal).await?);
@@ -209,7 +215,7 @@ pub async fn run(data_dir: &Path, limit: Option<usize>, jobs: usize) -> Result<S
                 })
                 .collect()
         });
-        let store = open(data_dir).await?;
+        let store = open(&connect).await?;
         let mut rec = Recorder::new(&store).await?;
         store.begin().await?;
         for (j, e) in chunk.iter().zip(&results) {

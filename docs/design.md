@@ -107,7 +107,8 @@ messages with an index), and a separate `mbox-sort` binary that writes
 date-sorted copies (the first code that writes a mail format; never in
 place). Not yet: Maildir, fuzzier logical grouping, and everything from
 phase 2 on (see `docs/TODO.md`). Accounts: each mail account has its own
-data directory and aliases; Gmail is to come in through its API.
+data directory and aliases; Gmail comes in through its API. `serve` holds
+the databases and runs the CLI's commands sent over a Unix socket.
 
 ## Open questions
 
