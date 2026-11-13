@@ -4,13 +4,13 @@ As agreed with the machine's admin.
 
 | What | Where |
 |---|---|
-| Releases | `~/.local/lib/munchymail/releases/<version>-<shortsha>/{munchymail,mbox-sort}` |
+| Releases | `~/.local/lib/munchymail/releases/<version>-<shortsha>/{munchymail,mmadm,mbox-sort}` (`mmadm -> munchymail`) |
 | Current, previous | `~/.local/lib/munchymail/{current,previous} -> releases/…` (relative symlinks) |
-| CLI | `~/.local/bin/{munchymail,mbox-sort} -> ~/.local/lib/munchymail/current/…` |
+| CLI | `~/.local/bin/{munchymail,mmadm,mbox-sort} -> ~/.local/lib/munchymail/current/…` |
 | Config, credentials | `~/.config/munchymail/{config.toml,creds/}` |
 | Data root | `~/.local/share/munchymail/`, mode 0700 (`--data`, `MUNCHYMAIL_DATA`) |
 | Socket | `$XDG_RUNTIME_DIR/munchymail/serve.sock` (`MUNCHYMAIL_SOCKET`) |
-| Unit | `~/.config/systemd/user/munchymail.service`, from `contrib/` |
+| Unit | `~/.config/systemd/user/munchymail.service`, from `contrib/`; runs `mmadm serve` |
 
 The CLI is a symlink so it is always the same build as the service it talks
 to. `~/.local/bin` is on `PATH` only in login shells and the systemd user
@@ -63,7 +63,7 @@ would create an empty `~/.local/share/munchymail` first.
 4. `mv -T ~/src/munchymail/data ~/.local/share/munchymail` (same btrfs
    filesystem: a rename; `-T` never moves it *into* an existing directory,
    and fails if one with contents is there).
-5. `munchymail account list` and `munchymail --account me.example@gmail.com
+5. `mmadm account list` and `munchymail --account me.example@gmail.com
    stats` match the counts from before (19,516 messages).
 6. Check bwrap inside the unit's sandbox, with no munchymail or data
    (prints `bwrap-ok`; checked 2026-11-12):

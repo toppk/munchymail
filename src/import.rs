@@ -288,13 +288,13 @@ impl<'a> Importer<'a> {
             .await?;
         let Some(row) = rows.next().await? else {
             bail!(
-                "no origin labelled {label:?}; `munchymail origin list` lists them, `origin add` adds one"
+                "no origin labelled {label:?}; `mmadm origin list` lists them, `origin add` adds one"
             );
         };
         let origin_id: i64 = row.get(0)?;
         let root: String = row.get(1)?;
         if root.starts_with("gmail:") {
-            bail!("origin {label:?} is Gmail; `munchymail gmail sync` brings it up to date");
+            bail!("origin {label:?} is Gmail; `mmadm gmail sync` brings it up to date");
         }
         if row.get::<i64>(2)? != 0 {
             bail!(

@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS message (
 );
 CREATE INDEX IF NOT EXISTS message_body ON message (body_hash);
 
--- Every MIME leaf part of a message (`munchymail index`).
+-- Every MIME leaf part of a message (`mmadm index`).
 CREATE TABLE IF NOT EXISTS part (
     msg_id INTEGER NOT NULL,
     ordinal INTEGER NOT NULL,

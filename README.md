@@ -27,9 +27,14 @@ just check                     # fmt, clippy -D warnings, tests
 
 Use the release build; debug builds are much slower. The `justfile` has
 `build`, `check`, `run` (`just run search --count` = `munchymail search
---count`) and `install`. Installed, the CLI is `~/.local/bin/munchymail`;
-use that absolute path in scripts, cron and agents (see
-`docs/install.md`). The examples below call it as `munchymail`.
+--count`), `adm` (the same for `mmadm`) and `install`.
+
+The binary has two names. `munchymail` uses the archive (search, read,
+study, export); `mmadm`, a link to it, sets it up and keeps it (accounts,
+origins, imports, Gmail, the service, `sql`). Each refuses the other's
+commands and names the right one. Installed, they are
+`~/.local/bin/munchymail` and `~/.local/bin/mmadm`; use those absolute paths in
+scripts, cron and agents (see `docs/install.md`).
 
 ## Getting mail in
 
@@ -41,9 +46,9 @@ is only one. Aliases are the account's own addresses, as addresses or Sieve
 patterns:
 
 ```
-munchymail account add me@example.org      # creates data/me@example.org/
-munchymail alias add '*@example.org' me@old-isp.example
-munchymail account list                     # accounts and their aliases
+mmadm account add me@example.org      # creates data/me@example.org/
+mmadm alias add '*@example.org' me@old-isp.example
+mmadm account list                     # accounts and their aliases
 ```
 
 Gmail accounts sign in to Google with read-only access to mail and
@@ -53,10 +58,10 @@ OAuth client JSON (a Desktop app client) goes in
 token next to it, all readable only by you:
 
 ```
-munchymail account add me.example@gmail.com
-munchymail --account me.example@gmail.com gmail auth   # prints a link; approve in the browser
-munchymail --account me.example@gmail.com gmail status # address, message count, history id, labels
-munchymail --account me.example@gmail.com gmail sync   # new mail and label changes, then index
+mmadm account add me.example@gmail.com
+mmadm --account me.example@gmail.com gmail auth   # prints a link; approve in the browser
+mmadm --account me.example@gmail.com gmail status # address, message count, history id, labels
+mmadm --account me.example@gmail.com gmail sync   # new mail and label changes, then index
 ```
 
 `gmail auth` waits for Google's redirect on 127.0.0.1; with the browser on
@@ -89,15 +94,15 @@ charsets. Each Takeout copy joins its API copy's message when it pairs by
 thread id and Message-ID and differs only in those ways; both copies are
 kept, the API one is shown and indexed, and `fold` records the reason.
 `import` does this as it reads a Takeout, `gmail sync` for each new API
-copy, so the order doesn't matter; `munchymail reconcile` redoes it for
+copy, so the order doesn't matter; `mmadm reconcile` redoes it for
 everything and lists the copies that stay separate.
 
 Within an account:
 
 ```
-munchymail origin add mail /var/mail/me --host mailhost --note "live dovecot tree: INBOX + folders"
-munchymail origin list
-munchymail import                     # all origins; or: munchymail import mail
+mmadm origin add mail /var/mail/me --host mailhost --note "live dovecot tree: INBOX + folders"
+mmadm origin list
+mmadm import                     # all origins; or: mmadm import mail
 munchymail stats
 ```
 
@@ -133,10 +138,10 @@ Origins are keyed by root path. When mail moves, add a new origin for the
 new root and retire the old ones; their runs stay as history:
 
 ```
-munchymail origin add mail /var/mail/me --host mailhost --note "INBOX + folders"
-munchymail origin retire inbox          # was /var/mail/me, a single file
-munchymail origin retire home-mail      # was ~/mail
-munchymail origin retire --undo inbox   # if needed
+mmadm origin add mail /var/mail/me --host mailhost --note "INBOX + folders"
+mmadm origin retire inbox          # was /var/mail/me, a single file
+mmadm origin retire home-mail      # was ~/mail
+mmadm origin retire --undo inbox   # if needed
 ```
 
 A retired origin is skipped by `import`, refused when named, and ignored by
@@ -148,7 +153,7 @@ When the same files only change place (e.g. a backup filed under
 `~/mail-backups/`), keep the origin and repoint it instead:
 
 ```
-munchymail origin move spool-2021-07 ~/mail-backups/spool-2021-07-07/me
+mmadm origin move spool-2021-07 ~/mail-backups/spool-2021-07-07/me
 ```
 
 Global options: `--data DIR` (or `MUNCHYMAIL_DATA`, default `~/.local/share/munchymail`; `just run` and
@@ -197,7 +202,7 @@ There is no negation yet (see TODO), except within `--text`.
 
 ## Commands
 
-`munchymail describe` lists every command with its arguments, defaults and
+`munchymail describe` (or `mmadm describe`) lists that program's commands with their arguments, defaults and
 effect, generated from the same definitions that parse them (`--json` for
 one object; `describe search` for one command). The effect is `read` (reads
 `data/` only, or for `diff`/`scan` only the files named) or `write` (says
@@ -212,7 +217,7 @@ so.
 
 A database can be open in only one process at a time, so one long command
 (an import, `ocr`) otherwise makes every other one wait or fail.
-`munchymail serve` opens every account and listens on
+`mmadm serve` opens every account and listens on
 `$XDG_RUNTIME_DIR/munchymail/serve.sock` (or `$MUNCHYMAIL_SOCKET`; mode
 0600, and only the same user's clients are answered). Installed, it runs as
 the systemd user unit `munchymail` (`docs/install.md`). While it runs, the
@@ -224,7 +229,7 @@ root or there is no `XDG_RUNTIME_DIR` (cron, ssh without a session).
 `diff`, `scan`, `describe` and `gmail auth`/`status` never use it.
 
 ```
-munchymail serve &                      # until killed; logs to stderr
+mmadm serve &                      # until killed; logs to stderr
 munchymail search --text invoice -n 5   # answered by the service
 ```
 
@@ -440,15 +445,15 @@ made of each file is in the `extract` table (`ok`, `empty`, `truncated`,
 `timeout`, `failed: …`), e.g.:
 
 ```
-munchymail sql "SELECT tool, outcome, count(*) FROM extract GROUP BY 1, 2"
+mmadm sql "SELECT tool, outcome, count(*) FROM extract GROUP BY 1, 2"
 ```
 
 Images and scanned PDFs need OCR (English), which is slow, so it is a
 command of its own rather than part of `index`:
 
 ```
-munchymail ocr              # everything queued, half the CPUs at a time
-munchymail ocr -n 200 -j 8  # a bounded run
+mmadm ocr              # everything queued, half the CPUs at a time
+mmadm ocr -n 200 -j 8  # a bounded run
 ```
 
 It queues PDFs whose text layer came out empty (`ocrmypdf --force-ocr`,
@@ -496,7 +501,7 @@ munchymail show ID --where      # every origin/path/offset it was found at, and 
 ### diff: before/after check of one mbox (no database)
 
 ```
-munchymail diff BEFORE AFTER --mbox VARIANT [--moved-to MBOX ...] [--by KEY ...] [-n N] [--list]
+mmadm diff BEFORE AFTER --mbox VARIANT [--moved-to MBOX ...] [--by KEY ...] [-n N] [--list]
 ```
 
 `--mbox` (`dovecot` or `mboxrd`, as in the config above) is required here
@@ -511,7 +516,7 @@ the new copy gets new Dovecot headers), **removed, NOT FOUND**, and
 `report`; `--list` prints every message.
 
 ```
-$ munchymail diff ~/inbox-before-backfill-2026-10-06.mbox /var/mail/me/INBOX --mbox dovecot \
+$ mmadm diff ~/inbox-before-backfill-2026-10-06.mbox /var/mail/me/INBOX --mbox dovecot \
     --moved-to /var/mail/me/lists/github-project --by from:addr --by list-id
 before   81835  ~/inbox-before-backfill-2026-10-06.mbox
 after    62655  /var/mail/me/INBOX
@@ -603,8 +608,8 @@ left the mailbox are included and marked "gone" in the index.
 ### sql, scan
 
 ```
-munchymail sql "SELECT name, count(*) FROM header WHERE nth = 0 GROUP BY name ORDER BY 2 DESC LIMIT 10"
-munchymail scan --mbox dovecot --list /var/mail/me/Drafts   # split only, verify byte-exact, no database
+mmadm sql "SELECT name, count(*) FROM header WHERE nth = 0 GROUP BY name ORDER BY 2 DESC LIMIT 10"
+mmadm scan --mbox dovecot --list /var/mail/me/Drafts   # split only, verify byte-exact, no database
 ```
 
 `sql` takes one query (`SELECT`, `WITH`, `VALUES` or `EXPLAIN`) and runs it
@@ -632,7 +637,7 @@ Re-import after moving mail; earlier imports stay as older runs, so the
 index can compare where mail was with where it is now:
 
 ```
-munchymail import mail
+mmadm import mail
 munchymail changes --origin mail --by list-id               # moved/removed/added since the last import
 munchymail removals --moved false                           # anything found nowhere
 munchymail report --folder lists/github-project --current \

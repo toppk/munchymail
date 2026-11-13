@@ -4,7 +4,7 @@ Description=munchymail mail archive (CLI requests over a Unix socket)
 
 [Service]
 Type=simple
-ExecStart=%h/.local/lib/munchymail/current/munchymail serve
+ExecStart=%h/.local/lib/munchymail/current/mmadm serve
 RuntimeDirectory=munchymail
 RuntimeDirectoryMode=0700
 Environment=MUNCHYMAIL_LOG=munchymail=info,warn

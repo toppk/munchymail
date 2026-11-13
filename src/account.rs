@@ -55,7 +55,7 @@ pub fn resolve(root: &Path, account: Option<&str>) -> Result<PathBuf> {
             let a = validate(a)?;
             if !all.contains(&a) {
                 bail!(
-                    "no account {a} in {}; `munchymail account list` lists them, `account add` adds one",
+                    "no account {a} in {}; `mmadm account list` lists them, `account add` adds one",
                     root.display()
                 );
             }
@@ -64,7 +64,7 @@ pub fn resolve(root: &Path, account: Option<&str>) -> Result<PathBuf> {
         None => match &all[..] {
             [one] => Ok(root.join(one)),
             [] => bail!(
-                "no accounts in {}; add one with `munchymail account add ADDRESS`",
+                "no accounts in {}; add one with `mmadm account add ADDRESS`",
                 root.display()
             ),
             many => bail!(

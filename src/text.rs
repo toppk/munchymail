@@ -61,7 +61,7 @@ fn open(path: &Path) -> Result<(Index, Fields)> {
     let index = Index::open_in_dir(path)?;
     if index.schema() != schema {
         bail!(
-            "{} has another schema; delete it and run `munchymail index`",
+            "{} has another schema; delete it and run `mmadm index`",
             path.display()
         );
     }
@@ -251,10 +251,7 @@ impl TextQuery {
     pub fn new(data_dir: &Path, query: &str) -> Result<TextQuery> {
         let path = dir(data_dir);
         if !path.join("meta.json").exists() {
-            bail!(
-                "no text index in {}; run `munchymail index`",
-                path.display()
-            );
+            bail!("no text index in {}; run `mmadm index`", path.display());
         }
         let (index, f) = open(&path)?;
         let mut parser = QueryParser::for_index(&index, vec![f.subject, f.text]);

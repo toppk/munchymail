@@ -363,7 +363,7 @@ impl Filter {
                 .query("SELECT 1 FROM origin WHERE label = ?1", (o.as_str(),))
                 .await?;
             if rows.next().await?.is_none() {
-                bail!("no origin labelled {o:?}; `munchymail origin list` lists them");
+                bail!("no origin labelled {o:?}; `mmadm origin list` lists them");
             }
         }
         let sets = self.sets()?;

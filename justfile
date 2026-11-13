@@ -16,6 +16,11 @@ build:
 run *args: build
     target/release/munchymail "$@"
 
+# Run mmadm, the admin side of the same binary, e.g. `just adm origin list`.
+adm *args: build
+    ln -sf munchymail target/release/mmadm
+    target/release/mmadm "$@"
+
 # Format check, clippy with warnings as errors, tests.
 check:
     cargo fmt --check
@@ -37,10 +42,11 @@ install *flags:
     home="$HOME/.local/lib/munchymail"
     install -d "$home/releases/$name" "$HOME/.local/bin" "$HOME/.config/systemd/user"
     install -m 0755 target/release/munchymail target/release/mbox-sort "$home/releases/$name/"
+    ln -sfn munchymail "$home/releases/$name/mmadm"
     old=$(readlink "$home/current" || true)
     if [ -n "$old" ] && [ "$old" != "releases/$name" ]; then ln -sfn "$old" "$home/previous"; fi
     ln -sfn "releases/$name" "$home/current"
-    for b in munchymail mbox-sort; do
+    for b in munchymail mmadm mbox-sort; do
         [ -L "$HOME/.local/bin/$b" ] || [ -e "$HOME/.local/bin/$b" ] || ln -s "$home/current/$b" "$HOME/.local/bin/$b"
     done
     install -m 0644 contrib/munchymail.service "$HOME/.config/systemd/user/"

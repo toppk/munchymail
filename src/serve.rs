@@ -1,4 +1,4 @@
-//! `munchymail serve`: one process owns the account databases and runs CLI
+//! `mmadm serve`: one process owns the account databases and runs CLI
 //! commands sent over `$XDG_RUNTIME_DIR/munchymail/serve.sock`, so they no
 //! longer queue for the database lock. A request is one JSON line (`argv`,
 //! `cwd`, `account`, `data`); the reply is frames of a tag byte, a big-endian
@@ -242,14 +242,14 @@ pub fn forward(
         {
             return Ok(None);
         }
-        Err(e) => return Err(e).context("connecting to munchymail serve"),
+        Err(e) => return Err(e).context("connecting to mmadm serve"),
     };
     conn.write_all(req.to_line().as_bytes())?;
     let mut conn = BufReader::new(conn);
     loop {
         let mut head = [0u8; 5];
         conn.read_exact(&mut head)
-            .context("munchymail serve ended the request early; see its log")?;
+            .context("mmadm serve ended the request early; see its log")?;
         let mut bytes = vec![0; u32::from_be_bytes(head[1..].try_into()?) as usize];
         conn.read_exact(&mut bytes)?;
         match head[0] {
@@ -264,10 +264,10 @@ pub fn forward(
             }
             OTHER_DATA => {
                 let held = String::from_utf8_lossy(&bytes);
-                debug!(%held, "munchymail serve holds another data root; running here");
+                debug!(%held, "mmadm serve holds another data root; running here");
                 return Ok(None);
             }
-            t => bail!("unknown frame {t} from munchymail serve"),
+            t => bail!("unknown frame {t} from mmadm serve"),
         }
     }
 }

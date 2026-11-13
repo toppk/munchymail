@@ -109,60 +109,122 @@ fn leaves(cmd: &clap::Command) -> Vec<(String, &clap::Command)> {
     out
 }
 
-/// The command line's top-level commands by what they're for, with what the
-/// group is about for the long help.
-const GROUPS: &[(&str, &str, &[&str])] = &[
-    (
-        "Find and read",
-        "Search the archive and read what it finds.",
-        &["search", "read", "show", "export"],
-    ),
-    (
-        "Study headers",
-        "Which headers carry what, for writing Sieve rules against real mail.",
-        &["top", "names", "report", "profile", "attachments"],
-    ),
-    (
-        "Bring mail in",
-        "Mail sources are only read; everything is written to the data root.",
-        &["import", "gmail", "index", "reconcile", "ocr"],
-    ),
-    (
-        "Set up",
-        "Accounts, the addresses they send from, and where their mail is.",
-        &["account", "alias", "origin"],
-    ),
-    (
-        "History",
-        "How mailboxes changed between imports, or between two mbox files.",
-        &["changes", "removals", "record-removals", "diff"],
-    ),
-    (
-        "Plumbing",
-        "Counts, raw queries, checks, the service, and a description for scripts.",
-        &["stats", "sql", "scan", "describe", "serve"],
-    ),
-];
+/// Which program this is, by the name it was run as: `munchymail` to use the
+/// archive, `mmadm` (a link to the same binary) to set it up and keep it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Program {
+    User,
+    Admin,
+}
 
-const CONCEPTS: &str = "\
+impl Program {
+    fn current() -> Program {
+        let argv0 = std::env::args_os().next().unwrap_or_default();
+        match Path::new(&argv0).file_name() {
+            Some(n) if n == "mmadm" => Program::Admin,
+            _ => Program::User,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Program::User => "munchymail",
+            Program::Admin => "mmadm",
+        }
+    }
+
+    /// Its top-level commands by what they're for, with what each group is about.
+    fn groups(self) -> &'static [(&'static str, &'static str, &'static [&'static str])] {
+        match self {
+            Program::User => &[
+                (
+                    "Find and read",
+                    "Search the archive and read what it finds.",
+                    &["search", "read", "show", "export"],
+                ),
+                (
+                    "Study headers",
+                    "Which headers carry what, for writing Sieve rules against real mail.",
+                    &["top", "names", "report", "profile", "attachments"],
+                ),
+                (
+                    "History",
+                    "How mailboxes changed between imports.",
+                    &["changes", "removals"],
+                ),
+                (
+                    "About the archive",
+                    "Counts, and every command described for scripts and agents.",
+                    &["stats", "describe"],
+                ),
+            ],
+            Program::Admin => &[
+                (
+                    "Set up",
+                    "Accounts, the addresses they send from, and where their mail is.",
+                    &["account", "alias", "origin"],
+                ),
+                (
+                    "Bring mail in",
+                    "Mail sources are only read; everything is written to the data root.",
+                    &["import", "gmail", "index", "reconcile", "ocr"],
+                ),
+                (
+                    "History upkeep",
+                    "Recording removals, and comparing or checking mbox files directly.",
+                    &["record-removals", "diff", "scan"],
+                ),
+                (
+                    "Service and internals",
+                    "The service, raw SQL, and every command described for scripts.",
+                    &["serve", "sql", "describe"],
+                ),
+            ],
+        }
+    }
+
+    /// Whether `name`, a top-level command, is this program's.
+    fn has(self, name: &str) -> bool {
+        self.groups().iter().any(|g| g.2.contains(&name))
+    }
+
+    fn concepts(self) -> &'static str {
+        match self {
+            Program::User => {
+                "\
+How it fits together:
+  Messages  `search` lists copy ids; `read mN` reads message N however many
+            copies of it were stored.
+  Who       → and the recipients of mail you sent, ← and the sender of the rest.
+  Patterns  Sieve :matches, so * and ?, case-insensitive; without a wildcard
+            a pattern matches anywhere in the value.
+  Scripts   `munchymail describe --json` gives every command, argument and
+            effect; `search --json` and `read --json` for mail.
+  Setup     Accounts, origins, importing and the service are `mmadm`'s.
+
+Logging goes to stderr; MUNCHYMAIL_LOG (e.g. munchymail=debug) changes it."
+            }
+            Program::Admin => {
+                "\
 How it fits together:
   Accounts  One per mail address, each with its own database in the data root.
   Origins   Places mail is read from, never written; `import` keeps every copy
-            and where it was found.
-  Patterns  Sieve :matches, so * and ?, case-insensitive; without a wildcard
-            a pattern matches anywhere in the value.
-  Service   While `munchymail serve` runs (the systemd unit), commands go to
-            it, so they don't wait for each other.
-  Scripts   `munchymail describe --json` gives every command, argument and
-            effect; `search --json` and `read --json` for mail.
+            and where it was found. Each needs its mbox variant in config.toml.
+  Service   While `mmadm serve` runs (the systemd unit), commands from both
+            programs go to it, so reads don't wait for imports.
+  Using     Searching and reading are `munchymail`'s.
 
-Logging goes to stderr; MUNCHYMAIL_LOG (e.g. munchymail=debug) changes it.";
+Logging goes to stderr; MUNCHYMAIL_LOG (e.g. munchymail=debug) changes it."
+            }
+        }
+    }
+}
 
 /// The grouped command list; `long` adds what each group is for, each
 /// command's effect, and the subcommands.
-fn command_list(cmd: &clap::Command, long: bool) -> String {
+fn command_list(cmd: &clap::Command, program: Program, long: bool) -> String {
     let mut out = String::new();
-    for (title, about, names) in GROUPS {
+    for (title, about, names) in program.groups() {
         out.push_str(&format!("{title}:\n"));
         if long {
             out.push_str(&format!("  {about}\n"));
@@ -197,17 +259,51 @@ fn command_list(cmd: &clap::Command, long: bool) -> String {
     out
 }
 
-/// The command line as parsed: effects on each command, and the top-level
-/// help grouped, brief for -h and fuller for --help.
-fn command() -> clap::Command {
+/// The command line as `program` parses it: effects on each command, the
+/// other program's commands hidden, and the top-level help grouped, brief for
+/// -h and fuller for --help.
+fn command(program: Program) -> clap::Command {
     let cmd = Cli::command();
-    let (brief, long) = (command_list(&cmd, false), command_list(&cmd, true));
-    with_effects(cmd, "")
+    let brief = command_list(&cmd, program, false);
+    let long = command_list(&cmd, program, true);
+    let others: Vec<String> = cmd
+        .get_subcommands()
+        .map(|c| c.get_name().to_string())
+        .filter(|n| !program.has(n))
+        .collect();
+    let name = program.name();
+    let cmd = others.iter().fold(with_effects(cmd, ""), |cmd, n| {
+        cmd.mut_subcommand(n, |s| s.hide(true))
+    });
+    let about = match program {
+        Program::User => "Offline mail archive: search, read, study",
+        Program::Admin => "Set up and keep munchymail's mail archive: accounts, origins, imports",
+    };
+    cmd.name(name)
+        .bin_name(name)
+        .about(about)
         .help_template("{about-with-newline}\n{usage-heading} {usage}\n\n{before-help}Options:\n{options}{after-help}")
         .before_help(brief)
         .before_long_help(long)
-        .after_help("`munchymail --help` says more; `munchymail help COMMAND` for one command.")
-        .after_long_help(CONCEPTS)
+        .after_help(format!("`{name} --help` says more; `{name} help COMMAND` for one command."))
+        .after_long_help(program.concepts())
+}
+
+/// The other program's commands are refused, saying which program has them.
+fn check_program(program: Program, matches: &clap::ArgMatches) -> Result<()> {
+    if let Some((name, _)) = matches.subcommand()
+        && !program.has(name)
+    {
+        let other = match program {
+            Program::User => Program::Admin,
+            Program::Admin => Program::User,
+        };
+        bail!(
+            "`{name}` is a command of {0}: run `{0} {name}`",
+            other.name()
+        );
+    }
+    Ok(())
 }
 
 /// Put each command's effect first in its `--help` line.
@@ -270,11 +366,12 @@ fn wrap(text: &str, indent: usize) -> String {
     lines.join("\n")
 }
 
-fn describe(only: &[String], json: bool, out: &mut impl Write) -> Result<()> {
+fn describe(program: Program, only: &[String], json: bool, out: &mut impl Write) -> Result<()> {
     let root = Cli::command();
     let want = only.join(" ");
     let commands: Vec<_> = leaves(&root)
         .into_iter()
+        .filter(|(p, _)| program.has(p.split(' ').next().unwrap_or("")))
         .filter(|(p, _)| want.is_empty() || *p == want || p.starts_with(&format!("{want} ")))
         .map(|(path, c)| {
             let (kind, detail) = effect_of(&path);
@@ -290,7 +387,10 @@ fn describe(only: &[String], json: bool, out: &mut impl Write) -> Result<()> {
         })
         .collect();
     if commands.is_empty() {
-        bail!("no command {want:?}; `munchymail describe` lists them");
+        bail!(
+            "no command {want:?}; `{} describe` lists them",
+            program.name()
+        );
     }
     let v = serde_json::json!({
         "type": "describe",
@@ -1090,7 +1190,7 @@ async fn alias(store: &Store, cmd: AliasCmd, out: &mut impl Write) -> Result<()>
         let p = p.trim().to_ascii_lowercase();
         let n = store.conn.execute(sql, (p.as_str(), now())).await?;
         if n == 0 && verb == "removed" {
-            bail!("no alias {p:?}; `munchymail alias list` lists them");
+            bail!("no alias {p:?}; `mmadm alias list` lists them");
         }
         writeln!(out, "{verb} {p}")?;
     }
@@ -1110,7 +1210,7 @@ async fn reconcile(store: &Store, out: &mut impl Write) -> Result<()> {
         );
     }
     let Some(gmail) = takeout::gmail_origin(store, &address).await? else {
-        bail!("{address} has no Gmail origin yet; `munchymail gmail sync` makes one");
+        bail!("{address} has no Gmail origin yet; `mmadm gmail sync` makes one");
     };
     let mut ids = Vec::new();
     for origin in takeout::origin_ids(store, &labels).await? {
@@ -1206,7 +1306,7 @@ async fn origin(store: &Store, cmd: OriginCmd, out: &mut impl Write) -> Result<(
                 .await?;
             store.commit().await?;
             if n == 0 {
-                bail!("no origin labelled {label:?}; `munchymail origin list` lists them");
+                bail!("no origin labelled {label:?}; `mmadm origin list` lists them");
             }
             writeln!(out, "origin {label} -> {}", root.display())?;
         }
@@ -1221,7 +1321,7 @@ async fn origin(store: &Store, cmd: OriginCmd, out: &mut impl Write) -> Result<(
                 .await?;
             store.commit().await?;
             if n == 0 {
-                bail!("no origin labelled {label:?}; `munchymail origin list` lists them");
+                bail!("no origin labelled {label:?}; `mmadm origin list` lists them");
             }
             let state = if undo { "active again" } else { "retired" };
             writeln!(out, "origin {label} {state}")?;
@@ -1602,13 +1702,13 @@ async fn warn_unindexed(store: &Store, filter: &Filter) -> Result<()> {
     if !(filter.attachments.is_empty() && filter.attachment_names.is_empty()) {
         let n = parts::pending(store).await?;
         if n > 0 {
-            warn!("{n} messages have no part index yet; run `munchymail index`");
+            warn!("{n} messages have no part index yet; run `mmadm index`");
         }
     }
     if filter.text.is_some() {
         let n = text::pending(store).await?;
         if n > 0 {
-            warn!("{n} messages are not in the text index yet; run `munchymail index`");
+            warn!("{n} messages are not in the text index yet; run `mmadm index`");
         }
     }
     Ok(())
@@ -1624,7 +1724,7 @@ async fn attachments(
 ) -> Result<()> {
     let n = parts::pending(store).await?;
     if n > 0 {
-        warn!("{n} messages have no part index yet; run `munchymail index`");
+        warn!("{n} messages have no part index yet; run `mmadm index`");
     }
     let set = filter.materialize(&store.conn).await?;
     let groups = parts::report(store, set, by, all).await?;
@@ -2191,7 +2291,7 @@ async fn compare(store: &Store, runs: Runs) -> Result<(Vec<i64>, Vec<i64>, chang
                 [&rows.first(), &rows.get(1)].map(|r| r.map_or(Value::Null, |r| r[0].clone()))
             else {
                 bail!(
-                    "origin {label:?} has fewer than two finished runs; `munchymail origin list` shows origins and their last import"
+                    "origin {label:?} has fewer than two finished runs; `mmadm origin list` shows origins and their last import"
                 );
             };
             (vec![b], vec![a])
@@ -2448,7 +2548,7 @@ fn handle(
 ) -> u8 {
     let r = (|| {
         let argv = std::iter::once("munchymail".to_string()).chain(req.argv);
-        let matches = command().try_get_matches_from(argv)?;
+        let matches = command(Program::User).try_get_matches_from(argv)?;
         let mut cli = Cli::from_arg_matches(&matches)?;
         if matches!(cli.cmd, Cmd::Serve) {
             bail!("already serving");
@@ -2525,7 +2625,7 @@ async fn run(cli: Cli, stores: &Stores, out: &mut impl Write) -> Result<()> {
         return Ok(out.flush()?);
     }
     if let Cmd::Describe { command, json } = &cli.cmd {
-        describe(command, *json, out)?;
+        describe(Program::current(), command, *json, out)?;
         return Ok(out.flush()?);
     }
     if let Cmd::Scan { list, mbox, paths } = &cli.cmd {
@@ -2857,7 +2957,12 @@ fn request(cli: &Cli) -> Option<serve::Request> {
 }
 
 fn main() -> ExitCode {
-    let matches = command().get_matches();
+    let program = Program::current();
+    let matches = command(program).get_matches();
+    if let Err(e) = check_program(program, &matches) {
+        eprintln!("error: {e}");
+        return ExitCode::from(2);
+    }
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     let filter = || {
         EnvFilter::try_from_env("MUNCHYMAIL_LOG")
@@ -2906,21 +3011,48 @@ mod tests {
             assert!(effect(&path).is_some(), "{path} has no effect in effect()");
         }
         let mut out = Vec::new();
-        describe(&["origin".into(), "add".into()], true, &mut out).unwrap();
+        describe(
+            Program::Admin,
+            &["origin".into(), "add".into()],
+            true,
+            &mut out,
+        )
+        .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["commands"][0]["effect"], "write");
-        assert!(describe(&["nope".into()], false, &mut out).is_err());
+        assert!(describe(Program::User, &["nope".into()], false, &mut out).is_err());
+        assert!(describe(Program::User, &["origin".into()], false, &mut out).is_err());
     }
 
     #[test]
-    fn every_command_is_in_one_help_group() {
-        command().debug_assert();
-        let grouped: Vec<&str> = GROUPS.iter().flat_map(|g| g.2.iter().copied()).collect();
-        for sub in Cli::command().get_subcommands() {
-            let n = grouped.iter().filter(|g| **g == sub.get_name()).count();
-            assert_eq!(n, 1, "{} is in {n} help groups", sub.get_name());
+    fn every_command_is_in_one_program_and_group() {
+        for program in [Program::User, Program::Admin] {
+            command(program).debug_assert();
         }
-        assert_eq!(grouped.len(), Cli::command().get_subcommands().count());
+        for sub in Cli::command().get_subcommands() {
+            let name = sub.get_name();
+            let n = |p: Program| {
+                p.groups()
+                    .iter()
+                    .flat_map(|g| g.2.iter())
+                    .filter(|g| **g == name)
+                    .count()
+            };
+            let (user, admin) = (n(Program::User), n(Program::Admin));
+            let both = name == "describe";
+            assert!(
+                user <= 1 && admin <= 1,
+                "{name} is in two groups of one program"
+            );
+            assert_eq!(
+                user + admin,
+                if both { 2 } else { 1 },
+                "{name} is in {user} + {admin} programs"
+            );
+        }
+        let m = command(Program::User).get_matches_from(["munchymail", "import"]);
+        assert!(check_program(Program::User, &m).is_err());
+        assert!(check_program(Program::Admin, &m).is_ok());
     }
 
     #[test]

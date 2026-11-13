@@ -224,7 +224,7 @@ fn redirected(listener: TcpListener) -> Result<String> {
         }
     });
     rx.recv_timeout(SIGN_IN_WAIT)
-        .context("no sign-in within 10 minutes; run `munchymail gmail auth` again")
+        .context("no sign-in within 10 minutes; run `mmadm gmail auth` again")
 }
 
 /// Sign `address` in to Google and keep its refresh token in the creds
@@ -267,9 +267,7 @@ pub fn authorize(address: &str, client: Option<&Path>, out: &mut impl Write) -> 
     out.flush()?;
     let back = redirected(listener)?;
     if param(&back, "state").as_deref() != Some(state.as_str()) {
-        bail!(
-            "the redirect's state does not match this sign-in; run `munchymail gmail auth` again"
-        );
+        bail!("the redirect's state does not match this sign-in; run `mmadm gmail auth` again");
     }
     if let Some(e) = param(&back, "error") {
         bail!("Google did not grant access: {e}");
@@ -289,7 +287,7 @@ pub fn authorize(address: &str, client: Option<&Path>, out: &mut impl Write) -> 
     let granted: Vec<&str> = t["scope"].as_str().unwrap_or("").split(' ').collect();
     if !granted.contains(&GMAIL_READ) {
         bail!(
-            "Gmail read access was not granted (its box was unticked?); run `munchymail gmail auth` again and allow it"
+            "Gmail read access was not granted (its box was unticked?); run `mmadm gmail auth` again and allow it"
         );
     }
     if !granted.contains(&CONTACTS_READ) {
@@ -297,7 +295,7 @@ pub fn authorize(address: &str, client: Option<&Path>, out: &mut impl Write) -> 
     }
     let refresh = t["refresh_token"]
         .as_str()
-        .context("Google sent no refresh token; run `munchymail gmail auth` again")?;
+        .context("Google sent no refresh token; run `mmadm gmail auth` again")?;
     let access = t["access_token"]
         .as_str()
         .context("Google sent no access token")?;
@@ -356,7 +354,7 @@ impl Session {
         let raw = match std::fs::read_to_string(&path) {
             Ok(r) => r,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                bail!("{address} has no Google sign-in; run `munchymail gmail auth`")
+                bail!("{address} has no Google sign-in; run `mmadm gmail auth`")
             }
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
@@ -396,7 +394,7 @@ impl Session {
         ])?;
         let t = json_of(r, "refreshing the Google token").map_err(|e| {
             e.context(
-                "the sign-in may be revoked, or expired (apps left in Testing lose it after 7 days); run `munchymail gmail auth` again",
+                "the sign-in may be revoked, or expired (apps left in Testing lose it after 7 days); run `mmadm gmail auth` again",
             )
         })?;
         let token = t["access_token"]

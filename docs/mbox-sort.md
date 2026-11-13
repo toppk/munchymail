@@ -63,7 +63,7 @@ cd /var/mail/me/lists
 doveadm mailbox path -u me -t index lists/github-project   # confirm the index dir below
 sudo systemctl stop dovecot          # no IMAP clients, no LMTP delivery (mail queues in postfix)
 mbox-sort github-project github-project.sorted
-munchymail diff --mbox dovecot github-project github-project.sorted
+mmadm diff --mbox dovecot github-project github-project.sorted
 #   expect: headers changed = every message (x-uid; one also x-imapbase),
 #           removed NOT FOUND = 1 (the internal message), added = 0
 mv github-project github-project.before-sort
