@@ -44,19 +44,30 @@ tokens itself, `~/.config/munchymail/creds` joins `ReadWritePaths`.
 
 ## Moving the data from the checkout (once, when the owner asks)
 
-After the home filesystem's snapshots have run at least once:
+After the home filesystem's snapshots have run at least once. Start no `serve`
+(and no unit) before step 4: the unit's `ReadWritePaths` and `serve` itself
+would create an empty `~/.local/share/munchymail` first.
 
-1. `just install`; run one OCR job and one document extraction through the
-   service to check bwrap works inside the unit.
-2. Nothing holds the databases: `fuser -v ~/src/munchymail/data/*/email.sqlite`.
+1. `just install` (installs the unit, doesn't start it).
+2. Nothing holds the databases: `systemctl --user is-active munchymail` says
+   `inactive`, and `fuser -v ~/src/munchymail/data/*/email.sqlite`
+   lists nothing.
 3. `rm -f ~/src/munchymail/data/serve.sock`
-4. `mv ~/src/munchymail/data ~/.local/share/munchymail` (same btrfs
-   filesystem: a rename).
+4. `mv -T ~/src/munchymail/data ~/.local/share/munchymail` (same btrfs
+   filesystem: a rename; `-T` never moves it *into* an existing directory,
+   and fails if one with contents is there).
 5. `munchymail account list` and `munchymail --account me.example@gmail.com
    stats` match the counts from before (19,516 messages).
-6. `systemctl --user enable --now munchymail`; `munchymail search -n 3` is
-   then answered by it (`journalctl --user -u munchymail`).
-7. Optionally `ln -s ~/.local/share/munchymail ~/src/munchymail/data`.
+6. `systemctl --user daemon-reload && systemctl --user enable --now
+   munchymail`; `munchymail search -n 3` is then answered by it
+   (`journalctl --user -u munchymail`).
+7. Check bwrap works inside the unit. `ocr` and document extraction only
+   run tools on parts not yet done, so check at the first import or sync
+   that brings a PDF or image (or `munchymail ocr -n 1` if anything is
+   queued): `journalctl --user -u munchymail` shows the run, and no new
+   bwrap failures appear in `munchymail sql "SELECT outcome, count(*) FROM
+   extract GROUP BY 1"`.
+8. Optionally `ln -s ~/.local/share/munchymail ~/src/munchymail/data`.
 
 Roll back: stop the unit, `mv` the directory back, run with `--data data`.
 Development runs from the checkout use the live data by default; point
