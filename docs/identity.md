@@ -21,7 +21,10 @@ the rules and the reasoning.
 
 ## What is stored
 
-- **Every copy, byte for byte.** Nothing is rewritten: no line-ending
+- **Every copy, byte for byte**, as delivered by its origin: for an mbox,
+  after it is cut out of the file (below), which removes the separator and,
+  in mboxrd mode, one `>` from quoted `From ` lines; the file itself isn't
+  kept. Nothing is rewritten: no line-ending
   change, no header removal, no re-encoding. Header and body are stored
   as separate objects named by their SHA-256; identical objects are
   stored once.
@@ -177,8 +180,14 @@ Detectors that have worked:
 
 - **False merges** (two different emails made one message) need equal
   Message-ID, equal Date and bodies that differ only in line endings,
-  NUL vs 0x80, or one final newline. We consider this implausible for
-  distinct emails. A merge moves copies, never deletes bytes.
+  NUL vs 0x80, or one final newline. Because a missing Message-ID or Date
+  matches another missing one, mail with neither and an identical body
+  merges with nothing else to separate it: this has happened (spam from a
+  template, delivered four times months apart). A merge moves copies,
+  never deletes bytes.
+- **A rule change can only merge.** The migration recomputes one key per
+  message; a stricter rule that should split a message would need each
+  copy re-keyed, which isn't implemented.
 - **Missed merges** (one email as two messages) remain for re-encoded
   copies, damaged copies, and copies whose Message-ID or Date parse
   differently. They show as duplicates in search; nothing is lost.
