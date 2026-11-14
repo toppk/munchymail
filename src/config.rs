@@ -44,7 +44,7 @@ impl Config {
         Config::parse(path, &text)
     }
 
-    fn parse(path: PathBuf, text: &str) -> Result<Config> {
+    pub(crate) fn parse(path: PathBuf, text: &str) -> Result<Config> {
         let table = text
             .parse::<toml::Table>()
             .with_context(|| format!("parsing {}", path.display()))?;
@@ -124,6 +124,11 @@ impl Config {
             .or_else(|| self.table.get("listing"))?
             .get("columns")?
             .as_str()
+    }
+
+    /// `[accounts."ACCOUNT".origins."ORIGIN"]`, if the file has it.
+    pub fn origin(&self, account: &str, origin: &str) -> Option<&toml::Table> {
+        self.origins(account)?.get(origin)?.as_table()
     }
 
     pub fn has_origin(&self, account: &str, origin: &str) -> bool {

@@ -296,6 +296,9 @@ impl<'a> Importer<'a> {
         if root.starts_with("gmail:") {
             bail!("origin {label:?} is Gmail; `mmadm gmail sync` brings it up to date");
         }
+        if crate::imap::is_root(&root) {
+            bail!("origin {label:?} is an IMAP server; `munchymail sync` brings it up to date");
+        }
         if row.get::<i64>(2)? != 0 {
             bail!(
                 "origin {label:?} is retired ({root} may now be another origin's); undo with `origin retire --undo {label}`"
@@ -503,4 +506,74 @@ impl<'a> Importer<'a> {
         );
         Ok(content_id)
     }
+}
+
+/// Record run `run_id`'s sightings of listings that aren't files (Gmail labels,
+/// IMAP folders): each path's (id, artifact) entries as one content of
+/// `format`, reused when the same listing was seen before.
+pub(crate) async fn sight_listings(
+    store: &Store,
+    origin_id: i64,
+    run_id: i64,
+    format: &str,
+    paths: &std::collections::BTreeMap<String, Vec<(String, i64)>>,
+) -> Result<()> {
+    use sha2::Digest;
+    let mut sel = store
+        .conn
+        .prepare("SELECT content_id FROM file_content WHERE hash = ?1")
+        .await?;
+    let mut ins_content = store
+        .conn
+        .prepare(
+            "INSERT INTO file_content
+             (hash, length, head_hash, format, message_count, preamble_length, parent_content_id)
+             VALUES (?1, ?2, ?1, ?4, ?3, 0, NULL)",
+        )
+        .await?;
+    let mut ins_obs = store
+        .conn
+        .prepare(
+            "INSERT INTO observation
+             (content_id, ordinal, offset, artifact_id, from_line, separator, used_content_length)
+             VALUES (?1, ?2, ?2, ?3, ?4, x'', 0)",
+        )
+        .await?;
+    let mut ins_sighting = store
+        .conn
+        .prepare(
+            "INSERT INTO file_sighting
+             (run_id, origin_id, path, content_id, dev, ino, mtime_ns, ctime_ns, changed_during_read)
+             VALUES (?1, ?2, ?3, ?4, 0, 0, 0, 0, 0)",
+        )
+        .await?;
+    for (path, entries) in paths {
+        let listing: String = entries
+            .iter()
+            .map(|(id, a)| format!("{id} {a}\n"))
+            .collect();
+        let hash = sha2::Sha256::digest(format!("{format}\n{listing}").as_bytes()).to_vec();
+        let mut rows = sel.query((hash.clone(),)).await?;
+        let known: Option<i64> = rows.next().await?.map(|r| r.get(0)).transpose()?;
+        drop(rows);
+        let content = match known {
+            Some(c) => c,
+            None => {
+                ins_content
+                    .execute((hash, listing.len() as i64, entries.len() as i64, format))
+                    .await?;
+                let c = store.conn.last_insert_rowid();
+                for (i, (id, a)) in entries.iter().enumerate() {
+                    ins_obs
+                        .execute((c, i as i64, *a, turso::Value::Blob(id.as_bytes().to_vec())))
+                        .await?;
+                }
+                c
+            }
+        };
+        ins_sighting
+            .execute((run_id, origin_id, path.as_str(), content))
+            .await?;
+    }
+    Ok(())
 }

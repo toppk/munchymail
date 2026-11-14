@@ -176,14 +176,20 @@ commands use it automatically; with several, pass `--account ADDRESS` or set
 
 ## 2. Tell it where mail is
 
-An origin is a place mail is found: a directory tree of mbox files, or a
-single mbox file. Registering one reads nothing yet:
+An origin is a place mail is found: an IMAP server, a directory tree of
+mbox files, or a single mbox file. Registering one reads nothing yet:
 
 ```
-mmadm origin add mailhost-dovecot ~/mail --role live --note "live mbox tree"
+mmadm origin add mailhost-imap imaps://imap.example.org --role live --note "the live mailbox"
+mmadm origin add 2026-11-01-mailhost-mbox ~/mail --role snapshot --note "the same mailbox's files"
 mmadm origin add 2019-03-02-laptop-mail ~/mail-backups/2019-03-02-laptop-mail/extracted/mail \
     --role snapshot --note "old laptop's ~/mail, found 2026; date is the newest file's mtime"
 ```
+
+A live mailbox is best read over IMAP: the service follows it as it
+changes, without locking its files (`docs/sync.md` has the `config.toml`
+section, including mutual TLS and a password from the keyring). Its mbox
+files, if you have them, are worth importing now and then as a snapshot.
 
 The role says what an origin is: `live` for a mailbox still in use,
 `snapshot` for a copy of one as it was, `export` for a service's export
@@ -197,7 +203,7 @@ long `origin list` readable. We suggest:
 
 | Kind | Pattern | Examples |
 |---|---|---|
-| A live mailbox | `HOST-STORE` | `mailhost-dovecot`, `gmail` |
+| A live mailbox | `HOST-STORE` | `mailhost-imap`, `mailhost-dovecot`, `gmail` |
 | A copy (backup, found file) | `YYYY-MM-DD-HOST-WHAT` | `2021-07-07-mailhost-spool`, `2019-03-02-laptop-mail` |
 | An export | `YYYY-MM-DD-SERVICE` | `2026-11-12-takeout` |
 

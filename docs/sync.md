@@ -1,8 +1,10 @@
 # Keeping mail current
 
-The service (`mmadm serve`) keeps live origins current itself. Built: Gmail
-every 3 minutes, `munchymail sync`, failure handling. Not yet: watching mbox
-trees; until then they are imported by `sync` or `mmadm import`.
+The service (`mmadm serve`) keeps live origins current itself: Gmail and
+IMAP every 3 minutes, an IMAP INBOX at once through IDLE, `munchymail sync`
+on request, and failure handling. A live mbox tree is imported only by
+`sync` or `mmadm import`; serve its mail over IMAP instead and keep the tree
+as a snapshot.
 
 ## Which origins are synced
 
@@ -28,20 +30,56 @@ live and leaves the rest unset.
   agents may run it. An origin checked in the last 15 s (Gmail) or 60 s
   (an mbox tree) is skipped, so repeated syncs queue and then do nothing.
 
-## mbox trees (not built)
+## IMAP
+
+An IMAP origin's root is the server's URL; how to log in is in
+`config.toml`:
+
+```
+mmadm origin add mailhost-imap imaps://imap.example.org --role live
+```
+```toml
+[accounts."me@example.org".origins."mailhost-imap"]
+imap = "imaps://imap.example.org"
+user = "me"
+# Run at each login; the password stays in memory. A failure (e.g. a keyring
+# still locked after a reboot) is retried, not a reason to stop the origin.
+password_command = ["secret-tool", "lookup", "service", "imap", "user", "me"]
+# For mutual TLS, and a server certificate from a private CA:
+client_cert = "~/.config/munchymail/creds/imap.cert.pem"
+client_key = "~/.config/munchymail/creds/imap.key.pem"
+server_cert = "/etc/pki/my-ca.pem"
+# Optional: only these folders; a trailing * matches the rest of a name.
+# folders = ["INBOX", "lists/*"]
+```
+
+- Read-only: folders are opened with EXAMINE and messages fetched with
+  BODY.PEEK, so nothing on the server changes, not even \Seen.
+- Each check runs STATUS on every folder and opens only the ones whose
+  UIDVALIDITY, UIDNEXT or HIGHESTMODSEQ moved. With QRESYNC the server
+  reports what was expunged and which flags changed since the last check;
+  new UIDs are then fetched in batches of 100.
+- The first sync fetches every message once. IMAP copies differ from the
+  mbox copies only in Dovecot's own headers, so they join the same
+  messages.
+- A folder's progress is saved only after its messages are; an interrupted
+  sync redoes the folder and skips what it already stored.
+- Like Gmail, a check that finds nothing new records no import run; each
+  run's sightings are the folders, so `--folder`, `--current`, `changes`
+  and removals work as for mbox.
+- The service holds IDLE on the INBOX on a second connection and checks the
+  origin about 5 s after any change there. Mail filed into other folders
+  (by Sieve, say) is found by the 3-minute check. IMAP NOTIFY would cover
+  every folder at once; it needs support in imap-codec and io-imap first.
+
+## Why not watch mbox trees directly
 
 A rescan re-reads every file under Dovecot's shared lock. Measured on a
 5 GB tree: 13 s with nothing new, and the lock on a multi-gigabyte INBOX held
-for 8–9 s, during which Dovecot can't deliver to it. Too slow to run on
-every change, so live mbox origins aren't on the timer. Two ways forward:
-
-- **Tail reads:** inotify with a 15 s settle (2 minutes at most); a file
-  that only grew is read from where it ended, under a short lock; unchanged
-  files aren't opened. These partial scans never record removals; a nightly
-  full scan catches Dovecot's in-place header rewrites and does.
-- **IMAP as the live source**, as the Gmail API is for Gmail: NOTIFY or IDLE
-  says when mail arrives, and only new messages are fetched. The mbox tree
-  then becomes a periodic snapshot, as a Takeout is for Gmail.
+for 8–9 s, during which Dovecot can't deliver to it. Reading only what was
+appended would shorten the lock but miss Dovecot's in-place header
+rewrites. IMAP gives the same changes exactly, through Dovecot's own
+locking.
 
 ## Failures
 

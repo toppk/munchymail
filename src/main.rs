@@ -902,7 +902,8 @@ enum OriginCmd {
     Add {
         /// Short unique name used by --origin and import.
         label: String,
-        /// Directory tree (walked, dot-entries skipped) or a single mbox file.
+        /// Directory tree (walked, dot-entries skipped), a single mbox file, or
+        /// an IMAP server (`imaps://host`), read-only.
         root: PathBuf,
         /// Machine the origin lives on or came from.
         #[arg(long)]
@@ -1238,6 +1239,7 @@ async fn overview(root: &Path, stores: &Stores, json: bool, out: &mut impl Write
                     serde_json::json!({
                         "label": text(&r[0]),
                         "gmail": text(&r[1]).starts_with("gmail:"),
+                        "imap": munchymail::imap::is_root(&text(&r[1])),
                         "last_import": int(&r[2]).filter(|&t| t > 0).map(iso),
                         "retired": int(&r[3]).map(iso),
                         "role": (!text(&r[4]).is_empty()).then(|| text(&r[4])),
@@ -1266,11 +1268,12 @@ async fn overview(root: &Path, stores: &Stores, json: bool, out: &mut impl Write
             .unwrap_or(0);
         for r in &origins {
             let label = text(&r[0]);
-            let verb = if text(&r[1]).starts_with("gmail:") {
-                "synced"
-            } else {
-                "imported"
-            };
+            let verb =
+                if text(&r[1]).starts_with("gmail:") || munchymail::imap::is_root(&text(&r[1])) {
+                    "synced"
+                } else {
+                    "imported"
+                };
             let when = match int(&r[2]).filter(|&t| t > 0) {
                 Some(t) => format!("{verb} {} UTC ({})", ymd_hm(t), ago(t)),
                 None => format!("never {verb}"),
@@ -1465,12 +1468,7 @@ async fn origin(store: &Store, cmd: OriginCmd, out: &mut impl Write) -> Result<(
             note,
             role,
         } => {
-            let root = root
-                .canonicalize()
-                .with_context(|| format!("resolving {}", root.display()))?;
-            if root.starts_with(store.data_dir.canonicalize()?) {
-                bail!("origin {} is inside the data directory", root.display());
-            }
+            let root = origin_root(store, &root)?;
             store.begin().await?;
             store
                 .conn
@@ -1479,7 +1477,7 @@ async fn origin(store: &Store, cmd: OriginCmd, out: &mut impl Write) -> Result<(
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     (
                         label.as_str(),
-                        root.to_string_lossy().as_ref(),
+                        root.as_str(),
                         host,
                         note,
                         now(),
@@ -1489,10 +1487,19 @@ async fn origin(store: &Store, cmd: OriginCmd, out: &mut impl Write) -> Result<(
                 .await
                 .with_context(|| format!("adding origin {label:?}"))?;
             store.commit().await?;
-            writeln!(out, "added origin {label} -> {}", root.display())?;
+            writeln!(out, "added origin {label} -> {root}")?;
             let config = Config::load()?;
             let address = account_address(store);
-            if config.mbox(address, &label).is_err() {
+            if munchymail::imap::is_root(&root) {
+                if config.origin(address, &label).is_none() {
+                    writeln!(
+                        out,
+                        "before `munchymail sync`, say how to log in, in {} (docs/sync.md):\n\n{}",
+                        config.path.display(),
+                        imap_entry(address, &label, &root)
+                    )?;
+                }
+            } else if config.mbox(address, &label).is_err() {
                 writeln!(
                     out,
                     "before `import`, say how its mbox files quote `From ` lines in {}:\n\n{}",
@@ -1502,25 +1509,20 @@ async fn origin(store: &Store, cmd: OriginCmd, out: &mut impl Write) -> Result<(
             }
         }
         OriginCmd::Move { label, root } => {
-            let root = root
-                .canonicalize()
-                .with_context(|| format!("resolving {}", root.display()))?;
-            if root.starts_with(store.data_dir.canonicalize()?) {
-                bail!("origin {} is inside the data directory", root.display());
-            }
+            let root = origin_root(store, &root)?;
             store.begin().await?;
             let n = store
                 .conn
                 .execute(
                     "UPDATE origin SET root = ?1 WHERE label = ?2",
-                    (root.to_string_lossy().as_ref(), label.as_str()),
+                    (root.as_str(), label.as_str()),
                 )
                 .await?;
             store.commit().await?;
             if n == 0 {
                 bail!("no origin labelled {label:?}; `mmadm origin list` lists them");
             }
-            writeln!(out, "origin {label} -> {}", root.display())?;
+            writeln!(out, "origin {label} -> {root}")?;
         }
         OriginCmd::Role { label, role } => {
             store.begin().await?;
@@ -3069,10 +3071,42 @@ fn absolutize(cmd: &mut Cmd, cwd: &Path) {
         Cmd::Export {
             output: Some(p), ..
         } => p,
-        Cmd::Origin(OriginCmd::Add { root, .. } | OriginCmd::Move { root, .. }) => root,
+        Cmd::Origin(OriginCmd::Add { root, .. } | OriginCmd::Move { root, .. })
+            if !munchymail::imap::is_root(&root.to_string_lossy()) =>
+        {
+            root
+        }
         _ => return,
     };
     *path = cwd.join(&*path);
+}
+
+/// An origin's root as stored: an IMAP server's URL as given, or a path
+/// resolved and kept outside the data directory.
+fn origin_root(store: &Store, root: &Path) -> Result<String> {
+    let given = root.to_string_lossy();
+    if munchymail::imap::is_root(&given) {
+        let url = url::Url::parse(&given).with_context(|| format!("{given} is not a URL"))?;
+        if url.host_str().is_none() {
+            bail!("{given} names no server");
+        }
+        return Ok(given.into_owned());
+    }
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("resolving {}", root.display()))?;
+    if root.starts_with(store.data_dir.canonicalize()?) {
+        bail!("origin {} is inside the data directory", root.display());
+    }
+    Ok(root.to_string_lossy().into_owned())
+}
+
+/// The config.toml section an IMAP origin needs, for messages.
+fn imap_entry(account: &str, origin: &str, root: &str) -> String {
+    format!(
+        "{}\nimap = \"{root}\"\nuser = \"me\"\npassword_command = [\"secret-tool\", \"lookup\", \"service\", \"imap\", \"user\", \"me\"]\n# client_cert = \"~/.config/munchymail/creds/imap.cert.pem\"  # for mutual TLS\n# client_key = \"~/.config/munchymail/creds/imap.key.pem\"\n# server_cert = \"/etc/pki/my-ca.pem\"  # a CA or the server's own certificate",
+        Config::origin_header(account, origin)
+    )
 }
 
 /// Run one request of `serve`; writes wait for each other, reads don't.
@@ -3114,21 +3148,103 @@ fn serve_cmd(data: &Path) -> Result<()> {
         info!(account = a.as_str(), "opened");
     }
     let writes = Arc::new(Mutex::new(()));
+    let nudges = Arc::new(Nudges::default());
+    for a in account::list(&root)? {
+        let store = pollster::block_on(stores.open(&root.join(&a)))?;
+        for live in pollster::block_on(sync::live(&store))? {
+            if live.kind == sync::Kind::Imap {
+                let (a, nudges) = (a.clone(), nudges.clone());
+                std::thread::spawn(move || watch_inbox(&a, &live, &nudges));
+            }
+        }
+    }
     {
         let (root, stores, writes) = (root.clone(), stores.clone(), writes.clone());
-        std::thread::spawn(move || keep_current(&root, &stores, &writes));
+        let nudges = nudges.clone();
+        std::thread::spawn(move || keep_current(&root, &stores, &writes, &nudges));
     }
     serve::serve(listener, root.clone(), move |req, reply| {
         handle(&root, &stores, &writes, req, reply)
     })
 }
 
-/// The service's timer: check each live Gmail origin when it is due. A
+/// The service's timer: check each live Gmail or IMAP origin when it is due,
+/// or at once when IDLE saw a change. A
 /// failure nothing can fix without someone ends the service with status 78.
-fn keep_current(root: &Path, stores: &Stores, writes: &Mutex<()>) {
+/// Origins to check now rather than when due, e.g. when IDLE saw new mail.
+#[derive(Default)]
+struct Nudges {
+    origins: Mutex<std::collections::HashSet<i64>>,
+    woken: std::sync::Condvar,
+}
+
+impl Nudges {
+    fn nudge(&self, origin_id: i64) {
+        self.origins
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(origin_id);
+        self.woken.notify_all();
+    }
+
+    /// Wait up to `timeout`; when nudged, a few seconds more so a burst is one check.
+    fn wait(&self, timeout: Duration) {
+        let held = self.origins.lock().unwrap_or_else(PoisonError::into_inner);
+        let (held, _) = self
+            .woken
+            .wait_timeout_while(held, timeout, |o| o.is_empty())
+            .unwrap_or_else(PoisonError::into_inner);
+        let nudged = !held.is_empty();
+        drop(held);
+        if nudged {
+            std::thread::sleep(Duration::from_secs(5));
+        }
+    }
+
+    fn take(&self, origin_id: i64) -> bool {
+        self.origins
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&origin_id)
+    }
+}
+
+/// Hold IDLE on an IMAP origin's INBOX and nudge the timer at each change;
+/// reconnect after failures, backing off from a minute to half an hour.
+fn watch_inbox(account: &str, live: &sync::Live, nudges: &Nudges) {
+    let origin = live.label.as_str();
+    let mut backoff = Duration::from_secs(60);
     loop {
-        std::thread::sleep(Duration::from_secs(30));
-        let Err(e) = keep_current_once(root, stores, writes) else {
+        let watching = Config::load()
+            .and_then(|c| munchymail::imap::Settings::load(&c, account, origin))
+            .and_then(|s| munchymail::imap::watch_inbox(&s));
+        match watching {
+            Ok(stream) => {
+                info!(account, origin, "watching INBOX with IDLE");
+                backoff = Duration::from_secs(60);
+                loop {
+                    match stream.recv_timeout(Duration::from_secs(300)) {
+                        Ok(Ok(_)) => nudges.nudge(live.origin_id),
+                        Ok(Err(e)) => {
+                            warn!(account, origin, "IDLE ended: {e:#}");
+                            break;
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+            }
+            Err(e) => warn!(account, origin, "can't watch INBOX, will retry: {e:#}"),
+        }
+        std::thread::sleep(backoff);
+        backoff = (backoff * 2).min(Duration::from_secs(1800));
+    }
+}
+
+fn keep_current(root: &Path, stores: &Stores, writes: &Mutex<()>, nudges: &Nudges) {
+    loop {
+        nudges.wait(Duration::from_secs(30));
+        let Err(e) = keep_current_once(root, stores, writes, nudges) else {
             continue;
         };
         if sync::classify(&e) == sync::Failure::Systemic {
@@ -3139,13 +3255,19 @@ fn keep_current(root: &Path, stores: &Stores, writes: &Mutex<()>) {
     }
 }
 
-fn keep_current_once(root: &Path, stores: &Stores, writes: &Mutex<()>) -> Result<()> {
+fn keep_current_once(
+    root: &Path,
+    stores: &Stores,
+    writes: &Mutex<()>,
+    nudges: &Nudges,
+) -> Result<()> {
     for a in account::list(root)? {
         let store = pollster::block_on(stores.open(&root.join(&a)))?;
         let t = now();
         for live in pollster::block_on(sync::live(&store))? {
-            // mbox trees are imported on request until they are watched.
-            if !live.gmail || !live.due(t) {
+            // mbox trees are imported on request; IMAP is their live view.
+            let nudged = nudges.take(live.origin_id) && live.stopped.is_none();
+            if live.kind == sync::Kind::Mbox || !(nudged || live.due(t)) {
                 continue;
             }
             let _turn = writes.lock().unwrap_or_else(PoisonError::into_inner);
@@ -3290,6 +3412,7 @@ async fn import(store: &Store, mut labels: Vec<String>) -> Result<Vec<(String, u
         for r in query_rows(
             store,
             "SELECT label FROM origin WHERE retired_at IS NULL AND root NOT LIKE 'gmail:%'
+                AND lower(root) NOT LIKE 'imap://%' AND lower(root) NOT LIKE 'imaps://%'
                  ORDER BY origin_id",
             vec![],
         )
@@ -3342,12 +3465,12 @@ async fn sync_origin(
     store: &Store,
     live: &sync::Live,
 ) -> Result<u64, (anyhow::Error, sync::Failure)> {
-    let r = if live.gmail {
-        gmail_sync(store, 4).await.map(|s| s.new_artifacts)
-    } else {
-        import(store, vec![live.label.clone()])
+    let r = match live.kind {
+        sync::Kind::Gmail => gmail_sync(store, 4).await.map(|s| s.new_artifacts),
+        sync::Kind::Imap => imap_sync(store, &live.label).await.map(|s| s.new_artifacts),
+        sync::Kind::Mbox => import(store, vec![live.label.clone()])
             .await
-            .map(|added| added.iter().map(|a| a.1).sum())
+            .map(|added| added.iter().map(|a| a.1).sum()),
     };
     let settled = store.settle().await;
     let fail = |e: anyhow::Error| {
@@ -3391,7 +3514,7 @@ async fn sync_now(
         }
         for live in &lives {
             let since = live.checked_at.map(|c| now() - c);
-            if let Some(s) = since.filter(|&s| s < sync::min_gap(live.gmail)) {
+            if let Some(s) = since.filter(|&s| s < sync::min_gap(live.kind)) {
                 if json {
                     let v = serde_json::json!({
                         "type": "origin",
@@ -3443,6 +3566,31 @@ async fn sync_now(
         bail!("{failed} origin(s) not synced");
     }
     Ok(())
+}
+
+/// Bring IMAP origin `label` up to date, then index what arrived.
+async fn imap_sync(store: &Store, label: &str) -> Result<munchymail::imap::Stats> {
+    let t = Instant::now();
+    let account = account_address(store).to_string();
+    let s = munchymail::imap::sync(store, &account, label).await?;
+    if s.changed() {
+        info!(
+            origin = label,
+            full = s.full,
+            folders = s.folders,
+            changed_folders = s.changed_folders,
+            fetched = s.fetched,
+            new_artifacts = s.new_artifacts,
+            gone = s.gone,
+            elapsed = ?t.elapsed(),
+            "imap sync finished"
+        );
+        index(store).await?;
+        store.checkpoint().await?;
+    } else {
+        debug!(origin = label, elapsed = ?t.elapsed(), "imap sync: nothing new");
+    }
+    Ok(s)
 }
 
 /// Bring the account's Gmail origin up to date, then index what arrived.

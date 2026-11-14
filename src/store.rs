@@ -261,6 +261,40 @@ CREATE TABLE IF NOT EXISTS removal (
 );
 CREATE INDEX IF NOT EXISTS removal_gone ON removal (gone_run);
 
+-- An IMAP origin's folders: where its last complete sync of each left off.
+CREATE TABLE IF NOT EXISTS imap_folder (
+    origin_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    uid_validity INTEGER NOT NULL,
+    -- every UID below this has been stored
+    uid_next INTEGER NOT NULL,
+    -- 0 when the server keeps no mod-sequences for it
+    highest_mod_seq INTEGER NOT NULL,
+    -- when it was no longer listed
+    gone_at INTEGER,
+    PRIMARY KEY (origin_id, name)
+);
+-- Each message of an IMAP origin, by folder, UIDVALIDITY and UID.
+CREATE TABLE IF NOT EXISTS imap_message (
+    origin_id INTEGER NOT NULL,
+    folder TEXT NOT NULL,
+    uid_validity INTEGER NOT NULL,
+    uid INTEGER NOT NULL,
+    artifact_id INTEGER NOT NULL,
+    -- sorted, space-separated
+    flags TEXT NOT NULL,
+    internal_date INTEGER,
+    -- when the server reported it expunged, or its folder or UIDVALIDITY went
+    gone_at INTEGER,
+    PRIMARY KEY (origin_id, folder, uid_validity, uid)
+);
+CREATE INDEX IF NOT EXISTS imap_message_artifact ON imap_message (artifact_id);
+-- 1 while stored changes still need a run recording their sightings.
+CREATE TABLE IF NOT EXISTS imap_state (
+    origin_id INTEGER PRIMARY KEY,
+    dirty INTEGER NOT NULL DEFAULT 0
+);
+
 -- the service's keeping of each live origin current (sync.rs)
 CREATE TABLE IF NOT EXISTS sync_state (
     origin_id INTEGER PRIMARY KEY,

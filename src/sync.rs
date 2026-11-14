@@ -7,10 +7,21 @@ use crate::store::{Store, now};
 
 /// How often the service checks a live Gmail origin.
 pub const GMAIL_EVERY: i64 = 180;
-/// `sync` skips an origin checked this recently: Gmail's check is cheap, an
-/// mbox tree's means reading every file under Dovecot's lock.
-pub fn min_gap(gmail: bool) -> i64 {
-    if gmail { 15 } else { 60 }
+/// What kind of source a live origin is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Gmail,
+    Imap,
+    Mbox,
+}
+
+/// `sync` skips an origin checked this recently: Gmail's and IMAP's checks
+/// are cheap, an mbox tree's means reading every file under Dovecot's lock.
+pub fn min_gap(kind: Kind) -> i64 {
+    match kind {
+        Kind::Gmail | Kind::Imap => 15,
+        Kind::Mbox => 60,
+    }
 }
 /// The longest wait between retries of a failing origin.
 const MAX_BACKOFF: i64 = 3600;
@@ -47,7 +58,7 @@ pub fn classify(e: &anyhow::Error) -> Failure {
         "read-only file system",
     ]) {
         Failure::Systemic
-    } else if any(&["no google sign-in", "http 401"])
+    } else if any(&["no google sign-in", "http 401", "authenticationfailed"])
         || (text.contains("sign-in may be revoked") && any(&["http 400", "http 401"]))
         || (text.contains("http 403") && !any(&["ratelimitexceeded", "quota"]))
     {
@@ -68,7 +79,7 @@ pub fn backoff(failures: i64) -> i64 {
 pub struct Live {
     pub origin_id: i64,
     pub label: String,
-    pub gmail: bool,
+    pub kind: Kind,
     pub checked_at: Option<i64>,
     pub retry_at: Option<i64>,
     pub stopped: Option<String>,
@@ -89,7 +100,11 @@ pub async fn live(store: &Store) -> Result<Vec<Live>> {
     let mut rows = store
         .conn
         .query(
-            "SELECT g.origin_id, g.label, g.root LIKE 'gmail:%', s.checked_at, s.retry_at,
+            "SELECT g.origin_id, g.label,
+                    CASE WHEN g.root LIKE 'gmail:%' THEN 0
+                         WHEN lower(g.root) LIKE 'imap://%' OR lower(g.root) LIKE 'imaps://%' THEN 1
+                         ELSE 2 END,
+                    s.checked_at, s.retry_at,
                     CASE WHEN s.stopped_at IS NOT NULL THEN coalesce(s.problem, 'stopped') END
              FROM origin g LEFT JOIN sync_state s ON s.origin_id = g.origin_id
              WHERE g.role = 'live' AND g.retired_at IS NULL ORDER BY g.origin_id",
@@ -101,7 +116,11 @@ pub async fn live(store: &Store) -> Result<Vec<Live>> {
         out.push(Live {
             origin_id: r.get(0)?,
             label: r.get(1)?,
-            gmail: r.get::<i64>(2)? != 0,
+            kind: match r.get::<i64>(2)? {
+                0 => Kind::Gmail,
+                1 => Kind::Imap,
+                _ => Kind::Mbox,
+            },
             checked_at: r.get(3)?,
             retry_at: r.get(4)?,
             stopped: r.get(5)?,
@@ -240,7 +259,7 @@ mod tests {
         let l = Live {
             origin_id: 1,
             label: "gmail".into(),
-            gmail: true,
+            kind: Kind::Gmail,
             checked_at: None,
             retry_at: None,
             stopped: None,

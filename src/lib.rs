@@ -8,6 +8,7 @@ pub mod extract;
 pub mod gmail;
 pub mod google;
 pub mod headers;
+pub mod imap;
 pub mod import;
 pub mod listing;
 pub mod locations;

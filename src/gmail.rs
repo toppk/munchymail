@@ -14,9 +14,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use data_encoding::BASE64URL_NOPAD;
 use serde_json::Value as Json;
-use sha2::{Digest, Sha256};
 use tracing::{info, warn};
-use turso::Value;
 
 use crate::changes;
 use crate::google::Session;
@@ -522,63 +520,7 @@ async fn snapshot(store: &Store, origin_id: i64, run_id: i64) -> Result<()> {
         }
     }
     drop(rows);
-    let mut sel = store
-        .conn
-        .prepare("SELECT content_id FROM file_content WHERE hash = ?1")
-        .await?;
-    let mut ins_content = store
-        .conn
-        .prepare(
-            "INSERT INTO file_content
-             (hash, length, head_hash, format, message_count, preamble_length, parent_content_id)
-             VALUES (?1, ?2, ?1, 'gmail-label', ?3, 0, NULL)",
-        )
-        .await?;
-    let mut ins_obs = store
-        .conn
-        .prepare(
-            "INSERT INTO observation
-             (content_id, ordinal, offset, artifact_id, from_line, separator, used_content_length)
-             VALUES (?1, ?2, ?2, ?3, ?4, x'', 0)",
-        )
-        .await?;
-    let mut ins_sighting = store
-        .conn
-        .prepare(
-            "INSERT INTO file_sighting
-             (run_id, origin_id, path, content_id, dev, ino, mtime_ns, ctime_ns, changed_during_read)
-             VALUES (?1, ?2, ?3, ?4, 0, 0, 0, 0, 0)",
-        )
-        .await?;
-    for (path, entries) in &paths {
-        let listing: String = entries
-            .iter()
-            .map(|(id, a)| format!("{id} {a}\n"))
-            .collect();
-        let hash = Sha256::digest(format!("gmail-label\n{listing}").as_bytes()).to_vec();
-        let mut rows = sel.query((hash.clone(),)).await?;
-        let known: Option<i64> = rows.next().await?.map(|r| r.get(0)).transpose()?;
-        drop(rows);
-        let content = match known {
-            Some(c) => c,
-            None => {
-                ins_content
-                    .execute((hash, listing.len() as i64, entries.len() as i64))
-                    .await?;
-                let c = store.conn.last_insert_rowid();
-                for (i, (id, a)) in entries.iter().enumerate() {
-                    ins_obs
-                        .execute((c, i as i64, *a, Value::Blob(id.as_bytes().to_vec())))
-                        .await?;
-                }
-                c
-            }
-        };
-        ins_sighting
-            .execute((run_id, origin_id, path.as_str(), content))
-            .await?;
-    }
-    Ok(())
+    crate::import::sight_listings(store, origin_id, run_id, "gmail-label", &paths).await
 }
 
 #[cfg(test)]
