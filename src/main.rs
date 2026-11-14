@@ -80,6 +80,7 @@ fn effect(command: &str) -> Option<(&'static str, &'static str)> {
         ),
         "export" => ("write", "data/exports/NAME.tgz, or the -o path"),
         "record-removals" => ("write", "the removal table in data/"),
+        "verify-files" => ("read", "data/ only: stored copies and how they were framed"),
         "sql" => ("read", "a read-only connection: writes are refused"),
         "diff" | "scan" => ("read", "the named files; no database"),
         "describe" => ("read", "nothing; no database"),
@@ -178,8 +179,8 @@ impl Program {
                 ),
                 (
                     "History upkeep",
-                    "Recording removals, and comparing or checking mbox files directly.",
-                    &["record-removals", "diff", "scan"],
+                    "Recording removals, rebuilding recorded mbox files, and comparing or checking them directly.",
+                    &["record-removals", "verify-files", "diff", "scan"],
                 ),
                 (
                     "Service and internals",
@@ -779,6 +780,15 @@ enum Cmd {
         #[command(flatten)]
         runs: Runs,
     },
+    /// Rebuild an origin's mbox files from the archive and check their hashes.
+    ///
+    /// Each recorded file is rebuilt from its stored copies (re-quoted as its
+    /// format quoted them), `From ` lines and separators, and compared with
+    /// the SHA-256 recorded when it was read. The source files are not read.
+    VerifyFiles {
+        /// Origin label, as in `origin list`.
+        origin: String,
+    },
     /// Messages that left a path, newest first.
     Removals {
         /// Only paths matching this Sieve :matches pattern, e.g. INBOX.
@@ -1008,6 +1018,10 @@ struct FilterArgs {
     /// Decoded Subject, same as -H subject:PATTERN.
     #[arg(long, value_name = "PATTERN")]
     subject: Option<String>,
+    /// A copy munchymail noted something about, e.g. content-length,
+    /// unclosed-boundary, prefix-of, or '*' for any; repeatable (all must match).
+    #[arg(long, value_name = "MARK")]
+    mark: Vec<String>,
     /// Path within an origin where a copy was ever found, e.g. 'lists/*'.
     #[arg(long, value_name = "PATTERN")]
     folder: Option<String>,
@@ -1062,6 +1076,7 @@ impl FilterArgs {
                 Some(q) => Some(Arc::new(TextQuery::new(data_dir, &q)?)),
                 None => None,
             },
+            marks: self.mark,
             folder: self.folder,
             origin: self.origin,
             current: self.current,
@@ -2146,6 +2161,9 @@ async fn read(store: &Store, r: api::Ref, json: bool, out: &mut impl Write) -> R
             "  not mail: {kind} (a mail store's own record, kept as found; left out of search, counts, reports and indexes)"
         )?;
     }
+    for k in &m.marks {
+        writeln!(out, "  noted on copy {}: {}: {}", k.copy, k.mark, k.detail)?;
+    }
     if let api::Ref::Copy(_) = r {
         writeln!(
             out,
@@ -2251,6 +2269,15 @@ async fn identities(store: &Store) -> Result<()> {
             moved = s.moved,
             elapsed = ?t.elapsed(),
             "messages regrouped under the current key rule"
+        );
+    }
+    // After regrouping: prefix candidates skip copies already in one message.
+    if let Some((marked, prefixes)) = munchymail::marks::backfill(store).await? {
+        info!(
+            marked,
+            prefixes,
+            version = munchymail::marks::VERSION,
+            "copies checked for damage"
         );
     }
     Ok(())
@@ -3942,6 +3969,22 @@ async fn with_store(cmd: Cmd, store: &Store, out: &mut impl Write) -> Result<()>
             moved,
             limit,
         } => removals(store, folder, moved, limit, out).await?,
+        Cmd::VerifyFiles { origin } => {
+            let r = munchymail::verify::origin(store, &origin).await?;
+            writeln!(
+                out,
+                "{origin}: {} of {} files rebuilt byte for byte ({} bytes)",
+                r.files as usize - r.failures.len(),
+                r.files,
+                r.bytes
+            )?;
+            for f in &r.failures {
+                writeln!(out, "  {} (content {}): {}", f.path, f.content_id, f.why)?;
+            }
+            if !r.failures.is_empty() {
+                bail!("{} of {} files did not rebuild", r.failures.len(), r.files);
+            }
+        }
         Cmd::Scan { .. }
         | Cmd::Diff { .. }
         | Cmd::Ocr { .. }

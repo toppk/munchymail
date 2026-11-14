@@ -150,6 +150,8 @@ impl Artifacts {
                 .await?;
             *nth += 1;
         }
+        crate::marks::record(store, id, &crate::marks::detect(header, body)).await?;
+        crate::marks::prefix_candidates(store, id).await?;
         Ok((id, true))
     }
 

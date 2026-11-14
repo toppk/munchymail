@@ -207,6 +207,35 @@ async fn load(store: &Store, id: i64) -> Result<Stored> {
     })
 }
 
+/// An observation about one copy (`copy_mark`).
+#[derive(Debug, Clone)]
+pub struct CopyMark {
+    pub copy: i64,
+    pub mark: String,
+    pub detail: String,
+    pub source: String,
+}
+
+async fn marks_of(store: &Store, copies: &[i64]) -> Result<Vec<CopyMark>> {
+    let mut stmt = store
+        .conn
+        .prepare("SELECT mark, detail, source FROM copy_mark WHERE artifact_id = ?1 ORDER BY mark")
+        .await?;
+    let mut out = Vec::new();
+    for &copy in copies {
+        let mut rows = stmt.query((copy,)).await?;
+        while let Some(r) = rows.next().await? {
+            out.push(CopyMark {
+                copy,
+                mark: r.get(0)?,
+                detail: r.get(1)?,
+                source: r.get(2)?,
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// The message `msg` names now: itself, or the one its copies joined.
 pub async fn resolve(store: &Store, msg: i64) -> Result<i64> {
     let mut at = msg;
@@ -344,6 +373,8 @@ pub struct Message {
     pub raw_bytes: usize,
     /// The message's places when read by message id, else this copy's.
     pub locations: Vec<Location>,
+    /// What munchymail noticed about each of the message's copies (`copy_mark`).
+    pub marks: Vec<CopyMark>,
     /// From the SHA-256 of the whole message, which includes headers our own
     /// server added, so a sender can't predict it to fake an end marker.
     pub nonce: String,
@@ -395,6 +426,7 @@ pub async fn read(store: &Store, r: Ref) -> Result<Message> {
     };
     let s = load(store, id).await?;
     let (copies, _, all) = message_copies(store, &mut sightings, s.msg).await?;
+    let marks = marks_of(store, &copies).await?;
     let locations = match r {
         Ref::Message(_) => all,
         Ref::Copy(_) => sightings.of(id).await?,
@@ -409,6 +441,7 @@ pub async fn read(store: &Store, r: Ref) -> Result<Message> {
         merged_from,
         kind: s.kind,
         copies,
+        marks,
         date: s.date,
         message_id: s.message_id,
         subject: s.subject,
@@ -494,6 +527,9 @@ impl Message {
             })).collect::<Vec<_>>(),
             "raw_bytes": self.raw_bytes,
             "locations": self.locations.iter().map(location_json).collect::<Vec<_>>(),
+            "marks": self.marks.iter().map(|m| json!({
+                "copy": m.copy, "mark": m.mark, "detail": m.detail, "source": m.source,
+            })).collect::<Vec<_>>(),
             "problem": self.decoded.problem,
             "untrusted": true,
         })

@@ -281,6 +281,20 @@ CREATE TABLE IF NOT EXISTS presence (
 CREATE INDEX IF NOT EXISTS presence_open ON presence (origin_id, until_run);
 CREATE INDEX IF NOT EXISTS presence_artifact ON presence (artifact_id);
 
+-- What munchymail noticed about a copy (marks.rs), e.g. content-length,
+-- unclosed-boundary, prefix-of; `source` names who set it (a detector
+-- version, later a person). Marks never change whether a copy is mail or
+-- which message it is in.
+CREATE TABLE IF NOT EXISTS copy_mark (
+    artifact_id INTEGER NOT NULL,
+    mark TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    source TEXT NOT NULL,
+    set_at INTEGER NOT NULL,
+    PRIMARY KEY (artifact_id, mark, detail)
+);
+CREATE INDEX IF NOT EXISTS copy_mark_name ON copy_mark (mark);
+
 -- Each Gmail message's label ids (UNREAD, STARRED, user labels) as first seen
 -- and at every change.
 CREATE TABLE IF NOT EXISTS gmail_labels (

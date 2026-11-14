@@ -192,6 +192,8 @@ pub struct Filter {
     pub attachment_names: Vec<String>,
     /// Words in the Subject or text (bodies, text attachments, attached messages).
     pub text: Option<Arc<TextQuery>>,
+    /// Copies with a `copy_mark` of each name (Sieve :matches).
+    pub marks: Vec<String>,
     pub folder: Option<String>,
     pub origin: Option<String>,
     /// Restrict origin/folder to each origin's latest import instead of any sighting ever.
@@ -282,6 +284,12 @@ impl Filter {
         }
         if let Some(t) = &self.text {
             sets.push(Set::Messages(t.messages()?));
+        }
+        for m in &self.marks {
+            sets.push(Set::Sql(
+                "SELECT artifact_id FROM copy_mark WHERE mark LIKE ? ESCAPE '\\'".into(),
+                vec![sieve_to_like(m).into()],
+            ));
         }
         if self.folder.is_some() || self.origin.is_some() || self.current {
             let mut sql = format!(
