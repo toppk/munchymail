@@ -343,7 +343,7 @@ impl Filter {
 
     /// Fill TEMP TABLE `hit` with matching artifact ids and return the table to
     /// select from: `hit`, or `artifact` when there is no filter (where
-    /// listings skip `NOT_MAIL` themselves).
+    /// readers apply `MAIL` themselves).
     pub async fn materialize(&self, conn: &Connection) -> Result<&'static str> {
         Ok(if self.materialize_into(conn, "hit").await? {
             "hit"
@@ -423,7 +423,7 @@ impl Filter {
         conn.execute(&sql, ()).await?;
         conn.execute(
             &format!(
-                "DELETE FROM {table} WHERE artifact_id IN (SELECT artifact_id FROM storage_record)"
+                "DELETE FROM {table} WHERE artifact_id IN (SELECT artifact_id FROM artifact WHERE kind IS NOT NULL)"
             ),
             (),
         )
@@ -432,9 +432,18 @@ impl Filter {
     }
 }
 
-/// SQL condition on `a.artifact_id`: not a mail store's own record.
-pub const NOT_MAIL: &str =
-    "NOT EXISTS (SELECT 1 FROM storage_record x WHERE x.artifact_id = a.artifact_id)";
+/// SQL condition on copy `a`: it is mail (`artifact.kind` unset). Every
+/// listing, count and report of the whole archive applies it; filtered sets
+/// apply it in `materialize_into`.
+pub const MAIL: &str = "a.kind IS NULL";
+
+/// `SELECT count(*)` over a set from `Filter::materialize`.
+pub fn count_sql(set: &str) -> String {
+    match set {
+        "artifact" => format!("SELECT count(*) FROM artifact a WHERE {MAIL}"),
+        t => format!("SELECT count(*) FROM {t}"),
+    }
+}
 
 /// A message's preferred copy, as SQL over its copies `a` joined to `fold f`:
 /// not folded, then the earliest stored.

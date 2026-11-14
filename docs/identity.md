@@ -102,8 +102,9 @@ of five things, all of which must match:
   IMAP shares all of these.
 
 Dovecot's "FOLDER INTERNAL DATA" placeholder, which only holds a folder's
-UID state, is stored like any copy but marked as a storage record
-(`storage_record`) and left out of search and counts. Dovecot's per-message
+UID state, is stored like any copy but classified as not mail
+(`artifact.kind` = `folder-data`): readable by id, and left out of every
+listing, count, report and index. Dovecot's per-message
 bookkeeping fields (`Status`, `X-Status`, `X-Keywords`, `X-UID`,
 `Content-Length`, `X-IMAPbase`) stay in the stored bytes and are left out of
 `read`'s header list.

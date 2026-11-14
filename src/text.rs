@@ -73,7 +73,8 @@ pub async fn pending(store: &Store) -> Result<i64> {
     let mut rows = store
         .conn
         .query(
-            "SELECT count(*) FROM message WHERE text_version IS NOT ?1 AND merged_into IS NULL",
+            "SELECT count(*) FROM message m WHERE text_version IS NOT ?1 AND merged_into IS NULL
+             AND EXISTS (SELECT 1 FROM artifact a WHERE a.msg_id = m.msg_id AND a.kind IS NULL)",
             (VERSION,),
         )
         .await?;
@@ -123,7 +124,7 @@ pub async fn index(store: &Store) -> Result<Stats> {
                                        min(a.artifact_id))
              FROM artifact a JOIN message m ON m.msg_id = a.msg_id
              LEFT JOIN fold f ON f.artifact_id = a.artifact_id
-             WHERE m.text_version IS NOT ?1 GROUP BY a.msg_id",
+             WHERE m.text_version IS NOT ?1 AND a.kind IS NULL GROUP BY a.msg_id",
             (VERSION,),
         )
         .await?;

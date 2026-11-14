@@ -64,7 +64,7 @@ pub async fn matching(store: &Store, filter: &Filter, unique: bool) -> Result<&'
                 "DELETE FROM hit".to_string(),
                 format!(
                     "INSERT INTO hit SELECT a.artifact_id FROM artifact a WHERE {}",
-                    crate::query::NOT_MAIL
+                    crate::query::MAIL
                 ),
             ] {
                 store.conn.execute(&sql, ()).await?;
@@ -92,7 +92,7 @@ pub async fn page(
             "hit JOIN artifact a ON a.artifact_id = hit.artifact_id",
             "1",
         ),
-        _ => ("artifact a", crate::query::NOT_MAIL),
+        _ => ("artifact a", crate::query::MAIL),
     };
     let key = format!("coalesce(a.date, {NO_DATE})");
     let (cond, mut params): (String, Vec<Value>) = match after {
@@ -162,6 +162,7 @@ pub struct Hit {
 
 struct Stored {
     msg: i64,
+    kind: Option<String>,
     date: Option<i64>,
     message_id: Option<String>,
     subject: String,
@@ -174,7 +175,7 @@ async fn load(store: &Store, id: i64) -> Result<Stored> {
     let mut rows = store
         .conn
         .query(
-            "SELECT date, message_id, subject, header_hash, body_hash, msg_id
+            "SELECT date, message_id, subject, header_hash, body_hash, msg_id, kind
              FROM artifact WHERE artifact_id = ?1",
             (id,),
         )
@@ -187,6 +188,7 @@ async fn load(store: &Store, id: i64) -> Result<Stored> {
     };
     let (date, message_id, subject) = (r.get(0)?, r.get(1)?, r.get::<Option<String>>(2)?);
     let msg = r.get(5)?;
+    let kind = r.get(6)?;
     drop(rows);
     let mut raw = store.object(&h).await?;
     let body = store.object(&b).await?;
@@ -195,6 +197,7 @@ async fn load(store: &Store, id: i64) -> Result<Stored> {
     extract::fill(store, msg, &mut decoded).await?;
     Ok(Stored {
         msg,
+        kind,
         date,
         message_id,
         subject: subject.unwrap_or_default(),
@@ -328,6 +331,8 @@ pub struct Message {
     pub msg: i64,
     /// The `mN` asked for, when its copies have since joined `msg`.
     pub merged_from: Option<i64>,
+    /// What munchymail classified this copy as when it isn't mail (`artifact.kind`).
+    pub kind: Option<String>,
     /// Every stored copy of the message, oldest first.
     pub copies: Vec<i64>,
     pub date: Option<i64>,
@@ -402,6 +407,7 @@ pub async fn read(store: &Store, r: Ref) -> Result<Message> {
         id,
         msg: s.msg,
         merged_from,
+        kind: s.kind,
         copies,
         date: s.date,
         message_id: s.message_id,
@@ -464,6 +470,7 @@ impl Message {
             "id": self.id,
             "message": Ref::Message(self.msg).to_string(),
             "merged_from": self.merged_from.map(|m| Ref::Message(m).to_string()),
+            "kind": self.kind,
             "copies": self.copies,
             "date": opt_time(self.date),
             "message_id": self.message_id.as_deref().map(sanitize),

@@ -41,12 +41,14 @@ const MIGRATIONS: [&str; 10] = [
      UPDATE origin SET role = 'live' WHERE root LIKE 'gmail:%' AND role IS NULL;",
     "ALTER TABLE message ADD COLUMN key BLOB;
      ALTER TABLE message ADD COLUMN merged_into INTEGER;
-     ALTER TABLE message ADD COLUMN split_from INTEGER;",
+     ALTER TABLE message ADD COLUMN split_from INTEGER;
+     ALTER TABLE artifact ADD COLUMN kind TEXT;",
 ];
 
 /// Indexes on columns a migration may have just added.
 const LATE_SCHEMA: &str = "CREATE INDEX IF NOT EXISTS artifact_msg ON artifact (msg_id);
-     CREATE INDEX IF NOT EXISTS message_key ON message (key);";
+     CREATE INDEX IF NOT EXISTS message_key ON message (key);
+     CREATE INDEX IF NOT EXISTS artifact_kind ON artifact (kind);";
 
 const SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
@@ -68,6 +70,10 @@ CREATE TABLE IF NOT EXISTS artifact (
     message_id TEXT,
     -- the message this is a copy of
     msg_id INTEGER,
+    -- what munchymail classified it as when it isn't mail, e.g. 'folder-data'
+    -- (Dovecot's FOLDER INTERNAL DATA); NULL for mail. Non-mail copies are kept
+    -- and readable by id, and left out of every listing, count, report and index.
+    kind TEXT,
     UNIQUE (header_hash, body_hash)
 );
 CREATE INDEX IF NOT EXISTS artifact_date ON artifact (date);
@@ -259,10 +265,6 @@ CREATE TABLE IF NOT EXISTS fold (
 
 -- Messages removed (their copies joined another), still to drop from data/text/.
 CREATE TABLE IF NOT EXISTS text_forget (msg_id INTEGER PRIMARY KEY);
-
--- Copies that are a mail store's own records, not mail (Dovecot's FOLDER
--- INTERNAL DATA): kept byte for byte, left out of search and counts.
-CREATE TABLE IF NOT EXISTS storage_record (artifact_id INTEGER PRIMARY KEY, kind TEXT NOT NULL);
 
 -- An entry of a live listing (Gmail label, IMAP folder) from the run it
 -- appeared in until the first run it was gone from (presence.rs).

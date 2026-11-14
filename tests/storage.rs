@@ -5,6 +5,11 @@ use munchymail::import::Importer;
 use munchymail::query::Filter;
 use munchymail::store::Store;
 
+async fn int(store: &Store, sql: &str) -> i64 {
+    let mut rows = store.conn.query(sql, ()).await.unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
 #[test]
 fn folder_data_is_kept_but_not_mail() {
     let dir = std::env::temp_dir().join(format!("munchymail-storage-{}", std::process::id()));
@@ -40,35 +45,56 @@ fn folder_data_is_kept_but_not_mail() {
             .run()
             .await
             .unwrap();
-        let mut rows = store
-            .conn
-            .query(
-                "SELECT (SELECT count(*) FROM artifact), (SELECT count(*) FROM storage_record)",
-                (),
+        assert_eq!(int(&store, "SELECT count(*) FROM artifact").await, 2);
+        assert_eq!(
+            int(
+                &store,
+                "SELECT count(*) FROM artifact WHERE kind = 'folder-data'"
             )
-            .await
-            .unwrap();
-        let r = rows.next().await.unwrap().unwrap();
-        assert_eq!((r.get::<i64>(0).unwrap(), r.get::<i64>(1).unwrap()), (2, 1));
-        drop(rows);
+            .await,
+            1
+        );
+
+        // In no listing, filter, count or index.
         let (hits, _) = api::search(&store, &Filter::default(), false, 100, None)
             .await
             .unwrap();
         assert_eq!(hits.len(), 1);
-        let f = Filter {
-            headers: vec![("subject".into(), "*FOLDER INTERNAL*".into())],
-            ..Filter::default()
-        };
-        assert!(
-            api::search(&store, &f, false, 100, None)
-                .await
-                .unwrap()
-                .0
-                .is_empty()
+        for (name, value) in [
+            ("subject", "*FOLDER INTERNAL*"),
+            ("from", "*Internal Data*"),
+        ] {
+            let f = Filter {
+                headers: vec![(name.into(), value.into())],
+                ..Filter::default()
+            };
+            assert!(
+                api::search(&store, &f, false, 100, None)
+                    .await
+                    .unwrap()
+                    .0
+                    .is_empty()
+            );
+        }
+        assert_eq!(
+            int(&store, "SELECT count(*) FROM header WHERE artifact_id = 1").await,
+            0
         );
+        munchymail::parts::index(&store).await.unwrap();
+        assert_eq!(
+            int(&store, "SELECT count(DISTINCT msg_id) FROM part").await,
+            1
+        );
+        assert_eq!(munchymail::parts::pending(&store).await.unwrap(), 0);
 
-        // `read` leaves out the server's bookkeeping; the stored bytes keep it.
+        // Addressed by id, it is readable and says what it is.
+        let data = api::read(&store, Ref::Copy(1)).await.unwrap();
+        assert_eq!(data.kind.as_deref(), Some("folder-data"));
+        assert!(data.headers.iter().any(|f| f.name == "x-imap"));
+
+        // `read` of mail leaves out the server's bookkeeping; the stored bytes keep it.
         let m = api::read(&store, Ref::Copy(hits[0].id)).await.unwrap();
+        assert_eq!(m.kind, None);
         let names: Vec<String> = m.to_json()["headers"]
             .as_array()
             .unwrap()
@@ -76,13 +102,8 @@ fn folder_data_is_kept_but_not_mail() {
             .map(|h| h[0].as_str().unwrap().to_string())
             .collect();
         assert_eq!(names, ["from", "message-id", "subject"]);
-        let mut rows = store
-            .conn
-            .query("SELECT count(*) FROM header WHERE name = 'x-uid'", ())
-            .await
-            .unwrap();
         assert_eq!(
-            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            int(&store, "SELECT count(*) FROM header WHERE name = 'x-uid'").await,
             1
         );
     });

@@ -1219,9 +1219,8 @@ async fn overview(root: &Path, stores: &Stores, json: bool, out: &mut impl Write
         let totals = query_rows(
             &store,
             "SELECT (SELECT count(*) FROM message m WHERE merged_into IS NULL AND EXISTS
-                       (SELECT 1 FROM artifact a WHERE a.msg_id = m.msg_id AND a.artifact_id
-                        NOT IN (SELECT artifact_id FROM storage_record))),
-                    (SELECT max(date) FROM artifact WHERE date <= ?1)",
+                       (SELECT 1 FROM artifact a WHERE a.msg_id = m.msg_id AND a.kind IS NULL)),
+                    (SELECT max(date) FROM artifact WHERE date <= ?1 AND kind IS NULL)",
             vec![now.into()],
         )
         .await?;
@@ -1779,14 +1778,7 @@ async fn search(
     warn_unindexed(store, &filter).await?;
     if count {
         let set = api::matching(store, &filter, unique).await?;
-        let sql = match set {
-            "artifact" => format!(
-                "SELECT count(*) FROM artifact a WHERE {}",
-                munchymail::query::NOT_MAIL
-            ),
-            _ => format!("SELECT count(*) FROM {set}"),
-        };
-        let rows = query_rows(store, &sql, vec![]).await?;
+        let rows = query_rows(store, &munchymail::query::count_sql(set), vec![]).await?;
         writeln!(out, "{}", text(&rows[0][0]))?;
         return Ok(());
     }
@@ -1861,8 +1853,8 @@ async fn search_all(
             warn_unindexed(&store, &f).await?;
             let set = api::matching(&store, &f, unique).await?;
             let from = match set {
-                "hit" => "hit JOIN artifact a ON a.artifact_id = hit.artifact_id",
-                _ => "artifact a",
+                "hit" => "hit JOIN artifact a ON a.artifact_id = hit.artifact_id".to_string(),
+                _ => format!("artifact a WHERE {}", munchymail::query::MAIL),
             };
             let r = query_rows(
                 &store,
@@ -2148,6 +2140,12 @@ async fn read(store: &Store, r: api::Ref, json: bool, out: &mut impl Write) -> R
     if let Some(from) = m.merged_from {
         writeln!(out, "  m{from} was merged into m{}", m.msg)?;
     }
+    if let Some(kind) = &m.kind {
+        writeln!(
+            out,
+            "  not mail: {kind} (a mail store's own record, kept as found; left out of search, counts, reports and indexes)"
+        )?;
+    }
     if let api::Ref::Copy(_) = r {
         writeln!(
             out,
@@ -2237,8 +2235,11 @@ async fn identities(store: &Store) -> Result<()> {
     if let Some(n) = munchymail::gmail::start_label_history(store).await? {
         info!(n, "Gmail label history started from current labels");
     }
-    if let Some(n) = munchymail::import::mark_storage_records(store).await? {
-        info!(n, "copies marked as mail-store records, not mail");
+    if let Some(n) = munchymail::import::classify_copies(store).await? {
+        info!(
+            n,
+            "copies classified as not mail (a mail store's own records)"
+        );
     }
     let t = Instant::now();
     if let Some(s) = munchymail::rekey::rekey(store).await? {
@@ -2355,7 +2356,7 @@ async fn top(
     out: &mut impl Write,
 ) -> Result<()> {
     let table = filter.materialize(&store.conn).await?;
-    let matched = query_rows(store, &format!("SELECT count(*) FROM {table}"), vec![]).await?;
+    let matched = query_rows(store, &munchymail::query::count_sql(table), vec![]).await?;
     let matched = match matched[0][0] {
         Value::Integer(n) => n as u64,
         _ => 0,
@@ -2668,6 +2669,10 @@ async fn stats(store: &Store, out: &mut impl Write) -> Result<()> {
         ("observations", "SELECT count(*) FROM observation"),
         ("presence intervals", "SELECT count(*) FROM presence"),
         ("artifacts", "SELECT count(*) FROM artifact"),
+        (
+            "  of which not mail",
+            "SELECT count(*) || coalesce(' (' || group_concat(DISTINCT kind) || ')', '') FROM artifact WHERE kind IS NOT NULL",
+        ),
         (
             "distinct bodies",
             "SELECT count(DISTINCT body_hash) FROM artifact",

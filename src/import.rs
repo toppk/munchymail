@@ -129,17 +129,19 @@ impl Artifacts {
             ));
         }
         let id = store.conn.last_insert_rowid();
+        let msg = self.message(store, &p.key, s.date).await?;
+        self.set_message.execute((msg, id)).await?;
         if headers::is_folder_data(&p.fields) {
+            // Not mail: kept and readable by id, but in no index.
             store
                 .conn
                 .execute(
-                    "INSERT OR IGNORE INTO storage_record (artifact_id, kind) VALUES (?1, 'folder-data')",
+                    "UPDATE artifact SET kind = 'folder-data' WHERE artifact_id = ?1",
                     (id,),
                 )
                 .await?;
+            return Ok((id, true));
         }
-        let msg = self.message(store, &p.key, s.date).await?;
-        self.set_message.execute((msg, id)).await?;
         let mut seen: HashMap<&str, i64> = HashMap::new();
         for (i, f) in p.fields.iter().enumerate() {
             let nth = seen.entry(f.name.as_str()).or_default();
@@ -528,11 +530,12 @@ impl<'a> Importer<'a> {
     }
 }
 
-/// Mark copies stored before storage records were recognised. Once.
-pub async fn mark_storage_records(store: &Store) -> Result<Option<u64>> {
+/// Classify copies stored before munchymail recognised them as not mail, and
+/// drop them from the indexes. Once.
+pub async fn classify_copies(store: &Store) -> Result<Option<u64>> {
     let c = &store.conn;
     let done = c
-        .query("SELECT 1 FROM meta WHERE key = 'storage_records'", ())
+        .query("SELECT 1 FROM meta WHERE key = 'copy_kinds'", ())
         .await?
         .next()
         .await?
@@ -543,19 +546,27 @@ pub async fn mark_storage_records(store: &Store) -> Result<Option<u64>> {
     store.begin().await?;
     let n = c
         .execute(
-            "INSERT OR IGNORE INTO storage_record (artifact_id, kind)
-             SELECT h.artifact_id, 'folder-data' FROM header h
-             WHERE h.name = 'subject' AND h.nth = 0 AND h.value = ?1
-               AND EXISTS (SELECT 1 FROM header x
-                           WHERE x.artifact_id = h.artifact_id AND x.name IN ('x-imap', 'x-imapbase'))",
+            "UPDATE artifact SET kind = 'folder-data' WHERE kind IS NULL AND artifact_id IN
+               (SELECT h.artifact_id FROM header h
+                WHERE h.name = 'subject' AND h.nth = 0 AND h.value = ?1
+                  AND EXISTS (SELECT 1 FROM header x WHERE x.artifact_id = h.artifact_id
+                              AND x.name IN ('x-imap', 'x-imapbase')))",
             (headers::FOLDER_DATA_SUBJECT,),
         )
         .await?;
-    c.execute(
-        "INSERT INTO meta (key, value) VALUES ('storage_records', '1')",
-        (),
-    )
-    .await?;
+    for sql in [
+        "DELETE FROM header WHERE artifact_id IN (SELECT artifact_id FROM artifact WHERE kind IS NOT NULL)",
+        // Messages with no mail copy left leave the part and text indexes.
+        "CREATE TEMP TABLE IF NOT EXISTS not_mail (msg_id INTEGER PRIMARY KEY)",
+        "DELETE FROM not_mail",
+        "INSERT INTO not_mail SELECT DISTINCT a.msg_id FROM artifact a WHERE a.kind IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM artifact b WHERE b.msg_id = a.msg_id AND b.kind IS NULL)",
+        "DELETE FROM part WHERE msg_id IN (SELECT msg_id FROM not_mail)",
+        "INSERT OR IGNORE INTO text_forget (msg_id) SELECT msg_id FROM not_mail",
+        "INSERT INTO meta (key, value) VALUES ('copy_kinds', '1')",
+    ] {
+        c.execute(sql, ()).await?;
+    }
     store.commit().await?;
     Ok(Some(n))
 }

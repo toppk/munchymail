@@ -108,17 +108,20 @@ pub struct Report {
 }
 
 async fn count(conn: &Connection, table: &str) -> Result<u64> {
-    let mut rows = conn
-        .query(format!("SELECT count(*) FROM {table}"), ())
-        .await?;
+    let mut rows = conn.query(crate::query::count_sql(table), ()).await?;
     let n: i64 = rows.next().await?.map_or(Ok(0), |r| r.get(0))?;
     Ok(n as u64)
 }
 
 async fn ids(conn: &Connection, table: &str) -> Result<Vec<i64>> {
-    let mut rows = conn
-        .query(format!("SELECT artifact_id FROM {table}"), ())
-        .await?;
+    let sql = match table {
+        "artifact" => format!(
+            "SELECT a.artifact_id FROM artifact a WHERE {}",
+            crate::query::MAIL
+        ),
+        t => format!("SELECT artifact_id FROM {t}"),
+    };
+    let mut rows = conn.query(sql, ()).await?;
     let mut out = Vec::new();
     while let Some(r) = rows.next().await? {
         out.push(r.get(0)?);
