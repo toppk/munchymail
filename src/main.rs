@@ -2220,7 +2220,7 @@ async fn identities(store: &Store) -> Result<()> {
     let t = Instant::now();
     let changed = munchymail::import::line_ending_identities(store).await?;
     if changed > 0 {
-        info!(changed, elapsed = ?t.elapsed(), "message identities now read CRLF as LF and NUL as 0x80");
+        info!(changed, elapsed = ?t.elapsed(), "message identities now read CRLF as LF, NUL as 0x80, and add a missing final newline");
     }
     Ok(())
 }

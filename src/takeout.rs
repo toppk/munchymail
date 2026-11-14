@@ -457,7 +457,9 @@ From: a@x\r\nMessage-ID: <m@x>\r\nDate: Fri, 6 Nov 2026 21:47:12 +0000\r\n\r\n>F
         let why: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
         assert_eq!(why, "takeout final-crlf");
         drop(rows);
-        assert_eq!(one(&store, "SELECT count(*) FROM text_forget").await, 1);
+        // Identity adds the API copy's missing final newline, so the Takeout copy
+        // joins its message at once: no second message to drop.
+        assert_eq!(one(&store, "SELECT count(*) FROM text_forget").await, 0);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

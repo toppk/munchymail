@@ -36,12 +36,15 @@ pub(crate) struct Prepared {
 }
 
 /// A body's identity, the same rule for every source: its hash with each CRLF
-/// read as LF and each NUL as 0x80. A store keeps the same email as LF (an mbox
-/// file) or CRLF (IMAP, Gmail), and IMAP can't carry NUL, which Dovecot serves
-/// as 0x80; read this way they are one message. Other bodies hash as they are.
+/// read as LF, each NUL as 0x80, and a final newline added if it lacks one. A
+/// store keeps the same email as LF (an mbox file) or CRLF (IMAP, Gmail); IMAP
+/// can't carry NUL, which Dovecot serves as 0x80; and an mbox must end every
+/// message with a newline, so one that had none (common in mail composed in
+/// Gmail) gains one in the file. Read this way they are one message. A body
+/// with LF endings, no NUL and a final newline hashes as it is.
 pub(crate) fn identity(body: &[u8]) -> Hash {
     let crlf = body.windows(2).any(|w| w == b"\r\n");
-    if !crlf && !body.contains(&0) {
+    if !crlf && !body.contains(&0) && body.ends_with(b"\n") {
         return sha256(body);
     }
     let mut canonical = Vec::with_capacity(body.len());
@@ -52,6 +55,9 @@ pub(crate) fn identity(body: &[u8]) -> Hash {
         }
         canonical.push(if body[i] == 0 { 0x80 } else { body[i] });
         i += 1;
+    }
+    if !canonical.ends_with(b"\n") {
+        canonical.push(b'\n');
     }
     sha256(&canonical)
 }
@@ -609,7 +615,7 @@ pub async fn line_ending_identities(store: &Store) -> Result<u64> {
     let done = store
         .conn
         .query(
-            "SELECT 1 FROM meta WHERE key = 'identity' AND value = 'lf-nul'",
+            "SELECT 1 FROM meta WHERE key = 'identity' AND value = 'lf-nul-eol'",
             (),
         )
         .await?
@@ -709,7 +715,7 @@ pub async fn line_ending_identities(store: &Store) -> Result<u64> {
     store
         .conn
         .execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES ('identity', 'lf-nul')",
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('identity', 'lf-nul-eol')",
             (),
         )
         .await?;
@@ -730,6 +736,10 @@ mod identity_tests {
         // NUL reads as 0x80, as Dovecot serves it over IMAP.
         assert_eq!(identity(b"a\x00b\n"), identity(b"a\x80b\r\n"));
         assert_eq!(identity(b"a\x00b\n"), sha256(b"a\x80b\n"));
+        // A missing final newline reads as present, as an mbox file stores it.
+        assert_eq!(identity(b"a\r\nb"), identity(b"a\r\nb\r\n"));
+        assert_eq!(identity(b"a\nb"), sha256(b"a\nb\n"));
+        assert_ne!(identity(b"a\n"), identity(b"a\n\n"));
         assert_ne!(identity(b"a\r\n"), identity(b"a\r\r\n"));
     }
 }
