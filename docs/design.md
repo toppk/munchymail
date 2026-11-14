@@ -5,8 +5,9 @@ mailboxes and backups: ingest every surviving copy, keep exact bytes and
 where each copy was found, then query, classify and re-export without the
 historical folder tree being the source of truth.
 
-`README.md` is the command reference; `docs/ingest.md` covers how sources
-are read and split; `docs/index.md` covers the schema and performance;
+`README.md` is the command reference; `docs/architecture.md` is the original
+design paper (with `docs/mime-extraction.md` and `docs/surgery.md`);
+`docs/ingest.md` covers how sources are read and split; `docs/index.md` covers the schema and performance;
 `docs/TODO.md` lists what is not built.
 
 ## Thesis
@@ -119,3 +120,8 @@ the databases and runs the CLI's commands sent over a Unix socket.
 - Representing mutable user state (Seen, Flagged, keywords) offline.
 - Which MIME encodings are predictable enough for reversible extraction.
 - Versioning derived indexes so they can be rebuilt after parser changes.
+- One object namespace for headers and bodies, or two.
+- With IMAP sync, telling corpus-derived classifications from the user's
+  own mailbox changes.
+- Per-account object stores for good, or later a shared one.
+- The hash and collision policy to fix in the on-disk format.

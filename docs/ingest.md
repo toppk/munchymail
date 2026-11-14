@@ -1,6 +1,6 @@
 # Ingest: reading sources safely
 
-Addendum to `mail-corpus-design.docx`.
+Addendum to `docs/architecture.md`.
 
 ## Writes
 
