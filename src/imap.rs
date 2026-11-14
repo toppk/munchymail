@@ -236,11 +236,12 @@ struct State {
 fn flags_of(items: &[MessageDataItem]) -> Option<String> {
     items.iter().find_map(|i| match i {
         MessageDataItem::Flags(flags) => {
+            // \Recent belongs to the session that first sees a message, not to the message.
             let mut f: Vec<String> = flags
                 .iter()
-                .map(|f| match f {
-                    FlagFetch::Flag(flag) => flag.to_string(),
-                    FlagFetch::Recent => "\\Recent".into(),
+                .filter_map(|f| match f {
+                    FlagFetch::Flag(flag) => Some(flag.to_string()),
+                    FlagFetch::Recent => None,
                 })
                 .collect();
             f.sort_unstable();
@@ -641,7 +642,7 @@ pub async fn sync(store: &Store, account: &str, label: &str) -> Result<Stats> {
     Ok(stats)
 }
 
-/// Record `flags` as the message's flags from now on.
+/// Record `flags` as the message's flags from now on, unless they already are.
 async fn flag_history(
     store: &Store,
     origin_id: i64,
@@ -654,7 +655,9 @@ async fn flag_history(
         .conn
         .execute(
             "INSERT INTO imap_flags (origin_id, folder, uid_validity, uid, flags, seen_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6
+             WHERE (SELECT flags FROM imap_flags WHERE origin_id = ?1 AND folder = ?2
+                    AND uid_validity = ?3 AND uid = ?4 ORDER BY rowid DESC LIMIT 1) IS NOT ?5",
             (origin_id, folder, validity, uid, flags, now()),
         )
         .await?;
@@ -708,6 +711,26 @@ async fn record_run(store: &Store, origin_id: i64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flags_are_kept_only_when_they_change() {
+        let dir = std::env::temp_dir().join(format!("munchymail-flags-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        pollster::block_on(async {
+            let store = Store::open(&dir).await.unwrap();
+            for flags in ["", "", "\\Seen", "\\Seen", "\\Answered \\Seen", ""] {
+                flag_history(&store, 1, "INBOX", 7, 3, flags).await.unwrap();
+            }
+            let mut rows = store
+                .conn
+                .query("SELECT group_concat(flags, '|') FROM imap_flags", ())
+                .await
+                .unwrap();
+            let all: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
+            assert_eq!(all, "|\\Seen|\\Answered \\Seen|");
+        });
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn imap_roots_are_urls() {
