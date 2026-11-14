@@ -6,8 +6,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 repo_root=$(dirname "$here")
 out=${1:-"$repo_root/_site"}
 theme="$here/theme"
-# Set once the repository is public, e.g. https://github.com/OWNER/munchymail/edit/master
-edit=${MUNCHYMAIL_EDIT_URL:-}
+edit=${MUNCHYMAIL_EDIT_URL-https://github.com/toppk/munchymail/edit/master}
 
 # Reading order: page|title|group|source (source defaults to pages/<page>.md).
 pages=(

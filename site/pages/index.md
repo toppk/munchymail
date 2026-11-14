@@ -8,6 +8,7 @@ hero-image: assets/logo-512.webp
 hero-links:
   - { label: Start the tutorial, href: tutorial.html, kind: primary }
   - { label: Read the design, href: design.html, kind: secondary }
+  - { label: Source on GitHub, href: "https://github.com/toppk/munchymail", kind: secondary }
 description: munchymail is a self-hosted mail archive that keeps every copy of every message, records where each was found, and makes the whole history searchable.
 ---
 

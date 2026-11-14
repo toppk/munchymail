@@ -1,9 +1,13 @@
 # munchymail
 
-An offline, notmuch-like corpus for mail scattered across live mailboxes and
-backups. It imports every copy of every message byte-for-byte, remembers
-where each copy was found, and lets you slice the result by any header,
-which is mainly for working out Sieve rules against real mail.
+A self-hosted mail archive that keeps every copy of every message, read-only
+from its sources, searchable by people and AI agents. It imports mail from
+live mailboxes, old backups and Gmail byte for byte, remembers where each copy
+was found, and searches the whole history: headers (Sieve-style, handy for
+writing filter rules), full text, attachments and what changed between
+imports.
+
+Documentation: <https://toppk.github.io/munchymail/>
 
 Sources are only ever read, under the same shared `fcntl` lock a Dovecot
 reader takes. Everything munchymail writes lives in its data root,
