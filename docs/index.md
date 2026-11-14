@@ -24,6 +24,7 @@ otherwise); `data/` below means that directory. Command usage is in `README.md`.
 | `observation` | Artifact at byte `offset` in a content, with its `From ` line and separator bytes. |
 | `presence` | Where copies are in a live listing (a Gmail label, an IMAP folder): one row per `entry` (Gmail id, IMAP `uidvalidity:uid`) at `path`, from `since_run` until `until_run`, the first run it was gone from (NULL while there). A run writes only what came or went; listings recorded whole by older versions are converted once (`meta` key `presence`). |
 | `imap_flags` | Each IMAP message's flags when first fetched and at every change, with `seen_at`. |
+| `gmail_labels` | Each Gmail message's label ids (`UNREAD`, `STARRED`, categories, user labels) when first fetched and at every change, with `seen_at`; messages stored before it start from their labels then (`meta` key `gmail_label_history`). |
 | `storage_record` | Copies that are a mail store's own records, not mail: Dovecot's "FOLDER INTERNAL DATA" placeholder (`kind` `folder-data`). Kept byte for byte; left out of search, `--count`, export and the overview (whole-archive reports such as `stats` still include them). |
 | `gmail_message` | Gmail's record of each message of the `gmail` origin: Gmail id, the artifact of its raw bytes, thread id, `internal_date` (receipt time), current label ids, and `gone_at` when Gmail deleted it (the artifact stays). |
 | `gmail_label` | Gmail's label ids and names per origin. |

@@ -2234,6 +2234,9 @@ async fn identities(store: &Store) -> Result<()> {
     if let Some(rows) = munchymail::presence::convert_listings(store).await? {
         info!(rows, elapsed = ?t.elapsed(), "live listings now recorded as presence intervals");
     }
+    if let Some(n) = munchymail::gmail::start_label_history(store).await? {
+        info!(n, "Gmail label history started from current labels");
+    }
     if let Some(n) = munchymail::import::mark_storage_records(store).await? {
         info!(n, "copies marked as mail-store records, not mail");
     }

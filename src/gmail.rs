@@ -379,7 +379,13 @@ pub async fn sync(store: &Store, address: &str, jobs: usize, takeouts: &[i64]) -
              WHERE gmail_id = ?1",
         )
         .await?;
-    let (mut ins, mut relabel, mut gone) = (ins, relabel, gone);
+    let history = store
+        .conn
+        .prepare(
+            "INSERT INTO gmail_labels (origin_id, gmail_id, labels, seen_at) VALUES (?1, ?2, ?3, ?4)",
+        )
+        .await?;
+    let (mut ins, mut relabel, mut gone, mut history) = (ins, relabel, gone, history);
     let mut linker = Linker::new(store).await?;
     let mut fresh = Vec::new();
     let rx = fetch_all(s.clone(), work, jobs);
@@ -406,6 +412,11 @@ pub async fn sync(store: &Store, address: &str, jobs: usize, takeouts: &[i64]) -
                     now(),
                 ))
                 .await?;
+                if known.get(&id).is_none_or(|k| k.0 != labels) {
+                    history
+                        .execute((origin_id, id.as_str(), labels.as_str(), now()))
+                        .await?;
+                }
                 stats.fetched += 1;
                 stats.new_artifacts += new as u64;
                 if new {
@@ -416,6 +427,11 @@ pub async fn sync(store: &Store, address: &str, jobs: usize, takeouts: &[i64]) -
                 relabel
                     .execute((id.as_str(), labels.as_str(), now()))
                     .await?;
+                if known.get(&id).is_some_and(|k| k.0 != labels) {
+                    history
+                        .execute((origin_id, id.as_str(), labels.as_str(), now()))
+                        .await?;
+                }
                 stats.relabelled += known.get(&id).is_some_and(|k| k.0 != labels || k.1) as u64;
             }
             Fetched::Gone { id } => {
@@ -523,6 +539,39 @@ async fn snapshot(store: &Store, origin_id: i64, run_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Start each Gmail message's label history from its labels now, for messages
+/// stored before history was kept. Once.
+pub async fn start_label_history(store: &Store) -> Result<Option<u64>> {
+    let c = &store.conn;
+    let done = c
+        .query("SELECT 1 FROM meta WHERE key = 'gmail_label_history'", ())
+        .await?
+        .next()
+        .await?
+        .is_some();
+    if done {
+        return Ok(None);
+    }
+    store.begin().await?;
+    let n = c
+        .execute(
+            "INSERT INTO gmail_labels (origin_id, gmail_id, labels, seen_at)
+             SELECT m.origin_id, m.gmail_id, m.labels, coalesce(m.checked_at, m.internal_date, 0)
+             FROM gmail_message m
+             WHERE NOT EXISTS (SELECT 1 FROM gmail_labels l
+                               WHERE l.origin_id = m.origin_id AND l.gmail_id = m.gmail_id)",
+            (),
+        )
+        .await?;
+    c.execute(
+        "INSERT INTO meta (key, value) VALUES ('gmail_label_history', '1')",
+        (),
+    )
+    .await?;
+    store.commit().await?;
+    Ok(Some(n))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,6 +618,8 @@ mod tests {
             ] {
                 c.execute(sql, ()).await.unwrap();
             }
+            assert_eq!(start_label_history(&store).await.unwrap(), Some(3));
+            assert_eq!(start_label_history(&store).await.unwrap(), None);
             snapshot(&store, 1, 1).await.unwrap();
             let (one, rows) = sightings(&store, 1).await;
             let want = |v: &[(&str, i64)]| {

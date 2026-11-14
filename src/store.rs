@@ -279,6 +279,16 @@ CREATE TABLE IF NOT EXISTS presence (
 CREATE INDEX IF NOT EXISTS presence_open ON presence (origin_id, until_run);
 CREATE INDEX IF NOT EXISTS presence_artifact ON presence (artifact_id);
 
+-- Each Gmail message's label ids (UNREAD, STARRED, user labels) as first seen
+-- and at every change.
+CREATE TABLE IF NOT EXISTS gmail_labels (
+    origin_id INTEGER NOT NULL,
+    gmail_id TEXT NOT NULL,
+    labels TEXT NOT NULL,
+    seen_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS gmail_labels_message ON gmail_labels (origin_id, gmail_id);
+
 -- Each IMAP message's flags as first seen and at every change.
 CREATE TABLE IF NOT EXISTS imap_flags (
     origin_id INTEGER NOT NULL,

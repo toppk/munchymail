@@ -22,6 +22,8 @@ live and leaves the rest unset.
 
 ## Gmail
 
+- Labels, including `UNREAD` (read state) and `STARRED`, are kept as first
+  fetched and at every change (`gmail_labels`), not only the latest.
 - The service polls `history.list` every 3 minutes, which needs only the
   read-only scope (Gmail IMAP IDLE would need full access). When nothing
   changed it only moves its checkpoint and records no import run.
