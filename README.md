@@ -689,3 +689,7 @@ delivered, including Dovecot's own `X-UID`/`Status` headers when the copy
 came from a Dovecot mbox. Rust regex syntax is close to, but not the same
 as, the POSIX regex Pigeonhole uses; confirm anything elaborate with
 `sieve-test`.
+
+## License
+
+MIT; see `LICENSE`.
