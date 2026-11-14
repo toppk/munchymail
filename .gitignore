@@ -3,4 +3,5 @@
 /data
 /client_secret*.json
 /.env
-/site/
+/local/
+/_site/

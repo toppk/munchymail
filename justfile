@@ -23,6 +23,10 @@ adm *args: build
     ln -sf munchymail target/release/mmadm
     target/release/mmadm "$@"
 
+# Build the documentation site into _site/ (needs pandoc); see site/theme/README.md.
+site:
+    site/build.sh _site
+
 # Format check, clippy with warnings as errors, tests.
 check:
     cargo fmt --check

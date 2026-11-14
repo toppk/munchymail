@@ -1,0 +1,21 @@
+# munchymail
+
+> munchymail is a self-hosted mail archive in one Rust binary. It imports mail from mbox trees (read under a Dovecot-compatible shared lock), old backups, Google Takeout and the Gmail API (read-only), keeps every message byte for byte with every place it was found, and never writes to a mail source. `munchymail` searches and reads (Sieve-style header matching, full text including attachments and OCR, history across imports); `mmadm` sets up and maintains the archive. `munchymail describe --json` lists every command and whether it reads or writes; `search --json` and `read --json` are made for agents, and mark message content as untrusted.
+
+Every page below is Markdown. llms-full.txt has all of them in one file.
+
+## Start here
+
+- [Overview](index.md): what munchymail does
+- [Tutorial](tutorial.md): searching and reading, then setting up and importing
+- [Install](install.md): building, installing and running the service
+
+## How it works
+
+- [Design](design.md): the thesis, the data model, facts versus interpretations
+- [Reading sources safely](ingest.md): locking, splitting mbox byte for byte
+- [Index internals](internals.md): the schema and performance rules
+
+## Coming next
+
+- [Keeping mail current](sync.md): the planned periodic sync

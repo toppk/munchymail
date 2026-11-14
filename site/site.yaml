@@ -1,0 +1,12 @@
+# Project settings for the Horizon theme (site/theme/README.md).
+site-title: munchymail
+site-tagline: a mail archive that keeps every copy of every message
+site-logo: assets/logo-128.webp
+site-favicon: assets/favicon.ico
+site-footer: 'munchymail · MIT licensed'
+llms: llms.txt
+top-links:
+  - label: Tutorial
+    href: tutorial.html
+  - label: Design
+    href: design.html

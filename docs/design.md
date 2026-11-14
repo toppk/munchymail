@@ -1,6 +1,6 @@
 # munchymail design
 
-A notmuch-like offline corpus for a lifetime of mail scattered across live
+A notmuch-like local corpus for a lifetime of mail scattered across live
 mailboxes and backups: ingest every surviving copy, keep exact bytes and
 where each copy was found, then query, classify and re-export without the
 historical folder tree being the source of truth.

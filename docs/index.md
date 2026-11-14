@@ -29,13 +29,13 @@ otherwise); `data/` below means that directory. Command usage is in `README.md`.
 | `text_forget` | Messages removed because their copies joined another; `index` drops them from `data/text/`. |
 | `removal` | A copy last seen at `path` in `last_seen_run` and absent in `gone_run`; `moved_to` is where it turned up, NULL if nowhere new. Filled by `import` (per origin) and `record-removals`. |
 
-`meta.schema_version` is 6. Opening an older database upgrades it in the
+`meta.schema_version` is 10. Opening an older database upgrades it in the
 opening transaction (`MIGRATIONS` in `store.rs`: 1 → 2 adds
 `origin.retired_at`; 2 → 3 adds `removal` and `file_sighting_run`, which
 `SCHEMA` creates; 3 → 4 adds `artifact.msg_id` and fills `message` from
 existing artifacts, about 2 s for 262k; `LATE_SCHEMA` then indexes it;
 4 → 5 adds `message.parts_version`/`parts_problem`, after which `import` or
-`index` fills `part`; 5 → 6 adds `message.text_version`); a newer or unknown version refuses to open.
+`index` fills `part`; 5 → 6 adds `message.text_version`; 8 → 9 renames the `mbox` file format to `dovecot`; 9 → 10 adds `origin.role` and makes Gmail origins live); a newer or unknown version refuses to open.
 
 ## Performance rules
 

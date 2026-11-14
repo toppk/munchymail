@@ -24,7 +24,7 @@ to. Cron, `ssh host cmd` and sandboxes may not have the bin directory on
 `PATH`; call `munchymail` there by its full path.
 
 Notes about one particular installation (its paths, accounts, history) don't
-belong in this repository; keep them in a git-ignored `site/` or elsewhere.
+belong in this repository; keep them in a git-ignored `local/` or elsewhere.
 
 ## Installing a release
 
