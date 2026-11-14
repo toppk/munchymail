@@ -60,11 +60,14 @@ pub async fn matching(store: &Store, filter: &Filter, unique: bool) -> Result<&'
     if unique {
         if set == "artifact" {
             for sql in [
-                "CREATE TEMP TABLE IF NOT EXISTS hit (artifact_id INTEGER PRIMARY KEY)",
-                "DELETE FROM hit",
-                "INSERT INTO hit SELECT artifact_id FROM artifact",
+                "CREATE TEMP TABLE IF NOT EXISTS hit (artifact_id INTEGER PRIMARY KEY)".to_string(),
+                "DELETE FROM hit".to_string(),
+                format!(
+                    "INSERT INTO hit SELECT a.artifact_id FROM artifact a WHERE {}",
+                    crate::query::NOT_MAIL
+                ),
             ] {
-                store.conn.execute(sql, ()).await?;
+                store.conn.execute(&sql, ()).await?;
             }
             set = "hit";
         }
@@ -84,20 +87,23 @@ pub async fn page(
     if !(1..=MAX_LIMIT).contains(&limit) {
         bail!("limit must be 1..={MAX_LIMIT}, got {limit}");
     }
-    let from = match set {
-        "hit" => "hit JOIN artifact a ON a.artifact_id = hit.artifact_id",
-        _ => "artifact a",
+    let (from, mail) = match set {
+        "hit" => (
+            "hit JOIN artifact a ON a.artifact_id = hit.artifact_id",
+            "1",
+        ),
+        _ => ("artifact a", crate::query::NOT_MAIL),
     };
     let key = format!("coalesce(a.date, {NO_DATE})");
     let (cond, mut params): (String, Vec<Value>) = match after {
         Some(c) => {
             let (d, id) = parse_cursor(c)?;
             (
-                format!("WHERE {key} < ?1 OR ({key} = ?1 AND a.artifact_id < ?2)"),
+                format!("WHERE {mail} AND ({key} < ?1 OR ({key} = ?1 AND a.artifact_id < ?2))"),
                 vec![d.into(), id.into()],
             )
         }
-        None => (String::new(), Vec::new()),
+        None => (format!("WHERE {mail}"), Vec::new()),
     };
     params.push(((limit + 1) as i64).into());
     let mut stmt = store

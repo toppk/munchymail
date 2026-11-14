@@ -1779,7 +1779,14 @@ async fn search(
     warn_unindexed(store, &filter).await?;
     if count {
         let set = api::matching(store, &filter, unique).await?;
-        let rows = query_rows(store, &format!("SELECT count(*) FROM {set}"), vec![]).await?;
+        let sql = match set {
+            "artifact" => format!(
+                "SELECT count(*) FROM artifact a WHERE {}",
+                munchymail::query::NOT_MAIL
+            ),
+            _ => format!("SELECT count(*) FROM {set}"),
+        };
+        let rows = query_rows(store, &sql, vec![]).await?;
         writeln!(out, "{}", text(&rows[0][0]))?;
         return Ok(());
     }

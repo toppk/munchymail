@@ -547,7 +547,7 @@ pub async fn mark_storage_records(store: &Store) -> Result<Option<u64>> {
              SELECT h.artifact_id, 'folder-data' FROM header h
              WHERE h.name = 'subject' AND h.nth = 0 AND h.value = ?1
                AND EXISTS (SELECT 1 FROM header x
-                           WHERE x.artifact_id = h.artifact_id AND x.name = 'x-imapbase')",
+                           WHERE x.artifact_id = h.artifact_id AND x.name IN ('x-imap', 'x-imapbase'))",
             (headers::FOLDER_DATA_SUBJECT,),
         )
         .await?;

@@ -17,7 +17,7 @@ fn folder_data_is_kept_but_not_mail() {
             "From MAILER_DAEMON  Mon Oct  6 09:00:00 2026\n\
              From: Mail System Internal Data <MAILER-DAEMON@x>\n\
              Subject: DON'T DELETE THIS MESSAGE -- FOLDER INTERNAL DATA\n\
-             X-IMAPbase: 1216699624 0000000002\n\
+             X-IMAP: 1216699624 0000000002\n\
              Status: RO\n\n\
              This text is part of the internal format of your mail folder.\n\n\
              From a@x  Mon Oct  6 09:00:00 2026\n\

@@ -342,29 +342,14 @@ impl Filter {
     }
 
     /// Fill TEMP TABLE `hit` with matching artifact ids and return the table to
-    /// select from: `hit`, or `artifact` when there is no filter.
+    /// select from: `hit`, or `artifact` when there is no filter (where
+    /// listings skip `NOT_MAIL` themselves).
     pub async fn materialize(&self, conn: &Connection) -> Result<&'static str> {
-        if self.materialize_into(conn, "hit").await? {
-            return Ok("hit");
-        }
-        let records = conn
-            .query("SELECT 1 FROM storage_record LIMIT 1", ())
-            .await?
-            .next()
-            .await?
-            .is_some();
-        if !records {
-            return Ok("artifact");
-        }
-        for sql in [
-            "CREATE TEMP TABLE IF NOT EXISTS hit (artifact_id INTEGER PRIMARY KEY)",
-            "DELETE FROM hit",
-            "INSERT INTO hit SELECT artifact_id FROM artifact
-             WHERE artifact_id NOT IN (SELECT artifact_id FROM storage_record)",
-        ] {
-            conn.execute(sql, ()).await?;
-        }
-        Ok("hit")
+        Ok(if self.materialize_into(conn, "hit").await? {
+            "hit"
+        } else {
+            "artifact"
+        })
     }
 
     /// Whether any condition is set; without one, everything matches.
@@ -446,6 +431,10 @@ impl Filter {
         Ok(true)
     }
 }
+
+/// SQL condition on `a.artifact_id`: not a mail store's own record.
+pub const NOT_MAIL: &str =
+    "NOT EXISTS (SELECT 1 FROM storage_record x WHERE x.artifact_id = a.artifact_id)";
 
 /// A message's preferred copy, as SQL over its copies `a` joined to `fold f`:
 /// not folded, then the earliest stored.
