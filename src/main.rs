@@ -649,6 +649,10 @@ enum Cmd {
         /// Heading of index.md; default NAME.
         #[arg(long)]
         title: Option<String>,
+        /// Line endings of the messages: stored copies have their source's
+        /// (mbox LF, IMAP and Gmail CRLF); a message mixing both is left as is.
+        #[arg(long, value_enum, default_value = "lf")]
+        newlines: export::Newlines,
     },
     /// Attachments by type, most common first.
     ///
@@ -2212,6 +2216,11 @@ async fn read(store: &Store, r: api::Ref, json: bool, out: &mut impl Write) -> R
 
 async fn index(store: &Store) -> Result<()> {
     let t = Instant::now();
+    let changed = munchymail::import::line_ending_identities(store).await?;
+    if changed > 0 {
+        info!(changed, elapsed = ?t.elapsed(), "message identities now read CRLF as LF");
+    }
+    let t = Instant::now();
     let s = parts::index(store).await?;
     info!(
         messages = s.messages,
@@ -3766,6 +3775,7 @@ async fn with_store(cmd: Cmd, store: &Store, out: &mut impl Write) -> Result<()>
             filter,
             output,
             title,
+            newlines,
         } => {
             if name.is_empty() || name.starts_with('.') || name.contains('/') {
                 bail!("export name {name:?} must be a plain file name");
@@ -3787,7 +3797,9 @@ async fn with_store(cmd: Cmd, store: &Store, out: &mut impl Write) -> Result<()>
             let s = match client {
                 Some(file) => {
                     let mut w = io::BufWriter::with_capacity(1 << 16, file?);
-                    let s = export::write(store, &filter, &name, &title, &command, &mut w).await?;
+                    let s =
+                        export::write(store, &filter, &name, &title, &command, newlines, &mut w)
+                            .await?;
                     w.flush()?;
                     s
                 }
@@ -3796,7 +3808,9 @@ async fn with_store(cmd: Cmd, store: &Store, out: &mut impl Write) -> Result<()>
                     let file = std::fs::File::create(&tmp)
                         .with_context(|| format!("creating {}", tmp.display()))?;
                     let mut w = io::BufWriter::new(file);
-                    let s = export::write(store, &filter, &name, &title, &command, &mut w).await;
+                    let s =
+                        export::write(store, &filter, &name, &title, &command, newlines, &mut w)
+                            .await;
                     let file = w.into_inner().map_err(io::IntoInnerError::into_error);
                     match (s, file) {
                         (Ok(s), Ok(f)) => {

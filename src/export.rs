@@ -57,12 +57,53 @@ fn cell(s: &str) -> String {
 /// Write a .tgz of every message matching `filter` to `out`.
 /// Copies of one message (`artifact.msg_id`) are exported once, using the
 /// copy seen most recently. `command` is quoted in index.md as provenance.
+/// Line endings for the exported messages.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum Newlines {
+    /// Unix (LF), as mbox and maildir tools expect.
+    #[default]
+    Lf,
+    /// Network (CRLF), as IMAP and RFC 5322 use.
+    Crlf,
+}
+
+/// `bytes` with `to` line endings, if they are all one kind now; a message
+/// that mixes them is left as it is.
+pub fn newlines(bytes: Vec<u8>, to: Newlines) -> Vec<u8> {
+    let lfs = bytes.iter().filter(|&&b| b == b'\n').count();
+    let crlfs = bytes.windows(2).filter(|w| *w == b"\r\n").count();
+    match to {
+        Newlines::Lf if crlfs > 0 && crlfs == lfs => {
+            let mut out = Vec::with_capacity(bytes.len() - crlfs);
+            for (i, &b) in bytes.iter().enumerate() {
+                if !(b == b'\r' && bytes.get(i + 1) == Some(&b'\n')) {
+                    out.push(b);
+                }
+            }
+            out
+        }
+        Newlines::Crlf if lfs > 0 && !bytes.contains(&b'\r') => {
+            let mut out = Vec::with_capacity(bytes.len() + lfs);
+            for &b in &bytes {
+                if b == b'\n' {
+                    out.push(b'\r');
+                }
+                out.push(b);
+            }
+            out
+        }
+        _ => bytes,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn write(
     store: &Store,
     filter: &Filter,
     name: &str,
     title: &str,
     command: &str,
+    line_endings: Newlines,
     out: &mut impl Write,
 ) -> Result<Summary> {
     if filter.materialize(&store.conn).await? != "hit" {
@@ -136,6 +177,7 @@ pub async fn write(
         let file = format!("maildir/{:0width$}", n + 1);
         let mut bytes = store.object(&a.header_hash).await?;
         bytes.extend(store.object(&a.body_hash).await?);
+        let bytes = newlines(bytes, line_endings);
         let mut h = tar::Header::new_ustar();
         h.set_mode(0o644);
         h.set_mtime(a.date.unwrap_or(t).max(0) as u64);
@@ -192,4 +234,22 @@ pub async fn write(
         messages: chosen.len(),
         folded,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn newlines_convert_only_uniform_messages() {
+        let crlf = b"Subject: a\r\n\r\nline\r\n".to_vec();
+        let lf = b"Subject: a\n\nline\n".to_vec();
+        assert_eq!(newlines(crlf.clone(), Newlines::Lf), lf);
+        assert_eq!(newlines(lf.clone(), Newlines::Crlf), crlf);
+        assert_eq!(newlines(lf.clone(), Newlines::Lf), lf);
+        assert_eq!(newlines(crlf.clone(), Newlines::Crlf), crlf);
+        let mixed = b"Subject: a\r\n\nline\n".to_vec();
+        assert_eq!(newlines(mixed.clone(), Newlines::Lf), mixed);
+        assert_eq!(newlines(mixed.clone(), Newlines::Crlf), mixed);
+    }
 }

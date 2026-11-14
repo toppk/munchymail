@@ -59,9 +59,14 @@ server_cert = "/etc/pki/my-ca.pem"
   UIDVALIDITY, UIDNEXT or HIGHESTMODSEQ moved. With QRESYNC the server
   reports what was expunged and which flags changed since the last check;
   new UIDs are then fetched in batches of 100.
-- The first sync fetches every message once. IMAP copies differ from the
-  mbox copies only in Dovecot's own headers, so they join the same
-  messages.
+- The first sync fetches every message once. Measured against Dovecot's
+  mbox files: an IMAP copy is the file's message with CRLF line endings
+  (IMAP requires them; Dovecot stores LF unless `mail_save_crlf`) and
+  without Dovecot's own fields (`Status`, `X-Status`, `X-Keywords`,
+  `X-UID`, `Content-Length`, `X-IMAPbase`); each file's "FOLDER INTERNAL
+  DATA" message isn't served at all. Copies are stored exactly as received,
+  and a message's identity reads CRLF as LF, so both copies are one
+  message.
 - A folder's progress is saved only after its messages are; an interrupted
   sync redoes the folder and skips what it already stored.
 - Like Gmail, a check that finds nothing new records no import run; each

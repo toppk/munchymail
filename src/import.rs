@@ -29,8 +29,29 @@ fn sha256(b: &[u8]) -> Hash {
 pub(crate) struct Prepared {
     header_hash: Hash,
     body_hash: Hash,
+    /// What makes two copies one message: the body with CRLF read as LF.
+    identity: Hash,
     fields: Vec<Field>,
     summary: Summary,
+}
+
+/// A body's identity: its hash with each CRLF read as LF, so the same email
+/// stored with Unix line endings (an mbox file) and with network ones (IMAP,
+/// Gmail) is one message. A body without CRLF is its own hash.
+pub(crate) fn identity(body: &[u8]) -> Hash {
+    if !body.windows(2).any(|w| w == b"\r\n") {
+        return sha256(body);
+    }
+    let mut lf = Vec::with_capacity(body.len());
+    let mut i = 0;
+    while i < body.len() {
+        if body[i] == b'\r' && body.get(i + 1) == Some(&b'\n') {
+            i += 1;
+        }
+        lf.push(body[i]);
+        i += 1;
+    }
+    sha256(&lf)
 }
 
 pub(crate) fn prepare(header: &[u8], body: &[u8]) -> Prepared {
@@ -39,6 +60,7 @@ pub(crate) fn prepare(header: &[u8], body: &[u8]) -> Prepared {
     Prepared {
         header_hash: sha256(header),
         body_hash: sha256(body),
+        identity: identity(body),
         fields,
         summary,
     }
@@ -124,7 +146,7 @@ impl Artifacts {
             ));
         }
         let id = store.conn.last_insert_rowid();
-        let msg = self.message(store, &p.body_hash, s).await?;
+        let msg = self.message(store, &p.identity, s).await?;
         self.set_message.execute((msg, id)).await?;
         let mut seen: HashMap<&str, i64> = HashMap::new();
         for (i, f) in p.fields.iter().enumerate() {
@@ -576,4 +598,130 @@ pub(crate) async fn sight_listings(
             .await?;
     }
     Ok(())
+}
+
+/// Move messages stored before identities read CRLF as LF onto that
+/// identity, joining any that turn out to be one message. Runs once.
+pub async fn line_ending_identities(store: &Store) -> Result<u64> {
+    let done = store
+        .conn
+        .query(
+            "SELECT 1 FROM meta WHERE key = 'identity' AND value = 'lf'",
+            (),
+        )
+        .await?
+        .next()
+        .await?
+        .is_some();
+    if done {
+        return Ok(0);
+    }
+    let mut todo = Vec::new();
+    let mut rows = store
+        .conn
+        .query(
+            "SELECT m.msg_id, m.body_hash, m.message_id, m.date,
+                    (SELECT a.body_hash FROM artifact a WHERE a.msg_id = m.msg_id LIMIT 1)
+             FROM message m",
+            (),
+        )
+        .await?;
+    while let Some(r) = rows.next().await? {
+        let body: Option<Vec<u8>> = r.get(4)?;
+        if let Some(body) = body {
+            todo.push((
+                r.get::<i64>(0)?,
+                r.get::<Vec<u8>>(1)?,
+                r.get::<Option<String>>(2)?,
+                r.get::<Option<i64>>(3)?,
+                body,
+            ));
+        }
+    }
+    drop(rows);
+    let mut changed = 0;
+    store.begin().await?;
+    for (n, (msg, old, message_id, date, body_hash)) in todo.iter().enumerate() {
+        let new = identity(&store.object(body_hash).await?);
+        if new.as_slice() == old.as_slice() {
+            continue;
+        }
+        changed += 1;
+        let mut rows = store
+            .conn
+            .query(
+                "SELECT msg_id FROM message WHERE body_hash = ?1 AND message_id IS ?2 AND date IS ?3",
+                (new.to_vec(), message_id.clone(), *date),
+            )
+            .await?;
+        let same: Option<i64> = rows.next().await?.map(|r| r.get(0)).transpose()?;
+        drop(rows);
+        match same {
+            Some(into) => {
+                // One email stored with both line endings: keep `into`, retire `msg`.
+                let c = &store.conn;
+                c.execute(
+                    "UPDATE artifact SET msg_id = ?2 WHERE msg_id = ?1",
+                    (*msg, into),
+                )
+                .await?;
+                c.execute("DELETE FROM part WHERE msg_id = ?1", (*msg,))
+                    .await?;
+                c.execute("DELETE FROM message WHERE msg_id = ?1", (*msg,))
+                    .await?;
+                c.execute(
+                    "INSERT OR IGNORE INTO text_forget (msg_id) VALUES (?1)",
+                    (*msg,),
+                )
+                .await?;
+                c.execute(
+                    "UPDATE message SET parts_version = NULL, text_version = NULL WHERE msg_id = ?1",
+                    (into,),
+                )
+                .await?;
+            }
+            None => {
+                store
+                    .conn
+                    .execute(
+                        "UPDATE message SET body_hash = ?2 WHERE msg_id = ?1",
+                        (*msg, new.to_vec()),
+                    )
+                    .await?;
+            }
+        }
+        if (n + 1) % 5000 == 0 {
+            store.commit().await?;
+            tracing::info!(
+                done = n + 1,
+                of = todo.len(),
+                changed,
+                "line-ending identities"
+            );
+            store.begin().await?;
+        }
+    }
+    store
+        .conn
+        .execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('identity', 'lf')",
+            (),
+        )
+        .await?;
+    store.commit().await?;
+    Ok(changed)
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn identity_reads_crlf_as_lf() {
+        assert_eq!(identity(b"a\r\nb\r\n"), sha256(b"a\nb\n"));
+        assert_eq!(identity(b"a\nb\n"), sha256(b"a\nb\n"));
+        // A lone CR is content, not a line ending.
+        assert_eq!(identity(b"a\rb\n"), sha256(b"a\rb\n"));
+        assert_ne!(identity(b"a\r\n"), identity(b"a\r\r\n"));
+    }
 }

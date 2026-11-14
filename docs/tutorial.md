@@ -140,7 +140,8 @@ munchymail export taxes-2026 --participant '*@accountant.example' --since 2026-0
 
 This writes `exports/taxes-2026.tgz` in the account's data directory (or
 wherever `-o FILE` says). It holds a readable `index.md` and the messages as
-a maildir.
+a maildir, with Unix line endings; `--newlines crlf` gives network ones.
+(Stored copies keep their source's: mbox files LF, IMAP and Gmail CRLF.)
 
 ## 6. Scripts and agents
 

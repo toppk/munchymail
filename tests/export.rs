@@ -55,6 +55,7 @@ async fn scenario(dir: &std::path::Path) {
         "corp",
         "Corp",
         "munchymail export corp",
+        export::Newlines::Lf,
         &mut std::fs::File::create(&out).unwrap(),
     )
     .await
