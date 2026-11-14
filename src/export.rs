@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use turso::Value;
 
 use crate::locations::{self, Location, Sightings};
-use crate::query::Filter;
+use crate::query::{Filter, PREFERRED};
 use crate::store::{Store, now};
 use crate::util::{hex, ymd, ymd_hm};
 
@@ -54,9 +54,6 @@ fn cell(s: &str) -> String {
     out
 }
 
-/// Write a .tgz of every message matching `filter` to `out`.
-/// Copies of one message (`artifact.msg_id`) are exported once, using the
-/// copy seen most recently. `command` is quoted in index.md as provenance.
 /// Line endings for the exported messages.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum Newlines {
@@ -98,6 +95,9 @@ pub fn newlines(bytes: Vec<u8>, to: Newlines) -> Vec<u8> {
     }
 }
 
+/// Write a .tgz of every message matching `filter` to `out`. A message is
+/// exported once, as its preferred copy (not folded, then the earliest stored),
+/// whichever of its copies matched. `command` is quoted in index.md as provenance.
 #[allow(clippy::too_many_arguments)]
 pub async fn write(
     store: &Store,
@@ -136,28 +136,52 @@ pub async fn write(
     }
 
     let mut sightings = Sightings::new(store).await?;
-    // Message -> where seen, and (last seen, index) of each copy.
-    type Group = (Vec<Location>, Vec<(i64, usize)>);
-    let mut groups: HashMap<i64, Group> = HashMap::new();
-    for (i, a) in artifacts.iter().enumerate() {
-        let (seen, members) = groups.entry(a.msg_id).or_default();
-        let locs = sightings.of(a.id).await?;
-        let last = locs.iter().map(|l| l.last_seen).max().unwrap_or(0);
-        locations::merge(seen, locs);
-        members.push((last, i));
+    // Message -> where its matching copies were seen.
+    let mut groups: HashMap<i64, Vec<Location>> = HashMap::new();
+    for a in &artifacts {
+        locations::merge(
+            groups.entry(a.msg_id).or_default(),
+            sightings.of(a.id).await?,
+        );
     }
-
-    // One representative per message, in date order.
     let folded = artifacts.len() - groups.len();
-    let mut chosen: Vec<(&Artifact, Vec<Location>)> = groups
-        .into_values()
-        .map(|(seen, members)| {
-            let &(_, i) = members
-                .iter()
-                .max_by_key(|&&(run, i)| (run, artifacts[i].id))
-                .unwrap();
-            (&artifacts[i], seen)
-        })
+
+    // Each message's preferred copy, in date order.
+    let mut rows = store
+        .conn
+        .query(
+            &format!(
+                "SELECT p.artifact_id, p.date, p.header_hash, p.body_hash, p.msg_id, p.subject
+                 FROM (SELECT {PREFERRED} AS id FROM artifact a
+                       LEFT JOIN fold f ON f.artifact_id = a.artifact_id
+                       WHERE a.msg_id IN (SELECT m.msg_id FROM hit JOIN artifact m
+                                          ON m.artifact_id = hit.artifact_id)
+                       GROUP BY a.msg_id) q
+                 JOIN artifact p ON p.artifact_id = q.id"
+            ),
+            (),
+        )
+        .await?;
+    let mut preferred = Vec::new();
+    while let Some(r) = rows.next().await? {
+        preferred.push(Artifact {
+            id: r.get(0)?,
+            date: r.get(1)?,
+            header_hash: blob(r.get_value(2)?)?,
+            body_hash: blob(r.get_value(3)?)?,
+            msg_id: r.get(4)?,
+            subject: r.get::<Option<String>>(5)?.unwrap_or_default(),
+        });
+    }
+    drop(rows);
+    let matched: std::collections::HashSet<i64> = artifacts.iter().map(|a| a.id).collect();
+    let unmatched = preferred
+        .iter()
+        .filter(|a| !matched.contains(&a.id))
+        .count();
+    let mut chosen: Vec<(&Artifact, Vec<Location>)> = preferred
+        .iter()
+        .map(|a| (a, groups.remove(&a.msg_id).unwrap_or_default()))
         .collect();
     chosen.sort_by_key(|(a, _)| (a.date.is_none(), a.date, a.id));
 
@@ -222,8 +246,15 @@ pub async fn write(
     if folded > 0 {
         write!(
             index,
-            "\n{folded} further stored copies of these messages (same body, Message-ID and\n\
-             Date; headers rewritten, e.g. by the mail server) are left out.\n"
+            "\n{folded} further stored copies of these messages (the same email stored\n\
+             again, e.g. with headers a mail server added) are left out.\n"
+        )?;
+    }
+    if unmatched > 0 {
+        write!(
+            index,
+            "\n{unmatched} of these messages matched through another copy; each message is\n\
+             exported as its preferred copy (not a lesser one, then the earliest stored).\n"
         )?;
     }
     write!(

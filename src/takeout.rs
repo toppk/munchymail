@@ -121,7 +121,7 @@ pub struct Linker<'a> {
     move_artifact: Statement,
     still_used: Statement,
     del_parts: Statement,
-    del_message: Statement,
+    retire_message: Statement,
     forget_text: Statement,
     reindex: Statement,
 }
@@ -174,7 +174,9 @@ impl<'a> Linker<'a> {
                 .prepare("SELECT 1 FROM artifact WHERE msg_id = ?1 LIMIT 1")
                 .await?,
             del_parts: c.prepare("DELETE FROM part WHERE msg_id = ?1").await?,
-            del_message: c.prepare("DELETE FROM message WHERE msg_id = ?1").await?,
+            retire_message: c
+                .prepare("UPDATE message SET merged_into = ?2, key = NULL WHERE msg_id = ?1")
+                .await?,
             forget_text: c
                 .prepare("INSERT OR IGNORE INTO text_forget (msg_id) VALUES (?1)")
                 .await?,
@@ -229,7 +231,8 @@ impl<'a> Linker<'a> {
         Ok(compare(&api_h, &api_b, &t_h, &t_b))
     }
 
-    /// Put Takeout copy `t` in `api`'s message, dropping the message `t` leaves if now empty.
+    /// Put Takeout copy `t` in `api`'s message; the message `t` leaves, if now
+    /// empty, stays as merged into it.
     async fn link(&mut self, t: &Artifact, api: &Artifact, why: &str) -> Result<()> {
         self.ins_fold.execute((t.id, api.id, why)).await?;
         if t.msg_id == api.msg_id {
@@ -248,7 +251,7 @@ impl<'a> Linker<'a> {
             .is_none()
         {
             self.del_parts.execute((t.msg_id,)).await?;
-            self.del_message.execute((t.msg_id,)).await?;
+            self.retire_message.execute((t.msg_id, api.msg_id)).await?;
             self.forget_text.execute((t.msg_id,)).await?;
         }
         Ok(())
@@ -444,7 +447,14 @@ From: a@x\r\nMessage-ID: <m@x>\r\nDate: Fri, 6 Nov 2026 21:47:12 +0000\r\n\r\n>F
             sync_api(&store, gmail, takeout).await;
         }
         assert_eq!(one(&store, "SELECT count(*) FROM artifact").await, 2);
-        assert_eq!(one(&store, "SELECT count(*) FROM message").await, 1);
+        assert_eq!(
+            one(
+                &store,
+                "SELECT count(*) FROM message WHERE merged_into IS NULL"
+            )
+            .await,
+            1
+        );
         assert_eq!(
             one(&store, "SELECT count(DISTINCT msg_id) FROM artifact").await,
             1

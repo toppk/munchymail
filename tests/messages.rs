@@ -99,9 +99,8 @@ async fn scenario(dir: &std::path::Path) {
     assert_eq!(r.copies.len(), 3);
     assert!(r.locations.iter().any(|l| l.current));
     assert_eq!(r.decoded.text.trim(), "same");
-    // The copy shown is one still in the mailbox.
-    let shown = api::read(&store, Ref::Copy(r.id)).await.unwrap();
-    assert!(shown.locations.iter().any(|l| l.current));
+    // The copy shown is the preferred one: the earliest stored, not the newest seen.
+    assert_eq!(r.id, *r.copies.iter().min().unwrap());
     assert!(api::read(&store, Ref::Message(999_999)).await.is_err());
 
     // A version 3 database gets the same grouping when upgraded.
@@ -115,6 +114,12 @@ async fn scenario(dir: &std::path::Path) {
     }
     drop(store);
     let store = Store::open(&dir.join("data")).await.unwrap();
+    let (hits, _) = api::search(&store, &Filter::default(), true, 100, None)
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 6);
+    // Regrouped under the current key rule, still the same six.
+    munchymail::rekey::regroup(&store).await.unwrap();
     let (hits, _) = api::search(&store, &Filter::default(), true, 100, None)
         .await
         .unwrap();

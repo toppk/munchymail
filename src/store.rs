@@ -15,14 +15,14 @@ use crate::util::hex;
 /// Objects at most this size live inline in SQLite.
 pub const INLINE_MAX: usize = 16 * 1024;
 
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 /// How long a `connect`ed connection waits for another's write to finish.
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Upgrades from the previous version; index `i` brings version `i + 1` to `i + 2`.
 /// New tables and indexes need no entry: `SCHEMA` creates them if missing.
-const MIGRATIONS: [&str; 9] = [
+const MIGRATIONS: [&str; 10] = [
     "ALTER TABLE origin ADD COLUMN retired_at INTEGER",
     "",
     "ALTER TABLE artifact ADD COLUMN msg_id INTEGER;
@@ -39,10 +39,14 @@ const MIGRATIONS: [&str; 9] = [
     "UPDATE file_content SET format = 'dovecot' WHERE format = 'mbox'",
     "ALTER TABLE origin ADD COLUMN role TEXT;
      UPDATE origin SET role = 'live' WHERE root LIKE 'gmail:%' AND role IS NULL;",
+    "ALTER TABLE message ADD COLUMN key BLOB;
+     ALTER TABLE message ADD COLUMN merged_into INTEGER;
+     ALTER TABLE message ADD COLUMN split_from INTEGER;",
 ];
 
 /// Indexes on columns a migration may have just added.
-const LATE_SCHEMA: &str = "CREATE INDEX IF NOT EXISTS artifact_msg ON artifact (msg_id);";
+const LATE_SCHEMA: &str = "CREATE INDEX IF NOT EXISTS artifact_msg ON artifact (msg_id);
+     CREATE INDEX IF NOT EXISTS message_key ON message (key);";
 
 const SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
@@ -74,9 +78,17 @@ CREATE INDEX IF NOT EXISTS artifact_message_id ON artifact (message_id);
 -- together; Date splits reused Message-IDs and ID-less mail sharing a body.
 CREATE TABLE IF NOT EXISTS message (
     msg_id INTEGER PRIMARY KEY,
+    -- the body's identity (key::identity)
     body_hash BLOB NOT NULL,
+    -- the parsed Message-ID (key::message_id); NULL if none is valid
     message_id TEXT,
     date INTEGER,
+    -- key::key of its copies; NULL once merged
+    key BLOB,
+    -- set when its copies joined that message; the row stays so mN still resolves
+    merged_into INTEGER,
+    -- the message it was split from, if it began that way
+    split_from INTEGER,
     -- parts::VERSION that filled its `part` rows; NULL = not yet
     parts_version INTEGER,
     -- why its MIME structure didn't parse, if it didn't

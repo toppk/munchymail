@@ -198,13 +198,34 @@ async fn load(store: &Store, id: i64) -> Result<Stored> {
     })
 }
 
-/// Every stored copy of message `msg`, the one to show (not a lesser copy,
-/// then seen most recently, then newest stored), and the places of all of them.
+/// The message `msg` names now: itself, or the one its copies joined.
+pub async fn resolve(store: &Store, msg: i64) -> Result<i64> {
+    let mut at = msg;
+    for _ in 0..64 {
+        let mut rows = store
+            .conn
+            .query("SELECT merged_into FROM message WHERE msg_id = ?1", (at,))
+            .await?;
+        match rows.next().await? {
+            Some(r) => match r.get::<Option<i64>>(0)? {
+                Some(into) => at = into,
+                None => return Ok(at),
+            },
+            None => bail!("no message m{msg}; `search --json` lists message ids"),
+        }
+    }
+    bail!("m{msg} is merged in a loop; the archive needs checking")
+}
+
+/// Every stored copy of message `msg` (or the one it was merged into), the one
+/// to show (its preferred copy: not folded, then the earliest stored), and the
+/// places of all of them.
 async fn message_copies(
     store: &Store,
     sightings: &mut Sightings,
     msg: i64,
 ) -> Result<(Vec<i64>, i64, Vec<Location>)> {
+    let msg = resolve(store, msg).await?;
     let mut rows = store
         .conn
         .query(
@@ -222,18 +243,16 @@ async fn message_copies(
     }
     drop(rows);
     let mut all = Vec::new();
-    let mut best = None;
-    for (&id, &primary) in ids.iter().zip(&primary) {
-        let locs = sightings.of(id).await?;
-        let key = (
-            primary,
-            locs.iter().map(|l| l.last_seen).max().unwrap_or(0),
-            id,
-        );
-        best = best.max(Some(key));
-        locations::merge(&mut all, locs);
+    for &id in &ids {
+        locations::merge(&mut all, sightings.of(id).await?);
     }
-    let Some((_, _, chosen)) = best else {
+    let Some(chosen) = ids
+        .iter()
+        .zip(&primary)
+        .find(|&(_, &p)| p)
+        .map(|(&id, _)| id)
+        .or(ids.first().copied())
+    else {
         bail!("no message m{msg}; `search --json` lists message ids")
     };
     Ok((ids, chosen, all))
@@ -301,6 +320,8 @@ pub struct Message {
     /// The copy shown.
     pub id: i64,
     pub msg: i64,
+    /// The `mN` asked for, when its copies have since joined `msg`.
+    pub merged_from: Option<i64>,
     /// Every stored copy of the message, oldest first.
     pub copies: Vec<i64>,
     pub date: Option<i64>,
@@ -367,9 +388,14 @@ pub async fn read(store: &Store, r: Ref) -> Result<Message> {
         Ref::Message(_) => all,
         Ref::Copy(_) => sightings.of(id).await?,
     };
+    let merged_from = match r {
+        Ref::Message(m) if m != s.msg => Some(m),
+        _ => None,
+    };
     Ok(Message {
         id,
         msg: s.msg,
+        merged_from,
         copies,
         date: s.date,
         message_id: s.message_id,
@@ -431,6 +457,7 @@ impl Message {
             "type": "message",
             "id": self.id,
             "message": Ref::Message(self.msg).to_string(),
+            "merged_from": self.merged_from.map(|m| Ref::Message(m).to_string()),
             "copies": self.copies,
             "date": opt_time(self.date),
             "message_id": self.message_id.as_deref().map(sanitize),

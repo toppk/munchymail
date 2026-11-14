@@ -64,7 +64,7 @@ server_cert = "/etc/pki/my-ca.pem"
   (IMAP requires them; Dovecot stores LF unless `mail_save_crlf`) and
   without Dovecot's own fields (`Status`, `X-Status`, `X-Keywords`,
   `X-UID`, `Content-Length`, `X-IMAPbase`); each file's "FOLDER INTERNAL
-  DATA" message isn't served at all. IMAP can't carry NUL, so Dovecot serves
+  DATA" message isn't served at all. An ordinary IMAP fetch can't carry NUL, so Dovecot serves
   it as 0x80; and a message that ended without a newline gains one in the
   mbox file. Copies are stored exactly as received, and a message's identity
   reads CRLF as LF, NUL as 0x80 and adds a missing final newline, so both

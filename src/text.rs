@@ -73,7 +73,7 @@ pub async fn pending(store: &Store) -> Result<i64> {
     let mut rows = store
         .conn
         .query(
-            "SELECT count(*) FROM message WHERE text_version IS NOT ?1",
+            "SELECT count(*) FROM message WHERE text_version IS NOT ?1 AND merged_into IS NULL",
             (VERSION,),
         )
         .await?;

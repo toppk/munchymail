@@ -11,6 +11,7 @@ use tracing::{debug, info};
 use turso::{Statement, Value};
 
 use crate::headers::{self, Field, Summary};
+use crate::key::{self, Key};
 use crate::mbox;
 use crate::source;
 use crate::store::{INLINE_MAX, Store, now};
@@ -29,37 +30,10 @@ fn sha256(b: &[u8]) -> Hash {
 pub(crate) struct Prepared {
     header_hash: Hash,
     body_hash: Hash,
-    /// What makes two copies one message: the body with CRLF read as LF.
-    identity: Hash,
+    /// What makes copies one message (`key::key`).
+    key: Key,
     fields: Vec<Field>,
     summary: Summary,
-}
-
-/// A body's identity, the same rule for every source: its hash with each CRLF
-/// read as LF, each NUL as 0x80, and a final newline added if it lacks one. A
-/// store keeps the same email as LF (an mbox file) or CRLF (IMAP, Gmail); IMAP
-/// can't carry NUL, which Dovecot serves as 0x80; and an mbox must end every
-/// message with a newline, so one that had none (common in mail composed in
-/// Gmail) gains one in the file. Read this way they are one message. A body
-/// with LF endings, no NUL and a final newline hashes as it is.
-pub(crate) fn identity(body: &[u8]) -> Hash {
-    let crlf = body.windows(2).any(|w| w == b"\r\n");
-    if !crlf && !body.contains(&0) && body.ends_with(b"\n") {
-        return sha256(body);
-    }
-    let mut canonical = Vec::with_capacity(body.len());
-    let mut i = 0;
-    while i < body.len() {
-        if body[i] == b'\r' && body.get(i + 1) == Some(&b'\n') {
-            i += 1;
-        }
-        canonical.push(if body[i] == 0 { 0x80 } else { body[i] });
-        i += 1;
-    }
-    if !canonical.ends_with(b"\n") {
-        canonical.push(b'\n');
-    }
-    sha256(&canonical)
 }
 
 pub(crate) fn prepare(header: &[u8], body: &[u8]) -> Prepared {
@@ -68,7 +42,7 @@ pub(crate) fn prepare(header: &[u8], body: &[u8]) -> Prepared {
     Prepared {
         header_hash: sha256(header),
         body_hash: sha256(body),
-        identity: identity(body),
+        key: key::key(header, body, summary.date),
         fields,
         summary,
     }
@@ -104,12 +78,13 @@ impl Artifacts {
                 .await?,
             sel_message: c
                 .prepare(
-                    "SELECT msg_id FROM message
-                     WHERE body_hash = ?1 AND message_id IS ?2 AND date IS ?3",
+                    "SELECT msg_id FROM message WHERE key = ?1 AND merged_into IS NULL",
                 )
                 .await?,
             ins_message: c
-                .prepare("INSERT INTO message (body_hash, message_id, date) VALUES (?1, ?2, ?3)")
+                .prepare(
+                    "INSERT INTO message (key, body_hash, message_id, date) VALUES (?1, ?2, ?3, ?4)",
+                )
                 .await?,
             set_message: c
                 .prepare("UPDATE artifact SET msg_id = ?1 WHERE artifact_id = ?2")
@@ -154,7 +129,7 @@ impl Artifacts {
             ));
         }
         let id = store.conn.last_insert_rowid();
-        let msg = self.message(store, &p.identity, s).await?;
+        let msg = self.message(store, &p.key, s.date).await?;
         self.set_message.execute((msg, id)).await?;
         let mut seen: HashMap<&str, i64> = HashMap::new();
         for (i, f) in p.fields.iter().enumerate() {
@@ -167,14 +142,20 @@ impl Artifacts {
         Ok((id, true))
     }
 
-    async fn message(&mut self, store: &Store, body_hash: &Hash, s: &Summary) -> Result<i64> {
-        let key = (body_hash.to_vec(), s.message_id.clone(), s.date);
-        let mut rows = self.sel_message.query(key.clone()).await?;
+    async fn message(&mut self, store: &Store, k: &Key, date: Option<i64>) -> Result<i64> {
+        let mut rows = self.sel_message.query((k.hash.to_vec(),)).await?;
         if let Some(r) = rows.next().await? {
             return Ok(r.get(0)?);
         }
         drop(rows);
-        self.ins_message.execute(key).await?;
+        self.ins_message
+            .execute((
+                k.hash.to_vec(),
+                k.identity.to_vec(),
+                k.message_id.clone(),
+                date,
+            ))
+            .await?;
         Ok(store.conn.last_insert_rowid())
     }
 
@@ -606,140 +587,4 @@ pub(crate) async fn sight_listings(
             .await?;
     }
     Ok(())
-}
-
-/// Move messages stored under an older identity rule onto the current one,
-/// joining any that turn out to be one message. Runs once per rule. A
-/// message's identity comes from its own copy, never one folded into it.
-pub async fn line_ending_identities(store: &Store) -> Result<u64> {
-    let done = store
-        .conn
-        .query(
-            "SELECT 1 FROM meta WHERE key = 'identity' AND value = 'lf-nul-eol'",
-            (),
-        )
-        .await?
-        .next()
-        .await?
-        .is_some();
-    if done {
-        return Ok(0);
-    }
-    let mut todo = Vec::new();
-    let mut rows = store
-        .conn
-        .query(
-            "SELECT m.msg_id, m.body_hash, m.message_id, m.date,
-                    (SELECT a.body_hash FROM artifact a WHERE a.msg_id = m.msg_id
-                     ORDER BY a.artifact_id IN (SELECT artifact_id FROM fold), a.artifact_id
-                     LIMIT 1)
-             FROM message m",
-            (),
-        )
-        .await?;
-    while let Some(r) = rows.next().await? {
-        let body: Option<Vec<u8>> = r.get(4)?;
-        if let Some(body) = body {
-            todo.push((
-                r.get::<i64>(0)?,
-                r.get::<Vec<u8>>(1)?,
-                r.get::<Option<String>>(2)?,
-                r.get::<Option<i64>>(3)?,
-                body,
-            ));
-        }
-    }
-    drop(rows);
-    let mut changed = 0;
-    store.begin().await?;
-    for (n, (msg, old, message_id, date, body_hash)) in todo.iter().enumerate() {
-        let new = identity(&store.object(body_hash).await?);
-        if new.as_slice() == old.as_slice() {
-            continue;
-        }
-        changed += 1;
-        let mut rows = store
-            .conn
-            .query(
-                "SELECT msg_id FROM message WHERE body_hash = ?1 AND message_id IS ?2 AND date IS ?3",
-                (new.to_vec(), message_id.clone(), *date),
-            )
-            .await?;
-        let same: Option<i64> = rows.next().await?.map(|r| r.get(0)).transpose()?;
-        drop(rows);
-        match same {
-            Some(into) => {
-                // One email stored with both line endings: keep `into`, retire `msg`.
-                let c = &store.conn;
-                c.execute(
-                    "UPDATE artifact SET msg_id = ?2 WHERE msg_id = ?1",
-                    (*msg, into),
-                )
-                .await?;
-                c.execute("DELETE FROM part WHERE msg_id = ?1", (*msg,))
-                    .await?;
-                c.execute("DELETE FROM message WHERE msg_id = ?1", (*msg,))
-                    .await?;
-                c.execute(
-                    "INSERT OR IGNORE INTO text_forget (msg_id) VALUES (?1)",
-                    (*msg,),
-                )
-                .await?;
-                c.execute(
-                    "UPDATE message SET parts_version = NULL, text_version = NULL WHERE msg_id = ?1",
-                    (into,),
-                )
-                .await?;
-            }
-            None => {
-                store
-                    .conn
-                    .execute(
-                        "UPDATE message SET body_hash = ?2 WHERE msg_id = ?1",
-                        (*msg, new.to_vec()),
-                    )
-                    .await?;
-            }
-        }
-        if (n + 1) % 5000 == 0 {
-            store.commit().await?;
-            tracing::info!(
-                done = n + 1,
-                of = todo.len(),
-                changed,
-                "line-ending identities"
-            );
-            store.begin().await?;
-        }
-    }
-    store
-        .conn
-        .execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES ('identity', 'lf-nul-eol')",
-            (),
-        )
-        .await?;
-    store.commit().await?;
-    Ok(changed)
-}
-
-#[cfg(test)]
-mod identity_tests {
-    use super::*;
-
-    #[test]
-    fn identity_reads_crlf_as_lf() {
-        assert_eq!(identity(b"a\r\nb\r\n"), sha256(b"a\nb\n"));
-        assert_eq!(identity(b"a\nb\n"), sha256(b"a\nb\n"));
-        // A lone CR is content, not a line ending.
-        assert_eq!(identity(b"a\rb\n"), sha256(b"a\rb\n"));
-        // NUL reads as 0x80, as Dovecot serves it over IMAP.
-        assert_eq!(identity(b"a\x00b\n"), identity(b"a\x80b\r\n"));
-        assert_eq!(identity(b"a\x00b\n"), sha256(b"a\x80b\n"));
-        // A missing final newline reads as present, as an mbox file stores it.
-        assert_eq!(identity(b"a\r\nb"), identity(b"a\r\nb\r\n"));
-        assert_eq!(identity(b"a\nb"), sha256(b"a\nb\n"));
-        assert_ne!(identity(b"a\n"), identity(b"a\n\n"));
-        assert_ne!(identity(b"a\r\n"), identity(b"a\r\r\n"));
-    }
 }

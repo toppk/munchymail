@@ -11,6 +11,12 @@ pub struct Field {
 /// line becomes a nameless field, and a line without a colon becomes a name
 /// with an empty value, rather than failing the whole block.
 pub fn fields(block: &[u8]) -> Vec<Field> {
+    raw_fields(block).into_iter().map(decode).collect()
+}
+
+/// The fields of a raw header block as they are written: each one's bytes,
+/// name through its last continuation line and line ending.
+pub fn raw_fields(block: &[u8]) -> Vec<&[u8]> {
     let mut out = Vec::new();
     let mut start = 0;
     let mut pos = 0;
@@ -23,7 +29,7 @@ pub fn fields(block: &[u8]) -> Vec<Field> {
         let blank = line == b"\n" || line == b"\r\n";
         let continuation = matches!(line.first(), Some(b' ' | b'\t'));
         if pos > start && !continuation {
-            out.push(decode(&block[start..pos]));
+            out.push(&block[start..pos]);
             start = pos;
         }
         if blank {
@@ -33,9 +39,21 @@ pub fn fields(block: &[u8]) -> Vec<Field> {
         pos = end;
     }
     if start < block.len() {
-        out.push(decode(&block[start..]));
+        out.push(&block[start..]);
     }
     out
+}
+
+/// A raw field's name, lowercased; empty for a continuation line or no colon.
+pub fn raw_name(field: &[u8]) -> String {
+    match field.iter().position(|&b| b == b':') {
+        Some(i) if !matches!(field.first(), Some(b' ' | b'\t')) => {
+            String::from_utf8_lossy(&field[..i])
+                .trim()
+                .to_ascii_lowercase()
+        }
+        _ => String::new(),
+    }
 }
 
 fn decode(field: &[u8]) -> Field {

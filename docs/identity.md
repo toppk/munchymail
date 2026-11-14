@@ -64,16 +64,11 @@ the rules and the reasoning.
 
 ## Message identity
 
-A copy belongs to the message whose **(identity of the body, Message-ID,
-Date)** equals its own; if none exists, a new message is created. All
-three must match.
+A copy belongs to the message whose **key** equals its own; if no active
+message has it, a new message is created. The key (`key::key`) is a hash
+of five things, all of which must match:
 
-- **Message-ID**: the value of the first `Message-ID` header field,
-  unfolded, RFC 2047-decoded and trimmed; compared as a case-sensitive
-  string. Missing is NULL, and NULL matches NULL.
-- **Date**: the first `Date` header field parsed to Unix seconds
-  (`mailparse::dateparse`). Missing or unparsable is NULL, matching NULL.
-- **Identity of the body** (`import::identity`): SHA-256 of the body after
+- **Identity of the body** (`key::identity`): SHA-256 of the body after
   three readings, and nothing else:
   1. each `\r\n` is read as `\n`;
   2. each NUL byte (`0x00`) is read as `0x80`;
@@ -81,9 +76,34 @@ three must match.
 
   A body with only `\n` line endings, no NUL and a final newline (most
   mbox mail) has identity = its plain SHA-256.
-- **Headers are not part of identity.** Copies that differ only in header
-  bytes (a mail server's added fields, Dovecot's own fields, line endings,
-  Gmail's Takeout fields) are different copies of one message.
+- **Message-ID** (`key::message_id`): the first `Message-ID` field's raw
+  bytes, unfolded, comments removed, parsed as one RFC 5322 `msg-id`. The
+  key is the text between the angle brackets, case kept, never RFC
+  2047-decoded; a bare `left@right` without brackets counts. None, more
+  than one, or a value without exactly one `@` (e.g. `unknown`) is **no
+  valid Message-ID**.
+- **Date**: the first `Date` field parsed to Unix seconds
+  (`mailparse::dateparse`); missing or unparsable is "none", which equals
+  "none".
+- **MIME reading** (`key::mime`): how the body bytes are to be read:
+  - `Content-Transfer-Encoding`, case-folded; missing, `7bit`, `8bit` and
+    `binary` all mean "not encoded";
+  - the media `type/subtype` and `charset`, case-folded; a missing
+    `Content-Type` is `text/plain; charset=us-ascii`;
+  - `boundary`, exactly as given (case kept).
+
+  Other parameters (`format=flowed`, …) are not part of it.
+- **Header evidence** (`key::header_key`), only for a copy with no valid
+  Message-ID: the raw bytes of its `From`, `To`, `Cc`, `Subject`, `Date`,
+  `Message-ID` and every `Received` field, in order, with `\r\n` read as
+  `\n`. A copy with none of these fields uses its whole header. So copies
+  without a Message-ID join only when they are one delivery: the same
+  delivery from an mbox file (with Dovecot's `Status`, `X-UID`, …) and over
+  IMAP shares all of these.
+
+Other header fields are not part of the key: copies that differ only in a
+mail server's added fields, Dovecot's own fields, line endings or Gmail's
+Takeout fields are copies of one message.
 
 ### Why each reading
 
@@ -95,15 +115,17 @@ three must match.
 
 All three are conversions a store or protocol performs on the same email,
 not differences between emails. One consequence: an empty body and a body
-of a single `\n` have the same identity. Every source goes through the same
-function: mbox and Takeout imports (`Importer`), Gmail API sync
+of a single `\n` have the same identity. They apply to every source, not
+only to the pair that showed them: a deliberate tradeoff, since a false
+merge through them also needs equal Message-ID, Date and MIME reading.
+Every source goes through the same function: mbox and Takeout imports (`Importer`), Gmail API sync
 (`gmail.rs`), IMAP sync (`imap.rs`); there is no other code path that
 creates a message.
 
-### What identity deliberately does not absorb
+### What the key deliberately does not absorb
 
-- Any header field other than Message-ID and Date: added, removed or
-  rewritten fields, and header line endings.
+- Header fields outside the key: added, removed or rewritten fields, and
+  header line endings.
 - Re-encoding: base64 vs quoted-printable, different line lengths,
   different MIME boundary strings, charset conversion. Gmail's own copies
   of one sent email can differ this way (its Sent copy and the delivered
@@ -132,7 +154,8 @@ an API copy when:
   (`utf8-damage`, Takeout's own corruption).
 
 The folded copy moves into the API copy's message; the message it leaves,
-if then empty, is deleted (its derived indexes dropped). With the
+if then empty, is kept as merged into it (below), its derived indexes
+dropped. With the
 final-newline reading, `final-crlf` pairs now also share an identity, so
 the Takeout copy joins at once; the fold is still recorded, marking the
 API copy as the message's own.
@@ -140,29 +163,43 @@ API copy as the message's own.
 ## Which copy is shown
 
 A message's copies are all kept and listed (`read` shows every place
-each was seen). One copy is used for content:
+each was seen). One copy, its **preferred copy**, is used for content: the
+earliest stored copy that isn't folded (or, if all are, the earliest). It
+changes only when the message gains a better copy, never because of when
+copies were seen, and never by origin: a live source can hold the worse
+copy.
 
-- indexing (parts, attachments, text): the earliest stored copy that isn't
-  folded;
-- `read` and `show`: the copy that isn't folded and was seen most
-  recently;
-- `export`: the copy seen most recently, folded or not;
-- search results (`fold_copies`): of the matching copies, the newest
-  stored that isn't folded.
+Operations on messages (indexing of parts and text, `read mN`, `show mN`,
+`search --unique`, `export`) find the matching copies, then their
+messages, then each message's preferred copy, whichever copy matched;
+`export` says in its index how many messages matched through another copy.
+Operations on copies (`read N`, `show N --raw`, `search` without
+`--unique`) use exactly the copies named or matched.
 
-These differ; see the open questions.
+## Message ids, and when the rule changes
 
-## When the rule changes
+Messages are never deleted, so an id (`mN`) is never reused. A message
+whose copies all join another keeps its row with `merged_into` set; it no
+longer counts or appears in search, and every command given its `mN`
+follows it to the message it joined and says so (`read`: "m4 was merged
+into m10").
 
-A database records the rule its keys follow (`meta` key `identity`,
-now `lf-nul-eol`). When a newer program opens it, before the next import,
-sync or index stores anything, every message's identity is recomputed
-from its own copy (one that isn't folded), and messages whose (identity,
-Message-ID, Date) now coincide are merged into one: copies moved, the
-emptied message and its derived indexes deleted. Message ids (`mN`) of
-surviving messages don't change; stored bytes never change. A merged-away
-message is deleted, and its id can be reused: a new message takes the
-highest id plus one, so the id of a deleted highest message comes back.
+A database records the rule its keys follow (`meta` key `identity`, now
+`key::RULE`). When a newer program opens it, before the next import, sync
+or index stores anything, it regroups (`rekey`), in one transaction:
+
+1. every copy that isn't folded is re-keyed (all keys first, so nothing is
+   compared with a key under the old rule); folded copies follow the copy
+   they are folded to;
+2. copies with one key are one group;
+3. each group takes the id of the old message whose preferred copy it
+   holds; if it holds several, the lowest id survives and the others are
+   `merged_into` it; a group holding none is a new message with
+   `split_from` the old message most of its copies came from;
+4. messages whose copies or preferred copy changed are indexed again.
+
+An interrupted regrouping changes nothing; a second one changes nothing.
+Stored bytes never change.
 
 ## Damaged and out-of-spec mail
 
@@ -194,15 +231,16 @@ Detectors that have worked:
 ## Risks, as we see them
 
 - **False merges** (two different emails made one message) need equal
-  Message-ID, equal Date and bodies that differ only in line endings,
-  NUL vs 0x80, or one final newline. Because a missing Message-ID or Date
-  matches another missing one, mail with neither and an identical body
-  merges with nothing else to separate it: this has happened (spam from a
-  template, delivered four times months apart). A merge moves copies,
-  never deletes bytes.
-- **A rule change can only merge.** The migration recomputes one key per
-  message; a stricter rule that should split a message would need each
-  copy re-keyed, which isn't implemented.
+  Message-ID, Date and MIME reading, and bodies that differ only in line
+  endings, NUL vs 0x80, or one final newline. Without a valid Message-ID
+  they also need equal header evidence (above). Before the header
+  evidence, mail with no Message-ID and an identical body merged with
+  nothing else to separate it; this happened (spam from a template,
+  delivered four times months apart). A merge moves copies, never deletes
+  bytes, and a regrouping can undo it.
+- **Two deliveries that agree on every evidence field**, including every
+  `Received` line, and lack a Message-ID are one message. In practice they
+  are one email.
 - **Missed merges** (one email as two messages) remain for re-encoded
   copies, damaged copies, and copies whose Message-ID or Date parse
   differently. They show as duplicates in search; nothing is lost.
@@ -210,19 +248,13 @@ Detectors that have worked:
   `Content-Length` only to extend. A body with a valid `From ` separator
   line and no `Content-Length` is split in two.
 
-## Open questions for review
+## Open questions
 
-1. Should identity also read each NUL as 0x80 for sources other than
-   IMAP, or only when comparing with IMAP? (Today: always.)
-2. Is adding a missing final newline safe for every source, e.g. binary
-   or `Content-Transfer-Encoding: binary` bodies?
-3. Should Message-ID be compared case-insensitively, or without angle
-   brackets? Date with a tolerance?
-4. Should `read`, `export` and indexing pick the same copy? Which:
-   earliest, most recently seen, or by origin (live over snapshot)?
-5. Should a detected truncation (e.g. `Content-Length` larger than the
-   body, or an unclosed boundary) be recorded on the copy, so search can
-   show or exclude damaged copies?
-6. Should copies whose bytes are a prefix of another copy of the same
-   Message-ID (truncation) be linked to the complete one, as Takeout
-   damage is?
+1. NUL as 0x80 and the final newline: global (today) or only between the
+   sources that showed them, as folds?
+2. Should a detected length mismatch (`Content-Length` vs body, with its
+   direction) or an unclosed boundary be recorded on the copy?
+3. Should a copy whose body is a prefix of another's (same valid
+   Message-ID and Date) be recorded as a candidate link to it?
+4. Should a command rebuild each mbox file from its stored copies and
+   framing, and check it against the file's recorded hash?

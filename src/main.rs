@@ -1218,7 +1218,7 @@ async fn overview(root: &Path, stores: &Stores, json: bool, out: &mut impl Write
         };
         let totals = query_rows(
             &store,
-            "SELECT (SELECT count(*) FROM message),
+            "SELECT (SELECT count(*) FROM message WHERE merged_into IS NULL),
                     (SELECT max(date) FROM artifact WHERE date <= ?1)",
             vec![now.into()],
         )
@@ -2136,6 +2136,9 @@ async fn read(store: &Store, r: api::Ref, json: bool, out: &mut impl Write) -> R
         m.copies.len(),
         m.raw_bytes
     )?;
+    if let Some(from) = m.merged_from {
+        writeln!(out, "  m{from} was merged into m{}", m.msg)?;
+    }
     if let api::Ref::Copy(_) = r {
         writeln!(
             out,
@@ -2218,9 +2221,16 @@ async fn read(store: &Store, r: api::Ref, json: bool, out: &mut impl Write) -> R
 /// stored or indexed under it; after the first time, one lookup.
 async fn identities(store: &Store) -> Result<()> {
     let t = Instant::now();
-    let changed = munchymail::import::line_ending_identities(store).await?;
-    if changed > 0 {
-        info!(changed, elapsed = ?t.elapsed(), "message identities now read CRLF as LF, NUL as 0x80, and add a missing final newline");
+    if let Some(s) = munchymail::rekey::rekey(store).await? {
+        info!(
+            rule = munchymail::key::RULE,
+            rekeyed = s.rekeyed,
+            split = s.split.len(),
+            merged = s.merged.len(),
+            moved = s.moved,
+            elapsed = ?t.elapsed(),
+            "messages regrouped under the current key rule"
+        );
     }
     Ok(())
 }

@@ -1,6 +1,5 @@
 //! Search filters over artifacts, mirroring Sieve's `:matches` with `i;ascii-casemap`.
 
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -421,38 +420,41 @@ impl Filter {
     }
 }
 
-/// Keep one artifact per message (`artifact.msg_id`) in TEMP TABLE `table`:
-/// the newest stored copy that is not a lesser one. Returns how many copies were dropped.
+/// A message's preferred copy, as SQL over its copies `a` joined to `fold f`:
+/// not folded, then the earliest stored.
+pub const PREFERRED: &str =
+    "coalesce(min(CASE WHEN f.artifact_id IS NULL THEN a.artifact_id END), min(a.artifact_id))";
+
+/// Replace the copies in TEMP TABLE `table` with one per message: its
+/// preferred copy, whichever of its copies matched. Returns how many rows went.
 pub async fn fold_copies(conn: &Connection, table: &str) -> Result<u64> {
     let mut rows = conn
         .query(
             &format!(
-                "SELECT t.artifact_id, a.msg_id, f.artifact_id IS NULL FROM {table} t
-                 JOIN artifact a ON a.artifact_id = t.artifact_id
-                 LEFT JOIN fold f ON f.artifact_id = t.artifact_id"
+                "SELECT {PREFERRED} FROM artifact a
+                 LEFT JOIN fold f ON f.artifact_id = a.artifact_id
+                 WHERE a.msg_id IN (SELECT m.msg_id FROM {table} t
+                                    JOIN artifact m ON m.artifact_id = t.artifact_id)
+                 GROUP BY a.msg_id"
             ),
             (),
         )
         .await?;
-    let mut best: HashMap<i64, (bool, i64)> = HashMap::new();
-    let mut all = Vec::new();
+    let mut keep = Vec::new();
     while let Some(r) = rows.next().await? {
-        let id: i64 = r.get(0)?;
-        let key = (r.get::<i64>(2)? != 0, id);
-        let e = best.entry(r.get(1)?).or_insert(key);
-        *e = (*e).max(key);
-        all.push(id);
+        keep.push(r.get::<i64>(0)?);
     }
     drop(rows);
-    let keep: HashSet<i64> = best.into_values().map(|(_, id)| id).collect();
-    let mut del = conn
-        .prepare(&format!("DELETE FROM {table} WHERE artifact_id = ?1"))
+    let before = conn.execute(&format!("DELETE FROM {table}"), ()).await?;
+    let mut ins = conn
+        .prepare(&format!(
+            "INSERT OR IGNORE INTO {table} (artifact_id) VALUES (?1)"
+        ))
         .await?;
-    let mut n = 0;
-    for id in all.into_iter().filter(|id| !keep.contains(id)) {
-        n += del.execute((id,)).await?;
+    for id in &keep {
+        ins.execute((*id,)).await?;
     }
-    Ok(n)
+    Ok(before.saturating_sub(keep.len() as u64))
 }
 
 #[cfg(test)]
