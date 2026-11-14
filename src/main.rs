@@ -649,9 +649,9 @@ enum Cmd {
         /// Heading of index.md; default NAME.
         #[arg(long)]
         title: Option<String>,
-        /// Line endings of the messages: stored copies have their source's
-        /// (mbox LF, IMAP and Gmail CRLF); a message mixing both is left as is.
-        #[arg(long, value_enum, default_value = "lf")]
+        /// Line endings of the messages: `keep` exports stored bytes (mbox LF,
+        /// IMAP and Gmail CRLF); `lf`/`crlf` convert, leaving mixed messages as is.
+        #[arg(long, value_enum, default_value = "keep")]
         newlines: export::Newlines,
     },
     /// Attachments by type, most common first.

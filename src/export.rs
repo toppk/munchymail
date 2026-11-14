@@ -60,8 +60,10 @@ fn cell(s: &str) -> String {
 /// Line endings for the exported messages.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum Newlines {
-    /// Unix (LF), as mbox and maildir tools expect.
+    /// As stored: each copy's bytes unchanged.
     #[default]
+    Keep,
+    /// Unix (LF), as mbox and maildir tools expect.
     Lf,
     /// Network (CRLF), as IMAP and RFC 5322 use.
     Crlf,
@@ -205,10 +207,17 @@ pub async fn write(
     let mut index = format!(
         "# {title}\n\n{} messages{span}.\n\n\
          Each file in `maildir/` is one whole message (RFC 5322, what mail programs\n\
-         call `.eml`), numbered by date and byte for byte as stored in the mailbox,\n\
+         call `.eml`), numbered by date and {}\n\
          including the mail server's bookkeeping headers (`X-UID`, `Status`).\n\
          Dates are UTC. \"Folder\" is where the message is now.\n",
-        chosen.len()
+        chosen.len(),
+        match line_endings {
+            Newlines::Keep => "byte for byte as stored in the mailbox,",
+            Newlines::Lf =>
+                "as stored, except that line endings are LF\n(a message stored with only CRLF was converted),",
+            Newlines::Crlf =>
+                "as stored, except that line endings are CRLF\n(a message stored with only LF was converted),",
+        }
     );
     if folded > 0 {
         write!(
