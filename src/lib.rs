@@ -17,6 +17,7 @@ pub mod mbox;
 pub mod message;
 pub mod ocr;
 pub mod parts;
+pub mod presence;
 pub mod query;
 pub mod rekey;
 pub mod report;

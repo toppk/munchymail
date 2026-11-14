@@ -108,9 +108,10 @@ pub async fn write(
     line_endings: Newlines,
     out: &mut impl Write,
 ) -> Result<Summary> {
-    if filter.materialize(&store.conn).await? != "hit" {
+    if filter.is_empty()? {
         bail!("export needs at least one filter");
     }
+    filter.materialize(&store.conn).await?;
     let mut artifacts = Vec::new();
     let mut rows = store
         .conn

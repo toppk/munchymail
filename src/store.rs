@@ -260,6 +260,36 @@ CREATE TABLE IF NOT EXISTS fold (
 -- Messages removed (their copies joined another), still to drop from data/text/.
 CREATE TABLE IF NOT EXISTS text_forget (msg_id INTEGER PRIMARY KEY);
 
+-- Copies that are a mail store's own records, not mail (Dovecot's FOLDER
+-- INTERNAL DATA): kept byte for byte, left out of search and counts.
+CREATE TABLE IF NOT EXISTS storage_record (artifact_id INTEGER PRIMARY KEY, kind TEXT NOT NULL);
+
+-- An entry of a live listing (Gmail label, IMAP folder) from the run it
+-- appeared in until the first run it was gone from (presence.rs).
+CREATE TABLE IF NOT EXISTS presence (
+    presence_id INTEGER PRIMARY KEY,
+    origin_id INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    -- the source's id: a Gmail message id, an IMAP uidvalidity:uid
+    entry TEXT NOT NULL,
+    artifact_id INTEGER NOT NULL,
+    since_run INTEGER NOT NULL,
+    until_run INTEGER
+);
+CREATE INDEX IF NOT EXISTS presence_open ON presence (origin_id, until_run);
+CREATE INDEX IF NOT EXISTS presence_artifact ON presence (artifact_id);
+
+-- Each IMAP message's flags as first seen and at every change.
+CREATE TABLE IF NOT EXISTS imap_flags (
+    origin_id INTEGER NOT NULL,
+    folder TEXT NOT NULL,
+    uid_validity INTEGER NOT NULL,
+    uid INTEGER NOT NULL,
+    flags TEXT NOT NULL,
+    seen_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS imap_flags_message ON imap_flags (origin_id, folder, uid_validity, uid);
+
 -- a copy last seen at path in last_seen_run and not there in gone_run
 CREATE TABLE IF NOT EXISTS removal (
     artifact_id INTEGER NOT NULL,

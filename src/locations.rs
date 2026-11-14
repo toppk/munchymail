@@ -32,6 +32,7 @@ struct Origin {
 pub struct Sightings {
     origins: HashMap<i64, Origin>,
     stmt: Statement,
+    presence: Statement,
 }
 
 impl Sightings {
@@ -67,7 +68,23 @@ impl Sightings {
                  WHERE o.artifact_id = ?1 AND r.finished_at IS NOT NULL",
             )
             .await?;
-        Ok(Sightings { origins, stmt })
+        // A closed interval was last seen in the origin's last run before it closed.
+        let presence = store
+            .conn
+            .prepare(
+                "SELECT p.origin_id, p.path, p.until_run IS NULL,
+                        (SELECT started_at FROM import_run WHERE run_id = p.since_run),
+                        (SELECT max(r.started_at) FROM import_run r
+                         WHERE r.origin_id = p.origin_id AND r.finished_at IS NOT NULL
+                           AND (p.until_run IS NULL OR r.run_id < p.until_run))
+                 FROM presence p WHERE p.artifact_id = ?1",
+            )
+            .await?;
+        Ok(Sightings {
+            origins,
+            stmt,
+            presence,
+        })
     }
 
     /// Current places first, then most recently seen first.
@@ -93,6 +110,31 @@ impl Sightings {
             loc.current |= current;
             loc.first_seen = loc.first_seen.min(time);
             loc.last_seen = loc.last_seen.max(time);
+        }
+        drop(rows);
+        let mut rows = self.presence.query((artifact_id,)).await?;
+        while let Some(r) = rows.next().await? {
+            let (origin_id, path, open): (i64, String, i64) = (r.get(0)?, r.get(1)?, r.get(2)?);
+            let (Some(first), Some(last)) = (r.get::<Option<i64>>(3)?, r.get::<Option<i64>>(4)?)
+            else {
+                continue;
+            };
+            let Some(g) = self.origins.get(&origin_id) else {
+                continue;
+            };
+            let current = !g.retired && open != 0;
+            let loc = by.entry((origin_id, path.clone())).or_insert(Location {
+                origin: g.label.clone(),
+                path,
+                current,
+                first_seen: first,
+                last_seen: last,
+                origin_last_import: g.last_time,
+                origin_retired: g.retired,
+            });
+            loc.current |= current;
+            loc.first_seen = loc.first_seen.min(first);
+            loc.last_seen = loc.last_seen.max(last);
         }
         let mut out: Vec<Location> = by.into_values().collect();
         sort(&mut out);

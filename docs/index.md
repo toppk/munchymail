@@ -18,18 +18,21 @@ otherwise); `data/` below means that directory. Command usage is in `README.md`.
 | `header` | Derived: per artifact, ordered fields; `name` lowercased, `value` unfolded and RFC 2047-decoded; `nth` = occurrence of that name in the message (0 = first, i.e. Sieve `:index` − 1). |
 | `alias` | The account's own addresses as Sieve `:matches` patterns (`alias add`); `account add` adds the account's address. |
 | `origin` | Registered roots (directory tree or single mbox file); `retired_at` set by `origin retire`; `role` (live, snapshot, export) by `origin role`. |
-| `import_run` | One per origin per `import`. |
-| `file_content` | Whole-file SHA-256, `format` (`dovecot` or `mboxrd`: how its messages were unquoted; `gmail-label`), `head_hash` (first 64 KiB), message count, and `parent_content_id` when an earlier content is a byte prefix (a growing mbox across backups). |
+| `import_run` | One per origin per `import`, and per Gmail or IMAP check that found a change. |
+| `file_content` | Whole-file SHA-256, `format` (`dovecot` or `mboxrd`: how its messages were unquoted), `head_hash` (first 64 KiB), message count, and `parent_content_id` when an earlier content is a byte prefix (a growing mbox across backups). |
 | `file_sighting` | Content seen at `path` (relative to origin root) in a run, with dev/ino/mtime/ctime. |
-| `observation` | Artifact at byte `offset` in a content, with its `From ` line and separator bytes. For a `gmail-label` content (one label's messages at a Gmail sync, `format` = `gmail-label`, hash over its `gmail_id artifact_id` lines) `offset` is the position in date order and `from_line` the Gmail message id. |
+| `observation` | Artifact at byte `offset` in a content, with its `From ` line and separator bytes. |
+| `presence` | Where copies are in a live listing (a Gmail label, an IMAP folder): one row per `entry` (Gmail id, IMAP `uidvalidity:uid`) at `path`, from `since_run` until `until_run`, the first run it was gone from (NULL while there). A run writes only what came or went; listings recorded whole by older versions are converted once (`meta` key `presence`). |
+| `imap_flags` | Each IMAP message's flags when first fetched and at every change, with `seen_at`. |
+| `storage_record` | Copies that are a mail store's own records, not mail: Dovecot's "FOLDER INTERNAL DATA" placeholder (`kind` `folder-data`). Kept byte for byte; left out of search, counts and the overview. |
 | `gmail_message` | Gmail's record of each message of the `gmail` origin: Gmail id, the artifact of its raw bytes, thread id, `internal_date` (receipt time), current label ids, and `gone_at` when Gmail deleted it (the artifact stays). |
 | `gmail_label` | Gmail's label ids and names per origin. |
 | `gmail_state` | The sync checkpoint: Gmail history id up to which every change is stored, and the run that stored it. |
 | `fold` | A lesser copy (`artifact_id`) joined to `copy_of`'s message although their bytes differ, and why (`reason`, e.g. `takeout final-crlf`, `takeout utf8-damage`); the other copy is the one shown and indexed. Written by Takeout `import`, `gmail sync` and `reconcile`. |
 | `text_forget` | Messages removed because their copies joined another; `index` drops them from `data/text/`. |
-| `removal` | A copy last seen at `path` in `last_seen_run` and absent in `gone_run`; `moved_to` is where it turned up, NULL if nowhere new. Filled by `import` (per origin) and `record-removals`. |
+| `removal` | A copy last seen at `path` in `last_seen_run` and absent in `gone_run`; `moved_to` is where it turned up, NULL if nowhere new. Filled by `import` (per origin), by each Gmail or IMAP run (from the presence rows it closed), and `record-removals`. |
 
-`meta.schema_version` is 10. Opening an older database upgrades it in the
+`meta.schema_version` is 11. Opening an older database upgrades it in the
 opening transaction (`MIGRATIONS` in `store.rs`: 1 → 2 adds
 `origin.retired_at`; 2 → 3 adds `removal` and `file_sighting_run`, which
 `SCHEMA` creates; 3 → 4 adds `artifact.msg_id` and fills `message` from

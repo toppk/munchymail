@@ -7,7 +7,7 @@
 //! stores the run, after every change it covers is committed. A full listing
 //! marks messages gone only once it has completed.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
 
@@ -16,7 +16,6 @@ use data_encoding::BASE64URL_NOPAD;
 use serde_json::Value as Json;
 use tracing::{info, warn};
 
-use crate::changes;
 use crate::google::Session;
 use crate::import::{Artifacts, prepare};
 use crate::mbox;
@@ -460,6 +459,7 @@ pub async fn sync(store: &Store, address: &str, jobs: usize, takeouts: &[i64]) -
             .await?;
     }
     snapshot(store, origin_id, run_id).await?;
+    crate::presence::record_removals(store, origin_id, run_id).await?;
     store
         .conn
         .execute(
@@ -476,12 +476,11 @@ pub async fn sync(store: &Store, address: &str, jobs: usize, takeouts: &[i64]) -
         )
         .await?;
     store.commit().await?;
-    changes::record_since_previous(store, origin_id, run_id).await?;
     Ok(stats)
 }
 
-/// Record run `run_id`'s sightings: each label's messages (as of the stored
-/// state) as one content, reused when a label is unchanged.
+/// Record run `run_id`'s presence: each label's messages as of the stored
+/// state; only entries that came or went are written.
 async fn snapshot(store: &Store, origin_id: i64, run_id: i64) -> Result<()> {
     let mut names = HashMap::new();
     let mut rows = store
@@ -495,7 +494,7 @@ async fn snapshot(store: &Store, origin_id: i64, run_id: i64) -> Result<()> {
         names.insert(r.get::<String>(0)?, r.get::<String>(1)?);
     }
     drop(rows);
-    let mut paths: BTreeMap<String, Vec<(String, i64)>> = BTreeMap::new();
+    let mut paths = crate::presence::Listing::new();
     let mut rows = store
         .conn
         .query(
@@ -520,29 +519,38 @@ async fn snapshot(store: &Store, origin_id: i64, run_id: i64) -> Result<()> {
         }
     }
     drop(rows);
-    crate::import::sight_listings(store, origin_id, run_id, "gmail-label", &paths).await
+    crate::presence::record(store, origin_id, run_id, &paths).await?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    async fn sightings(store: &Store, run: i64) -> Vec<(String, i64, i64)> {
+    /// Each label's entries open at `run`, and how many presence rows exist in all.
+    async fn sightings(store: &Store, run: i64) -> (Vec<(String, i64)>, i64) {
         let mut rows = store
             .conn
             .query(
-                "SELECT s.path, s.content_id, count(*) FROM file_sighting s
-                 JOIN observation o ON o.content_id = s.content_id
-                 WHERE s.run_id = ?1 GROUP BY s.path, s.content_id ORDER BY s.path",
+                "SELECT path, count(*) FROM presence
+                 WHERE since_run <= ?1 AND (until_run IS NULL OR until_run > ?1)
+                 GROUP BY path ORDER BY path",
                 (run,),
             )
             .await
             .unwrap();
         let mut out = Vec::new();
         while let Some(r) = rows.next().await.unwrap() {
-            out.push((r.get(0).unwrap(), r.get(1).unwrap(), r.get(2).unwrap()));
+            out.push((r.get(0).unwrap(), r.get(1).unwrap()));
         }
-        out
+        drop(rows);
+        let mut rows = store
+            .conn
+            .query("SELECT count(*) FROM presence", ())
+            .await
+            .unwrap();
+        let all = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        (out, all)
     }
 
     #[test]
@@ -562,12 +570,17 @@ mod tests {
                 c.execute(sql, ()).await.unwrap();
             }
             snapshot(&store, 1, 1).await.unwrap();
-            let one = sightings(&store, 1).await;
-            let paths: Vec<_> = one.iter().map(|(p, _, n)| (p.as_str(), *n)).collect();
+            let (one, rows) = sightings(&store, 1).await;
+            let want = |v: &[(&str, i64)]| {
+                v.iter()
+                    .map(|(p, n)| (p.to_string(), *n))
+                    .collect::<Vec<_>>()
+            };
             assert_eq!(
-                paths,
-                [("All Mail", 2), ("INBOX", 1), ("Receipts", 1), ("SPAM", 1)]
+                one,
+                want(&[("All Mail", 2), ("INBOX", 1), ("Receipts", 1), ("SPAM", 1)])
             );
+            assert_eq!(rows, 5);
             c.execute(
                 "UPDATE gmail_message SET gone_at = 5 WHERE gmail_id = 'b'",
                 (),
@@ -575,12 +588,12 @@ mod tests {
             .await
             .unwrap();
             snapshot(&store, 1, 2).await.unwrap();
-            let two = sightings(&store, 2).await;
-            let paths: Vec<_> = two.iter().map(|(p, _, n)| (p.as_str(), *n)).collect();
-            assert_eq!(paths, [("All Mail", 1), ("INBOX", 1), ("SPAM", 1)]);
-            // Unchanged labels reuse their content.
-            assert_eq!(one[1].1, two[1].1);
-            assert_ne!(one[0].1, two[0].1);
+            let (two, rows) = sightings(&store, 2).await;
+            assert_eq!(two, want(&[("All Mail", 1), ("INBOX", 1), ("SPAM", 1)]));
+            // Only what changed is written: two rows closed, none added.
+            assert_eq!(rows, 5);
+            let (still, _) = sightings(&store, 1).await;
+            assert_eq!(still, one, "run 1 is still answerable");
         });
         std::fs::remove_dir_all(&dir).unwrap();
     }

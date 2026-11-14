@@ -74,9 +74,14 @@ server_cert = "/etc/pki/my-ca.pem"
   kept as two copies.
 - A folder's progress is saved only after its messages are; an interrupted
   sync redoes the folder and skips what it already stored.
-- Like Gmail, a check that finds nothing new records no import run; each
-  run's sightings are the folders, so `--folder`, `--current`, `changes`
-  and removals work as for mbox.
+- Like Gmail, a check that finds nothing new records no import run. A run
+  records only what changed: each message in a folder (or Gmail label) has
+  a `presence` row from the run it appeared in until the run it was gone
+  from, so a new mail is one row however big the folder. `--folder`,
+  `--current`, `changes` and removals work as for mbox; nothing is
+  forgotten when mail is deleted or moved.
+- Flags (`\Seen`, `\Answered`, …) are kept as they were at first fetch and
+  at every change (`imap_flags`), not only the latest.
 - The service holds IDLE on the INBOX on a second connection and checks the
   origin about 5 s after any change there. Mail filed into other folders
   (by Sieve, say) is found by the 3-minute check. IMAP NOTIFY would cover

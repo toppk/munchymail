@@ -465,7 +465,9 @@ impl Message {
             "to": sanitize(self.header("to")),
             "cc": sanitize(self.header("cc")),
             "subject": sanitize(&self.subject),
-            "headers": self.headers.iter().map(|f| json!([f.name, sanitize(&f.value)])).collect::<Vec<_>>(),
+            "headers": self.headers.iter()
+                .filter(|f| !headers::MAILBOX_BOOKKEEPING.contains(&f.name.as_str()))
+                .map(|f| json!([f.name, sanitize(&f.value)])).collect::<Vec<_>>(),
             "text": sanitize(&self.decoded.text),
             "text_source": self.decoded.text_source.as_str(),
             "attachments": self.decoded.attachments().map(|a| json!({

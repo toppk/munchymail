@@ -40,9 +40,8 @@ use secrecy::SecretString;
 use tracing::info;
 use url::Url;
 
-use crate::changes;
 use crate::config::Config;
-use crate::import::{Artifacts, prepare, sight_listings};
+use crate::import::{Artifacts, prepare};
 use crate::mbox;
 use crate::store::{Store, now};
 
@@ -465,6 +464,7 @@ pub async fn sync(store: &Store, account: &str, label: &str) -> Result<Stats> {
                         ),
                     )
                     .await?;
+                flag_history(store, origin_id, name, validity, uid as i64, &flags).await?;
             }
         }
         if stats.gone > gone_before {
@@ -605,6 +605,8 @@ pub async fn sync(store: &Store, account: &str, label: &str) -> Result<Stats> {
                         ),
                     )
                     .await?;
+                let flags = flags_of(items).unwrap_or_default();
+                flag_history(store, origin_id, name, validity, uid as i64, &flags).await?;
                 stats.fetched += 1;
                 stats.new_artifacts += fresh as u64;
             }
@@ -639,8 +641,28 @@ pub async fn sync(store: &Store, account: &str, label: &str) -> Result<Stats> {
     Ok(stats)
 }
 
-/// When stored changes await one, record a run with each folder's messages as
-/// its sightings, and the removals since the previous run.
+/// Record `flags` as the message's flags from now on.
+async fn flag_history(
+    store: &Store,
+    origin_id: i64,
+    folder: &str,
+    validity: i64,
+    uid: i64,
+    flags: &str,
+) -> Result<()> {
+    store
+        .conn
+        .execute(
+            "INSERT INTO imap_flags (origin_id, folder, uid_validity, uid, flags, seen_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            (origin_id, folder, validity, uid, flags, now()),
+        )
+        .await?;
+    Ok(())
+}
+
+/// When stored changes await one, record a run: each folder's messages as
+/// presence (only what changed is written), and what left since the last run.
 async fn record_run(store: &Store, origin_id: i64) -> Result<()> {
     let mut rows = store
         .conn
@@ -654,7 +676,7 @@ async fn record_run(store: &Store, origin_id: i64) -> Result<()> {
     if !dirty {
         return Ok(());
     }
-    let mut paths: BTreeMap<String, Vec<(String, i64)>> = BTreeMap::new();
+    let mut paths = crate::presence::Listing::new();
     let mut rows = store
         .conn
         .query(
@@ -672,23 +694,7 @@ async fn record_run(store: &Store, origin_id: i64) -> Result<()> {
             .push((format!("{validity}:{uid}"), artifact));
     }
     drop(rows);
-    store.begin().await?;
-    store
-        .conn
-        .execute(
-            "INSERT INTO import_run (origin_id, started_at) VALUES (?1, ?2)",
-            (origin_id, now()),
-        )
-        .await?;
-    let run_id = store.conn.last_insert_rowid();
-    sight_listings(store, origin_id, run_id, "imap-folder", &paths).await?;
-    store
-        .conn
-        .execute(
-            "UPDATE import_run SET finished_at = ?1 WHERE run_id = ?2",
-            (now(), run_id),
-        )
-        .await?;
+    crate::presence::run(store, origin_id, &paths).await?;
     store
         .conn
         .execute(
@@ -696,8 +702,6 @@ async fn record_run(store: &Store, origin_id: i64) -> Result<()> {
             (origin_id,),
         )
         .await?;
-    store.commit().await?;
-    changes::record_since_previous(store, origin_id, run_id).await?;
     Ok(())
 }
 

@@ -101,6 +101,13 @@ of five things, all of which must match:
   delivery from an mbox file (with Dovecot's `Status`, `X-UID`, …) and over
   IMAP shares all of these.
 
+Dovecot's "FOLDER INTERNAL DATA" placeholder, which only holds a folder's
+UID state, is stored like any copy but marked as a storage record
+(`storage_record`) and left out of search and counts. Dovecot's per-message
+bookkeeping fields (`Status`, `X-Status`, `X-Keywords`, `X-UID`,
+`Content-Length`, `X-IMAPbase`) stay in the stored bytes and are left out of
+`read`'s header list.
+
 Other header fields are not part of the key: copies that differ only in a
 mail server's added fields, Dovecot's own fields, line endings or Gmail's
 Takeout fields are copies of one message.

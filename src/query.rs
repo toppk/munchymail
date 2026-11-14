@@ -284,10 +284,9 @@ impl Filter {
             sets.push(Set::Messages(t.messages()?));
         }
         if self.folder.is_some() || self.origin.is_some() || self.current {
-            let mut sql = String::from(
-                "SELECT o.artifact_id FROM observation o
-                 JOIN file_sighting s ON s.content_id = o.content_id
-                 JOIN origin g ON g.origin_id = s.origin_id",
+            let mut sql = format!(
+                "SELECT s.artifact_id FROM ({}) s JOIN origin g ON g.origin_id = s.origin_id",
+                crate::presence::SEEN
             );
             if self.current {
                 // Only what each origin's latest finished import saw.
@@ -345,11 +344,32 @@ impl Filter {
     /// Fill TEMP TABLE `hit` with matching artifact ids and return the table to
     /// select from: `hit`, or `artifact` when there is no filter.
     pub async fn materialize(&self, conn: &Connection) -> Result<&'static str> {
-        Ok(if self.materialize_into(conn, "hit").await? {
-            "hit"
-        } else {
-            "artifact"
-        })
+        if self.materialize_into(conn, "hit").await? {
+            return Ok("hit");
+        }
+        let records = conn
+            .query("SELECT 1 FROM storage_record LIMIT 1", ())
+            .await?
+            .next()
+            .await?
+            .is_some();
+        if !records {
+            return Ok("artifact");
+        }
+        for sql in [
+            "CREATE TEMP TABLE IF NOT EXISTS hit (artifact_id INTEGER PRIMARY KEY)",
+            "DELETE FROM hit",
+            "INSERT INTO hit SELECT artifact_id FROM artifact
+             WHERE artifact_id NOT IN (SELECT artifact_id FROM storage_record)",
+        ] {
+            conn.execute(sql, ()).await?;
+        }
+        Ok("hit")
+    }
+
+    /// Whether any condition is set; without one, everything matches.
+    pub fn is_empty(&self) -> Result<bool> {
+        Ok(self.sets()?.is_empty())
     }
 
     /// Fill TEMP TABLE `table` with matching artifact ids; false when there is
@@ -416,6 +436,13 @@ impl Filter {
         .await?;
         conn.execute(&format!("DELETE FROM {table}"), ()).await?;
         conn.execute(&sql, ()).await?;
+        conn.execute(
+            &format!(
+                "DELETE FROM {table} WHERE artifact_id IN (SELECT artifact_id FROM storage_record)"
+            ),
+            (),
+        )
+        .await?;
         Ok(true)
     }
 }

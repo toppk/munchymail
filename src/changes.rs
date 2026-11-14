@@ -62,9 +62,15 @@ pub struct Changes {
 struct File {
     run_id: i64,
     recorded_path: String,
+    /// An mbox file's content; 0 for a live listing, whose entries are `presence` rows.
     content_id: i64,
+    presence: Vec<i64>,
     messages: i64,
 }
+
+/// A live listing's entries at run `?1`: presence rows `p` open then.
+const AT_RUN: &str = "p.origin_id = (SELECT origin_id FROM import_run WHERE run_id = ?1)
+     AND p.since_run <= ?1 AND (p.until_run IS NULL OR p.until_run > ?1)";
 
 async fn files(
     store: &Store,
@@ -78,25 +84,56 @@ async fn files(
              JOIN file_content c ON c.content_id = s.content_id WHERE s.run_id = ?1",
         )
         .await?;
+    let mut live = store
+        .conn
+        .prepare(&format!(
+            "SELECT p.path, p.presence_id FROM presence p WHERE {AT_RUN}
+             ORDER BY p.path, p.presence_id"
+        ))
+        .await?;
+    let mut exists = store
+        .conn
+        .prepare("SELECT 1 FROM import_run WHERE run_id = ?1")
+        .await?;
+    let renamed = |recorded: &String| {
+        rename
+            .iter()
+            .find(|(old, _)| old == recorded)
+            .map_or_else(|| recorded.clone(), |(_, new)| new.clone())
+    };
     let mut out: BTreeMap<String, Vec<File>> = BTreeMap::new();
     for &run_id in runs {
+        let found = exists.query((run_id,)).await?.next().await?.is_some();
+        anyhow::ensure!(
+            found,
+            "no run {run_id}; `mmadm origin list` shows origins and their runs"
+        );
         let mut rows = stmt.query((run_id,)).await?;
-        let mut any = false;
         while let Some(r) = rows.next().await? {
-            any = true;
             let recorded_path: String = r.get(0)?;
-            let path = rename
-                .iter()
-                .find(|(old, _)| *old == recorded_path)
-                .map_or_else(|| recorded_path.clone(), |(_, new)| new.clone());
-            out.entry(path).or_default().push(File {
+            out.entry(renamed(&recorded_path)).or_default().push(File {
                 run_id,
                 recorded_path,
                 content_id: r.get(1)?,
+                presence: Vec::new(),
                 messages: r.get(2)?,
             });
         }
-        anyhow::ensure!(any, "run {run_id} has no files (no such run?)");
+        drop(rows);
+        let mut listing: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+        let mut rows = live.query((run_id,)).await?;
+        while let Some(r) = rows.next().await? {
+            listing.entry(r.get(0)?).or_default().push(r.get(1)?);
+        }
+        for (recorded_path, presence) in listing {
+            out.entry(renamed(&recorded_path)).or_default().push(File {
+                run_id,
+                messages: presence.len() as i64,
+                recorded_path,
+                content_id: 0,
+                presence,
+            });
+        }
     }
     Ok(out)
 }
@@ -122,10 +159,22 @@ async fn load(
              WHERE o.content_id = ?1 ORDER BY o.ordinal",
         )
         .await?;
+    let mut live = store
+        .conn
+        .prepare(&format!(
+            "SELECT p.artifact_id, a.header_hash, a.body_hash, a.message_id
+             FROM presence p JOIN artifact a ON a.artifact_id = p.artifact_id
+             WHERE {AT_RUN} AND p.path = ?2 ORDER BY p.presence_id"
+        ))
+        .await?;
     let (mut copies, mut msgs) = (Vec::new(), Vec::new());
     for (path, fs) in files.iter().filter(|(p, _)| keep.contains(p.as_str())) {
         for f in fs {
-            let mut rows = stmt.query((f.content_id,)).await?;
+            let mut rows = if f.content_id == 0 {
+                live.query((f.run_id, f.recorded_path.as_str())).await?
+            } else {
+                stmt.query((f.content_id,)).await?
+            };
             while let Some(r) = rows.next().await? {
                 copies.push(Copy {
                     run_id: f.run_id,
@@ -149,8 +198,18 @@ async fn load(
     })
 }
 
+/// What a path held: its file contents, or its live entries.
 fn contents(fs: Option<&Vec<File>>) -> Vec<i64> {
-    let mut v: Vec<i64> = fs.map_or(Vec::new(), |fs| fs.iter().map(|f| f.content_id).collect());
+    let mut v: Vec<i64> = fs.map_or(Vec::new(), |fs| {
+        fs.iter()
+            .flat_map(|f| {
+                (f.content_id != 0)
+                    .then_some(f.content_id)
+                    .into_iter()
+                    .chain(f.presence.iter().map(|p| -p))
+            })
+            .collect()
+    });
     v.sort_unstable();
     v
 }

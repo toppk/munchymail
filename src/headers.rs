@@ -33,8 +33,7 @@ pub fn raw_fields(block: &[u8]) -> Vec<&[u8]> {
             start = pos;
         }
         if blank {
-            start = end;
-            break;
+            return out;
         }
         pos = end;
     }
@@ -82,6 +81,25 @@ fn unfold_lossy(b: &[u8]) -> String {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Fields an mbox server writes into a stored message as its own bookkeeping
+/// (Dovecot: flags, keywords, UID, body length, the folder's UID state).
+pub const MAILBOX_BOOKKEEPING: [&str; 6] = [
+    "status",
+    "x-status",
+    "x-keywords",
+    "x-uid",
+    "content-length",
+    "x-imapbase",
+];
+
+/// Dovecot's placeholder at the top of an mbox file, which holds the folder's
+/// UID state (`X-IMAPbase`) and is not mail.
+pub const FOLDER_DATA_SUBJECT: &str = "DON'T DELETE THIS MESSAGE -- FOLDER INTERNAL DATA";
+
+pub fn is_folder_data(fields: &[Field]) -> bool {
+    first(fields, "subject") == Some(FOLDER_DATA_SUBJECT) && first(fields, "x-imapbase").is_some()
 }
 
 pub fn first<'a>(fields: &'a [Field], name: &str) -> Option<&'a str> {
@@ -148,5 +166,7 @@ mod tests {
         assert_eq!(f[0].value, "orphan");
         assert_eq!(f[2].value, "c@d");
         assert!(fields(b"\n").is_empty());
+        // The body is not a field.
+        assert_eq!(fields(b"From: a@b\n\nhello\n").len(), 1);
     }
 }

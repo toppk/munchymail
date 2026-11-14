@@ -157,9 +157,10 @@ impl<'a> Linker<'a> {
                 .await?,
             origins_of: c
                 .prepare(
-                    "SELECT DISTINCT s.origin_id FROM observation o
+                    "SELECT s.origin_id FROM observation o
                      JOIN file_sighting s ON s.content_id = o.content_id
-                     WHERE o.artifact_id = ?1",
+                     WHERE o.artifact_id = ?1
+                     UNION SELECT origin_id FROM presence WHERE artifact_id = ?1",
                 )
                 .await?,
             ins_fold: c

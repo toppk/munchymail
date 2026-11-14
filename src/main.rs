@@ -1218,7 +1218,9 @@ async fn overview(root: &Path, stores: &Stores, json: bool, out: &mut impl Write
         };
         let totals = query_rows(
             &store,
-            "SELECT (SELECT count(*) FROM message WHERE merged_into IS NULL),
+            "SELECT (SELECT count(*) FROM message m WHERE merged_into IS NULL AND EXISTS
+                       (SELECT 1 FROM artifact a WHERE a.msg_id = m.msg_id AND a.artifact_id
+                        NOT IN (SELECT artifact_id FROM storage_record))),
                     (SELECT max(date) FROM artifact WHERE date <= ?1)",
             vec![now.into()],
         )
@@ -2217,9 +2219,17 @@ async fn read(store: &Store, r: api::Ref, json: bool, out: &mut impl Write) -> R
     Ok(())
 }
 
-/// Bring stored messages onto the current identity rule before anything is
-/// stored or indexed under it; after the first time, one lookup.
+/// Bring the archive onto the current rules before anything is stored or
+/// indexed under them: live listings as presence, messages under the current
+/// key rule. After the first time, two lookups.
 async fn identities(store: &Store) -> Result<()> {
+    let t = Instant::now();
+    if let Some(rows) = munchymail::presence::convert_listings(store).await? {
+        info!(rows, elapsed = ?t.elapsed(), "live listings now recorded as presence intervals");
+    }
+    if let Some(n) = munchymail::import::mark_storage_records(store).await? {
+        info!(n, "copies marked as mail-store records, not mail");
+    }
     let t = Instant::now();
     if let Some(s) = munchymail::rekey::rekey(store).await? {
         info!(
@@ -2576,6 +2586,33 @@ async fn show(
         }
         let rows = query_rows(
             store,
+            "SELECT g.label, p.path, p.entry, s.started_at, u.started_at
+             FROM presence p JOIN origin g ON g.origin_id = p.origin_id
+             JOIN import_run s ON s.run_id = p.since_run
+             LEFT JOIN import_run u ON u.run_id = p.until_run
+             WHERE p.artifact_id = ? ORDER BY g.label, p.path, p.since_run",
+            vec![id.into()],
+        )
+        .await?;
+        for r in rows {
+            let until = match r[4] {
+                Value::Integer(t) => format!("until {}", ymd(t)),
+                _ => "present".into(),
+            };
+            writeln!(
+                out,
+                "{}:{} #{}  since {}, {until}",
+                text(&r[0]),
+                text(&r[1]),
+                text(&r[2]),
+                match r[3] {
+                    Value::Integer(t) => ymd(t),
+                    _ => String::new(),
+                }
+            )?;
+        }
+        let rows = query_rows(
+            store,
             "SELECT g.label, r.path, lr.started_at, gr.started_at, r.moved_to
              FROM removal r
              JOIN import_run lr ON lr.run_id = r.last_seen_run
@@ -2619,6 +2656,7 @@ async fn stats(store: &Store, out: &mut impl Write) -> Result<()> {
         ("file sightings", "SELECT count(*) FROM file_sighting"),
         ("file contents", "SELECT count(*) FROM file_content"),
         ("observations", "SELECT count(*) FROM observation"),
+        ("presence intervals", "SELECT count(*) FROM presence"),
         ("artifacts", "SELECT count(*) FROM artifact"),
         (
             "distinct bodies",
