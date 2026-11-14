@@ -602,8 +602,9 @@ pub(crate) async fn sight_listings(
     Ok(())
 }
 
-/// Move messages stored before identities read CRLF as LF onto that
-/// identity, joining any that turn out to be one message. Runs once.
+/// Move messages stored under an older identity rule onto the current one,
+/// joining any that turn out to be one message. Runs once per rule. A
+/// message's identity comes from its own copy, never one folded into it.
 pub async fn line_ending_identities(store: &Store) -> Result<u64> {
     let done = store
         .conn
@@ -623,7 +624,9 @@ pub async fn line_ending_identities(store: &Store) -> Result<u64> {
         .conn
         .query(
             "SELECT m.msg_id, m.body_hash, m.message_id, m.date,
-                    (SELECT a.body_hash FROM artifact a WHERE a.msg_id = m.msg_id LIMIT 1)
+                    (SELECT a.body_hash FROM artifact a WHERE a.msg_id = m.msg_id
+                     ORDER BY a.artifact_id IN (SELECT artifact_id FROM fold), a.artifact_id
+                     LIMIT 1)
              FROM message m",
             (),
         )

@@ -2214,12 +2214,19 @@ async fn read(store: &Store, r: api::Ref, json: bool, out: &mut impl Write) -> R
     Ok(())
 }
 
-async fn index(store: &Store) -> Result<()> {
+/// Bring stored messages onto the current identity rule before anything is
+/// stored or indexed under it; after the first time, one lookup.
+async fn identities(store: &Store) -> Result<()> {
     let t = Instant::now();
     let changed = munchymail::import::line_ending_identities(store).await?;
     if changed > 0 {
-        info!(changed, elapsed = ?t.elapsed(), "message identities now read CRLF as LF");
+        info!(changed, elapsed = ?t.elapsed(), "message identities now read CRLF as LF and NUL as 0x80");
     }
+    Ok(())
+}
+
+async fn index(store: &Store) -> Result<()> {
+    identities(store).await?;
     let t = Instant::now();
     let s = parts::index(store).await?;
     info!(
@@ -3416,6 +3423,7 @@ async fn run(mut cli: Cli, stores: &Stores, out: &mut impl Write) -> Result<()> 
 
 /// Import `labels`, or every unretired mbox origin; the new copies per origin.
 async fn import(store: &Store, mut labels: Vec<String>) -> Result<Vec<(String, u64)>> {
+    identities(store).await?;
     let mut added = Vec::new();
     if labels.is_empty() {
         for r in query_rows(
@@ -3579,6 +3587,7 @@ async fn sync_now(
 
 /// Bring IMAP origin `label` up to date, then index what arrived.
 async fn imap_sync(store: &Store, label: &str) -> Result<munchymail::imap::Stats> {
+    identities(store).await?;
     let t = Instant::now();
     let account = account_address(store).to_string();
     let s = munchymail::imap::sync(store, &account, label).await?;
@@ -3604,6 +3613,7 @@ async fn imap_sync(store: &Store, label: &str) -> Result<munchymail::imap::Stats
 
 /// Bring the account's Gmail origin up to date, then index what arrived.
 async fn gmail_sync(store: &Store, jobs: usize) -> Result<munchymail::gmail::Stats> {
+    identities(store).await?;
     let t = Instant::now();
     let address = account_address(store).to_string();
     let takeouts = takeout::origin_ids(store, &Config::load()?.takeouts(&address)?).await?;
