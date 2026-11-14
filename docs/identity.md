@@ -31,8 +31,9 @@ the rules and the reasoning.
 - **Header/body split** (`split_message`, `header_end`): the header ends
   after the first empty line, i.e. at the first `\n` that follows `\n`,
   or follows `\r` that follows `\n` (so `\n\n` and `\r\n\r\n` both end
-  it). Everything after is the body. With no empty line, the whole copy
-  is header and the body is empty.
+  it). Everything after is the body. A copy that starts with an empty line
+  has an empty header; with no empty line, the whole copy is header and the
+  body is empty.
 - **Two copies are the same copy** only if both header and body bytes are
   identical (`UNIQUE (header_hash, body_hash)`). A copy seen in many places
   is stored once with a sighting for each.
@@ -88,17 +89,19 @@ three must match.
 |---|---|---|
 | CRLF as LF | Mail's canonical form (RFC 5322) and IMAP's wire form (RFC 3501/9051) use CRLF; Unix mbox files store LF; Dovecot converts between them (`mail_save_crlf = no`, the default, stores LF). Gmail stores CRLF, so its API and Takeout copies are CRLF. | the same email from an mbox file and over IMAP |
 | NUL as 0x80 | IMAP literals can't carry NUL; Dovecot sends each NUL as `0x80`. | mail with NUL in its body, from an mbox file and over IMAP |
-| missing final newline added | An mbox must end a message with a newline (above), so a message that had none (common in mail composed in Gmail's web interface) gains one in the file; the original (API, IMAP) has none. | Gmail API vs Takeout; Dovecot IMAP vs its mbox file |
+| missing final newline added | An mbox must end a message with a newline (above), so a message that had none (common in mail composed in Gmail's web interface) gains one in the file; the original (API) has none. | Gmail API vs Takeout. (Between Dovecot's mbox file and its IMAP view it joined only one pair, a damaged message IMAP serves one byte short: a coincidence, not support.) |
 
 All three are conversions a store or protocol performs on the same email,
-not differences between emails. Every source goes through the same
+not differences between emails. One consequence: an empty body and a body
+of a single `\n` have the same identity. Every source goes through the same
 function: mbox and Takeout imports (`Importer`), Gmail API sync
 (`gmail.rs`), IMAP sync (`imap.rs`); there is no other code path that
 creates a message.
 
 ### What identity deliberately does not absorb
 
-- Anything in headers (they aren't part of it).
+- Any header field other than Message-ID and Date: added, removed or
+  rewritten fields, and header line endings.
 - Re-encoding: base64 vs quoted-printable, different line lengths,
   different MIME boundary strings, charset conversion. Gmail's own copies
   of one sent email can differ this way (its Sent copy and the delivered
@@ -122,8 +125,9 @@ an API copy when:
 - the Takeout header is the API header preceded only by Takeout's
   `X-GM-THRID`, `X-GM-*`, `X-Gmail-*` lines; and
 - the bodies are equal, or the Takeout body is the API body plus a final
-  `\r\n` (`final-crlf`), or either holds after replacing invalid UTF-8 in
-  the API copy with U+FFFD (`utf8-damage`, Takeout's own corruption).
+  `\r\n` (`final-crlf`); the header and body tests each also pass if they
+  hold after replacing invalid UTF-8 in the API copy with U+FFFD
+  (`utf8-damage`, Takeout's own corruption).
 
 The folded copy moves into the API copy's message; the message it leaves,
 if then empty, is deleted (its derived indexes dropped). With the
@@ -140,7 +144,9 @@ each was seen). One copy is used for content:
   folded;
 - `read` and `show`: the copy that isn't folded and was seen most
   recently;
-- `export`: the copy seen most recently, folded or not.
+- `export`: the copy seen most recently, folded or not;
+- search results (`fold_copies`): of the matching copies, the newest
+  stored that isn't folded.
 
 These differ; see the open questions.
 
@@ -166,7 +172,9 @@ Detectors that have worked:
 - **Dovecot's `Content-Length` vs the body.** Dovecot writes
   `Content-Length: N` (the body's bytes as saved) into each message it
   saves to an mbox. If the body munchymail cut out of the file is not N
-  bytes, the file changed after Dovecot saved the message. (Not every
+  bytes, the file and Dovecot's record disagree; either can be the wrong
+  one (a file that lost bytes after saving, or a wrong field with an
+  intact body). Check the MIME structure and the IMAP view. (Not every
   message has the field: mail written into the file by other programs
   lacks it.)
 - **An unclosed MIME boundary.** A complete `multipart/*` message ends
@@ -174,7 +182,10 @@ Detectors that have worked:
   that built the message wrongly (common in spam).
 - **Comparing two views of one mailbox**, e.g. its mbox files and its IMAP
   server: after the three readings above they should agree copy for
-  copy; any other difference is either a parsing disagreement or damage.
+  copy; any other difference is either a parsing disagreement or damage,
+  on either side: the server can serve less than its file holds.
+  Agreement shows the views are consistent, not that the copy is
+  complete.
 
 ## Risks, as we see them
 
