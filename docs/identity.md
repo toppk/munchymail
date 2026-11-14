@@ -23,8 +23,10 @@ the rules and the reasoning.
 
 - **Every copy, byte for byte**, as delivered by its origin: for an mbox,
   after it is cut out of the file (below), which removes the separator and,
-  in mboxrd mode, one `>` from quoted `From ` lines; the file itself isn't
-  kept. Nothing is rewritten: no line-ending
+  in mboxrd mode, one `>` from quoted `From ` lines. The file isn't kept
+  as a file, but its hash, each message's offset, `From ` line, separator
+  bytes and the format are, so it can be rebuilt (not yet checked by a
+  command). Nothing is rewritten: no line-ending
   change, no header removal, no re-encoding. Header and body are stored
   as separate objects named by their SHA-256; identical objects are
   stored once.
@@ -88,7 +90,7 @@ three must match.
 | Reading | Because | Where it shows |
 |---|---|---|
 | CRLF as LF | Mail's canonical form (RFC 5322) and IMAP's wire form (RFC 3501/9051) use CRLF; Unix mbox files store LF; Dovecot converts between them (`mail_save_crlf = no`, the default, stores LF). Gmail stores CRLF, so its API and Takeout copies are CRLF. | the same email from an mbox file and over IMAP |
-| NUL as 0x80 | IMAP literals can't carry NUL; Dovecot sends each NUL as `0x80`. | mail with NUL in its body, from an mbox file and over IMAP |
+| NUL as 0x80 | Ordinary IMAP literals can't carry NUL (only `literal8`, with the BINARY extension, can); Dovecot sends each NUL as `0x80` in a normal `BODY[]` fetch. | mail with NUL in its body, from an mbox file and over IMAP |
 | missing final newline added | An mbox must end a message with a newline (above), so a message that had none (common in mail composed in Gmail's web interface) gains one in the file; the original (API) has none. | Gmail API vs Takeout. (Between Dovecot's mbox file and its IMAP view it joined only one pair, a damaged message IMAP serves one byte short: a coincidence, not support.) |
 
 All three are conversions a store or protocol performs on the same email,
@@ -158,7 +160,9 @@ sync or index stores anything, every message's identity is recomputed
 from its own copy (one that isn't folded), and messages whose (identity,
 Message-ID, Date) now coincide are merged into one: copies moved, the
 emptied message and its derived indexes deleted. Message ids (`mN`) of
-surviving messages don't change; stored bytes never change.
+surviving messages don't change; stored bytes never change. A merged-away
+message is deleted, and its id can be reused: a new message takes the
+highest id plus one, so the id of a deleted highest message comes back.
 
 ## Damaged and out-of-spec mail
 
