@@ -35,23 +35,25 @@ pub(crate) struct Prepared {
     summary: Summary,
 }
 
-/// A body's identity: its hash with each CRLF read as LF, so the same email
-/// stored with Unix line endings (an mbox file) and with network ones (IMAP,
-/// Gmail) is one message. A body without CRLF is its own hash.
+/// A body's identity, the same rule for every source: its hash with each CRLF
+/// read as LF and each NUL as 0x80. A store keeps the same email as LF (an mbox
+/// file) or CRLF (IMAP, Gmail), and IMAP can't carry NUL, which Dovecot serves
+/// as 0x80; read this way they are one message. Other bodies hash as they are.
 pub(crate) fn identity(body: &[u8]) -> Hash {
-    if !body.windows(2).any(|w| w == b"\r\n") {
+    let crlf = body.windows(2).any(|w| w == b"\r\n");
+    if !crlf && !body.contains(&0) {
         return sha256(body);
     }
-    let mut lf = Vec::with_capacity(body.len());
+    let mut canonical = Vec::with_capacity(body.len());
     let mut i = 0;
     while i < body.len() {
         if body[i] == b'\r' && body.get(i + 1) == Some(&b'\n') {
             i += 1;
         }
-        lf.push(body[i]);
+        canonical.push(if body[i] == 0 { 0x80 } else { body[i] });
         i += 1;
     }
-    sha256(&lf)
+    sha256(&canonical)
 }
 
 pub(crate) fn prepare(header: &[u8], body: &[u8]) -> Prepared {
@@ -606,7 +608,7 @@ pub async fn line_ending_identities(store: &Store) -> Result<u64> {
     let done = store
         .conn
         .query(
-            "SELECT 1 FROM meta WHERE key = 'identity' AND value = 'lf'",
+            "SELECT 1 FROM meta WHERE key = 'identity' AND value = 'lf-nul'",
             (),
         )
         .await?
@@ -704,7 +706,7 @@ pub async fn line_ending_identities(store: &Store) -> Result<u64> {
     store
         .conn
         .execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES ('identity', 'lf')",
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('identity', 'lf-nul')",
             (),
         )
         .await?;
@@ -722,6 +724,9 @@ mod identity_tests {
         assert_eq!(identity(b"a\nb\n"), sha256(b"a\nb\n"));
         // A lone CR is content, not a line ending.
         assert_eq!(identity(b"a\rb\n"), sha256(b"a\rb\n"));
+        // NUL reads as 0x80, as Dovecot serves it over IMAP.
+        assert_eq!(identity(b"a\x00b\n"), identity(b"a\x80b\r\n"));
+        assert_eq!(identity(b"a\x00b\n"), sha256(b"a\x80b\n"));
         assert_ne!(identity(b"a\r\n"), identity(b"a\r\r\n"));
     }
 }

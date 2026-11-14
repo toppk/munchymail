@@ -64,9 +64,13 @@ server_cert = "/etc/pki/my-ca.pem"
   (IMAP requires them; Dovecot stores LF unless `mail_save_crlf`) and
   without Dovecot's own fields (`Status`, `X-Status`, `X-Keywords`,
   `X-UID`, `Content-Length`, `X-IMAPbase`); each file's "FOLDER INTERNAL
-  DATA" message isn't served at all. Copies are stored exactly as received,
-  and a message's identity reads CRLF as LF, so both copies are one
-  message.
+  DATA" message isn't served at all. IMAP can't carry NUL, so Dovecot serves
+  it as 0x80. Copies are stored exactly as received, and a message's
+  identity reads CRLF as LF and NUL as 0x80, so both copies are one message.
+  Checked on a whole mailbox (179,590 messages): all but 2 matched. Those 2
+  are mbox boundary cases: a message without a final newline (Dovecot's
+  index knows it, the file can't say), and one whose file no longer agrees
+  with Dovecot's `Content-Length`, which IMAP serves truncated.
 - A folder's progress is saved only after its messages are; an interrupted
   sync redoes the folder and skips what it already stored.
 - Like Gmail, a check that finds nothing new records no import run; each
