@@ -20,8 +20,13 @@ Roughly in priority order within each section. Phases refer to
 - [x] `serve`: one process owns the databases; the CLI forwards its
       command line over `$XDG_RUNTIME_DIR/munchymail/serve.sock` (reads
       concurrent, writes in turn). Installed per `docs/install.md`.
-- [ ] The service's own work (Gmail sync, mbox scans, OCR after import):
-      designed in `docs/sync.md`; origin roles are done.
+- [x] The service keeps live origins current (`docs/sync.md`): Gmail every
+      3 minutes, `munchymail sync`, failures stop an origin or (exit 78) the
+      service.
+- [ ] The live Dovecot origin over IMAP (io-imap): IDLE on INBOX, a
+      3-minute QRESYNC check of the other folders; the mbox tree becomes an
+      occasional snapshot. NOTIFY once imap-codec and io-imap support it.
+- [ ] OCR after import in the service, rather than by hand.
 - [ ] Web UI and Android over HTTP with auth, through `src/api.rs`; the
       socket is same-user only and runs any command.
 
@@ -36,10 +41,9 @@ Roughly in priority order within each section. Phases refer to
 - [x] `gmail sync` through the Gmail API, read-only: `format=raw` bytes,
       labels as paths of a run, incremental via history, full listing when
       history has expired.
-- [ ] The service runs Gmail sync itself, woken by new mail: poll
-      history.list (2 units) every ~30 s, or users.watch with a Pub/Sub
-      pull subscription. Gmail IMAP IDLE needs the full-access
-      `https://mail.google.com/` scope (no read-only IMAP scope exists).
+- [x] The service polls Gmail's history.list every 3 minutes. Faster would be
+      users.watch with a Pub/Sub pull subscription; Gmail IMAP IDLE needs the
+      full-access `https://mail.google.com/` scope (no read-only IMAP scope).
 - [x] First full sync of a 19.5k-message mailbox: 3 h, held to ~100
       messages a minute by "Units per minute per user" errors (a Google
       project shared with other tools); incremental syncs are cheap, so a
