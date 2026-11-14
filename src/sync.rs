@@ -7,6 +7,11 @@ use crate::store::{Store, now};
 
 /// How often the service checks a live Gmail origin.
 pub const GMAIL_EVERY: i64 = 180;
+/// `sync` skips an origin checked this recently: Gmail's check is cheap, an
+/// mbox tree's means reading every file under Dovecot's lock.
+pub fn min_gap(gmail: bool) -> i64 {
+    if gmail { 15 } else { 60 }
+}
 /// The longest wait between retries of a failing origin.
 const MAX_BACKOFF: i64 = 3600;
 

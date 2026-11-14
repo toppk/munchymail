@@ -25,7 +25,8 @@ live and leaves the rest unset.
   changed it only moves its checkpoint and records no import run.
 - `munchymail sync` checks every live origin at once and waits, e.g. before
   an agent starts work, and reports what arrived. Its effect is `sync`:
-  agents may run it.
+  agents may run it. An origin checked in the last 15 s (Gmail) or 60 s
+  (an mbox tree) is skipped, so repeated syncs queue and then do nothing.
 
 ## mbox trees (not built)
 

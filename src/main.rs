@@ -3390,6 +3390,23 @@ async fn sync_now(
             )?;
         }
         for live in &lives {
+            let since = live.checked_at.map(|c| now() - c);
+            if let Some(s) = since.filter(|&s| s < sync::min_gap(live.gmail)) {
+                if json {
+                    let v = serde_json::json!({
+                        "type": "origin",
+                        "account": address,
+                        "origin": live.label,
+                        "new": null,
+                        "error": null,
+                        "checked_seconds_ago": s,
+                    });
+                    writeln!(out, "{v}")?;
+                } else {
+                    writeln!(out, "{address} {}: checked {s} s ago", live.label)?;
+                }
+                continue;
+            }
             let (new, problem) = match &live.stopped {
                 Some(p) => (
                     None,
