@@ -30,8 +30,12 @@ belong in this repository; keep them in a git-ignored `local/` or elsewhere.
 
 ```
 just install --restart            # needs a clean tree: releases are named by commit
-munchymail --version              # 0.1.0-<commit>, the release's name
+munchymail --version              # 0.2.0-<commit>, the release's name
 ```
+
+Every deployment is a new version in `Cargo.toml`: at least a new patch,
+and a new minor when the database schema changes (`CHANGELOG.md`).
+`just install` refuses a version already installed from another commit.
 
 `just install` copies the binaries into a new release, moves `previous` to
 the old `current`, points `current` at the new one, creates the CLI links if
@@ -40,7 +44,10 @@ missing and installs the unit with the prefix filled in. With `--restart` it the
 journal if the service doesn't come back. It never enables the unit and
 never deletes old releases; `just prune` deletes all but `current` and
 `previous` (`--dry-run` lists them first). Roll back by pointing `current` at
-`previous`'s target and restarting. The first time, enable it:
+`previous`'s target and restarting. A release with a new schema upgrades
+the database on first use, and an older release can't open it: before
+installing one, stop the service and copy the data directory, and roll back
+by restoring that copy too. The first time, enable it:
 `systemctl --user enable --now munchymail`.
 
 The service stops at once on SIGTERM; writes are transactional, so an import

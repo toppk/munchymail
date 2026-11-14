@@ -161,8 +161,8 @@ mmadm origin move 2021-07-07-mailhost-spool ~/mail-backups/2021-07-07-mailhost-s
 ```
 
 Each origin has a role: `live` (a mailbox in use), `snapshot` (a copy as it
-was) or `export` (e.g. a Takeout). Only live origins will be kept in sync
-(`docs/sync.md`); the Gmail origin is live from the start. A label can
+was) or `export` (e.g. a Takeout). Only live origins are kept in sync by the
+service (`docs/sync.md`); the Gmail origin is live from the start. A label can
 change too, and then the origin's `config.toml` section must be renamed
 with it, as `rename` says:
 
@@ -248,8 +248,9 @@ mmadm serve &                      # until killed; logs to stderr
 munchymail search --text invoice -n 5   # answered by the service
 ```
 
-The service uses its own `MUNCHYMAIL_LOG`, not the client's. It doesn't sync
-or scan on its own yet. The protocol (one JSON request line, then framed
+The service uses its own `MUNCHYMAIL_LOG`, not the client's. It keeps live
+origins current (Gmail and IMAP every 3 minutes, an IMAP INBOX at once through
+IDLE; `docs/sync.md`); `munchymail sync` checks them now. The protocol (one JSON request line, then framed
 replies) is described at the top of `src/serve.rs`.
 
 ### search: list messages

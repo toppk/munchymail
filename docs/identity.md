@@ -2,11 +2,11 @@
 
 How munchymail decides that two stored copies are the same email, what it
 does with copies that differ, and how damaged or out-of-spec mail behaves.
-Written for review; the rules here are what the code does as of 2026-11-14
-(`src/import.rs` `identity`, `Artifacts::put`, `line_ending_identities`;
-`src/mbox.rs` `split`; `src/takeout.rs` `compare`, `Linker`). Measurements
-on a real archive are kept outside the repository; this document gives
-the rules and the reasoning.
+The rules here are what the code does as of 0.2.0 (`src/key.rs`,
+`src/rekey.rs`; `src/import.rs` `Artifacts::put`; `src/mbox.rs` `split`;
+`src/takeout.rs` `compare`, `Linker`). It was written for review, and the
+reviews' findings are folded in; measurements on a real archive are kept
+outside the repository.
 
 ## Terms
 

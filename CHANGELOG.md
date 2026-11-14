@@ -1,0 +1,90 @@
+# Changelog
+
+Every deployment is a new version: at least a new patch, and a new minor
+when the database schema changes. Upgrading to a new schema is one-way;
+keep a copy of the data directory to roll back (`docs/install.md`).
+
+## 0.2.0: live syncing
+
+munchymail keeps itself current. Live mailboxes are checked as mail
+arrives, and every arrival, move, deletion and flag change is kept as
+history.
+
+### Live syncing
+
+- **IMAP origins.** An origin can be an IMAP server (`imaps://…`), with
+  mutual TLS and a password from a command such as the desktop keyring.
+  Read-only: folders are opened with EXAMINE and messages fetched with
+  BODY.PEEK, so not even `\Seen` changes. Each check asks the server only
+  what changed since the last one (CONDSTORE/QRESYNC); a check that finds
+  nothing takes a fraction of a second, after a restart too.
+- **Mail as it lands.** The service holds IDLE on the INBOX and checks
+  about 5 seconds after activity there; other folders, and Gmail, are
+  checked every 3 minutes.
+- **`munchymail sync`** checks every live origin now and reports what
+  arrived; agents may run it before a search that needs the latest mail.
+  Repeated syncs within 15 s (Gmail, IMAP) or 60 s (mbox) do nothing.
+- **Failures are handled by kind.** Network trouble and a locked keyring
+  are retried, up to an hour apart. A refused login or revoked sign-in
+  stops that origin alone, named in `munchymail overview`, until
+  `mmadm origin resume`. A corrupt database or full disk stops the service
+  with status 78, which the unit doesn't restart.
+- **Origin roles**: `live`, `snapshot`, `export`. Only live origins are
+  synced; a Dovecot mailbox moves to IMAP and its mbox tree stays as a
+  snapshot.
+
+### History that costs what changed
+
+- **Presence intervals.** In a Gmail label or IMAP folder, each message is
+  recorded from the check it appeared in until the check it was gone from.
+  A new mail is one row, however big the folder; moves and deletions are
+  recorded as removals (`removals`, `read` show where a copy went). Gmail
+  listings recorded whole by 0.1 are converted once.
+- **Flags and labels over time.** IMAP flags and Gmail labels, read state
+  included, are kept as first seen and at every change, not only the latest.
+
+### One message, however it arrived
+
+- **The same email from any source is one message.** A copy from an mbox
+  file, over IMAP, from the Gmail API and from a Takeout share one message:
+  line endings (CRLF/LF), NUL served as `0x80`, and the final newline an
+  mbox adds are read alike. Measured on a 180,000-message mailbox: every
+  IMAP copy joined its mbox copy except one the server serves truncated.
+- **A stricter key.** Message-ID is parsed as an identifier (no RFC 2047
+  decoding, case kept); copies must agree on how the body is to be read
+  (transfer encoding, media type, charset, boundary); and copies without a
+  valid Message-ID must also share their delivery headers. Unrelated mail
+  with the same body no longer merges.
+- **Message ids are stable.** Messages are never deleted: a message whose
+  copies joined another redirects to it (`read m4` says so), and no id is
+  ever reused. Regrouping under a new rule can split as well as merge, in
+  one transaction.
+- **One preferred copy.** `read`, `show`, `search --unique`, indexing and
+  `export` all use a message's earliest stored copy that isn't a lesser
+  (folded) one, whichever copy matched.
+- **Not mail is classified.** Dovecot's "FOLDER INTERNAL DATA" placeholder
+  is kept byte for byte and readable by id, and left out of every listing,
+  count, report and index (`artifact.kind`). `read` no longer lists
+  Dovecot's bookkeeping fields (`Status`, `X-UID`, …).
+
+### Fixes
+
+- `export` writes the stored bytes by default; `--newlines lf|crlf`
+  converts on request, and the export's index says which.
+- `read --json` no longer lists the first body line as a header field.
+
+### Upgrading
+
+The schema moves from 10 to 11. The first `index`, `import` or sync
+converts Gmail listings to presence and regroups messages under the new key
+before storing anything (about 30 s for 280,000 copies). Stop the service,
+copy the data directory, install, run `mmadm --account ADDRESS index` for
+each account, then start the service.
+
+## 0.1.0
+
+The first installed release: an archive of mbox trees, backups, Google
+Takeout and the Gmail API, every copy kept byte for byte with where it was
+found; Sieve-style header search, full text including attachments and OCR,
+history across imports (`changes`, `removals`), exports, and a service on a
+Unix socket for people and agents.

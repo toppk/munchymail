@@ -15,8 +15,9 @@ pages=(
   "install|Install|Start|docs/install.md"
   "design|Design|How it works|docs/design.md"
   "ingest|Reading sources safely|How it works|docs/ingest.md"
+  "sync|Live syncing|How it works|docs/sync.md"
+  "identity|Identity and duplicates|How it works|docs/identity.md"
   "internals|Index internals|How it works|docs/index.md"
-  "sync|Keeping mail current|Coming next|docs/sync.md"
 )
 
 field() { cut -d'|' -f"$2" <<<"$1"; }

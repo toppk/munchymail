@@ -1,6 +1,6 @@
 # munchymail
 
-> munchymail is a self-hosted mail archive in one Rust binary. It imports mail from mbox trees (read under a Dovecot-compatible shared lock), old backups, Google Takeout and the Gmail API (read-only), keeps every message byte for byte with every place it was found, and never writes to a mail source. `munchymail` searches and reads (Sieve-style header matching, full text including attachments and OCR, history across imports); `mmadm` sets up and maintains the archive. `munchymail describe --json` lists every command and whether it reads or writes; `search --json` and `read --json` are made for agents, and mark message content as untrusted.
+> munchymail is a self-hosted mail archive in one Rust binary. It follows live mailboxes (IMAP with IDLE, read-only; the Gmail API, read-only) and imports mbox trees (read under a Dovecot-compatible shared lock), old backups and Google Takeout; it keeps every message byte for byte with every place it was found, records arrivals, moves, deletions and flag changes as history, and never writes to a mail source. `munchymail` searches and reads (Sieve-style header matching, full text including attachments and OCR, history across imports); `mmadm` sets up and maintains the archive. `munchymail describe --json` lists every command and whether it reads or writes; `search --json` and `read --json` are made for agents, and mark message content as untrusted.
 
 Every page below is Markdown. llms-full.txt has all of them in one file.
 
@@ -14,8 +14,6 @@ Every page below is Markdown. llms-full.txt has all of them in one file.
 
 - [Design](design.md): the thesis, the data model, facts versus interpretations
 - [Reading sources safely](ingest.md): locking, splitting mbox byte for byte
+- [Live syncing](sync.md): IMAP and Gmail kept current, failures, the service
+- [Identity and duplicates](identity.md): when copies are one message, and damaged mail
 - [Index internals](internals.md): the schema and performance rules
-
-## Coming next
-
-- [Keeping mail current](sync.md): the planned periodic sync

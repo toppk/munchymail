@@ -8,7 +8,7 @@ as a snapshot.
 
 ## Which origins are synced
 
-Every origin gets a role, stored in the database (schema 10, built):
+Every origin has a role, stored in the database:
 
 | Role | Meaning | Synced |
 |---|---|---|

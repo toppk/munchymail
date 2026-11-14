@@ -46,6 +46,12 @@ install *flags:
     version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
     name="$version-$(git rev-parse --short HEAD)"
     home="${MUNCHYMAIL_PREFIX:-$HOME/.local/lib/munchymail}"; home="${home/#\~/$HOME}"
+    # Every deployment is a new version (a schema change, a new minor): see CHANGELOG.md.
+    for r in "$home"/releases/"$version"-*; do
+        if [ -e "$r" ] && [ "$(basename "$r")" != "$name" ]; then
+            echo "version $version is already installed as $(basename "$r"); bump it in Cargo.toml first" >&2; exit 1
+        fi
+    done
     bin="${MUNCHYMAIL_BINDIR:-$HOME/.local/bin}"; bin="${bin/#\~/$HOME}"
     install -d "$home/releases/$name" "$bin" "$HOME/.config/systemd/user"
     install -m 0755 target/release/munchymail target/release/mbox-sort "$home/releases/$name/"
