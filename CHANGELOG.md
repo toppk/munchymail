@@ -4,6 +4,38 @@ Every deployment is a new version: at least a new patch, and a new minor
 when the database schema changes. Upgrading to a new schema is one-way;
 keep a copy of the data directory to roll back (`docs/install.md`).
 
+## 0.3.0: damage noted, files proven
+
+munchymail now says what it notices about each copy, and can prove that
+the mbox files it read are recoverable from the archive alone.
+
+- **Marks on copies** (`copy_mark`). Observations, never verdicts, and
+  never a change to which message a copy is in or which copy is shown:
+  - `content-length`: a `Content-Length` field that disagrees with the
+    stored body, and whether the body is shorter or longer;
+  - `unclosed-boundary`: a multipart body whose outer boundary is never
+    closed;
+  - `prefix-of`: a copy whose body is a strict prefix of another copy of
+    the same Message-ID and Date, and how it ends: mid-line (a sign of
+    truncation), where the longer goes on (often a mailing list's footer),
+    or short only of newlines.
+
+  `read` lists the marks on every copy of a message; `search --mark NAME`
+  finds them. Copies are marked as they are stored, and once for copies
+  stored earlier.
+- **`mmadm verify-files ORIGIN`** rebuilds each mbox file the origin was
+  read from, using only the stored copies and how they were framed
+  (re-quoting mboxrd), and checks it against the SHA-256 recorded when it
+  was read. Read-only.
+
+On a real archive (460,000 copies; 153 mbox files, 38 GB): marking took
+about a minute; every file rebuilt byte for byte. The marks found the known
+damaged messages and showed that an older backup holds a complete copy of
+one of them.
+
+Upgrading: one new table, no schema version change; 0.2.0 can still open
+the database. The first `index`, import or sync marks the existing copies.
+
 ## 0.2.0: live syncing
 
 munchymail keeps itself current. Live mailboxes are checked as mail

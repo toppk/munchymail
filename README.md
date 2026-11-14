@@ -607,6 +607,25 @@ are only seen that way, since an import compares one origin at a time.
 munchymail removals [--folder PATTERN] [--moved true|false] [-n N]
 ```
 
+### marks: what munchymail noticed about a copy
+
+Each copy is checked as it is stored: a `Content-Length` its body doesn't
+match (`content-length`), a multipart body never closed
+(`unclosed-boundary`), or a body that is the start of another copy of the
+same message (`prefix-of`, saying whether it stops mid-line). `read` lists
+them; `search --mark NAME` (or `--mark '*'`) finds them.
+
+### verify-files: rebuild an origin's mbox files
+
+```
+mmadm verify-files ORIGIN
+```
+
+Rebuilds every mbox file the origin was read from, using only the stored
+copies, their `From ` lines and separators (re-quoted for mboxrd), and
+checks each against the SHA-256 recorded at import. The source files are
+not read.
+
 ```
 $ munchymail removals --folder Sent -n 1
   25689  2026-10-07..2026-10-10  home-mail:Sent -> Sent-sep-2026  2026-10-04  Me Example ...  Re: test message

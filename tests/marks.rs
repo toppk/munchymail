@@ -83,6 +83,7 @@ fn copies_are_marked_and_files_rebuild() {
                 .detail
                 .starts_with("copy 3: this body is its first 11 of 18 bytes")
         );
+        assert!(m.marks[0].detail.ends_with("this body stops mid-line"));
         assert!(
             api::read(&store, Ref::Copy(1)).await.unwrap().marks[0]
                 .detail

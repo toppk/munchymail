@@ -25,8 +25,9 @@ outside the repository.
   after it is cut out of the file (below), which removes the separator and,
   in mboxrd mode, one `>` from quoted `From ` lines. The file isn't kept
   as a file, but its hash, each message's offset, `From ` line, separator
-  bytes and the format are, so it can be rebuilt (not yet checked by a
-  command). Nothing is rewritten: no line-ending
+  bytes and the format are, so it can be rebuilt: `mmadm verify-files
+  ORIGIN` rebuilds each recorded file and checks it against the file's
+  recorded SHA-256. Nothing is rewritten: no line-ending
   change, no header removal, no re-encoding. Header and body are stored
   as separate objects named by their SHA-256; identical objects are
   stored once.
@@ -216,7 +217,21 @@ damage: a damaged copy and an intact copy of one email have different
 identities, so both are kept as separate messages unless explicitly
 folded.
 
-Detectors that have worked:
+What munchymail notices is recorded on the copy as a **mark**
+(`copy_mark`; `read` lists them, `search --mark NAME` finds them). A mark
+states what was measured, not a verdict, and never changes whether a copy
+is mail, which message it is in, or which copy is shown:
+
+| Mark | Set when | Detail |
+|---|---|---|
+| `content-length` | the copy has a `Content-Length` field and the body isn't that long | both numbers, and whether the body is shorter or longer |
+| `unclosed-boundary` | a `multipart/*` body never has `--<boundary>--` | the boundary |
+| `prefix-of` | another mail copy with the same valid Message-ID and Date, in another message, has a body that this one's is a strict prefix of (line endings read alike) | the longer copy, both lengths, and how this one ends: mid-line (a sign of truncation), at a line the longer continues past (often a mailing list's footer on one delivery), or short only of newlines |
+
+Marks are set when a copy is stored, and once for copies stored earlier
+(`meta` key `marks_version`; a new detector version replaces its marks).
+
+The detectors, and why:
 
 - **Dovecot's `Content-Length` vs the body.** Dovecot writes
   `Content-Length: N` (the body's bytes as saved) into each message it
@@ -260,9 +275,9 @@ Detectors that have worked:
 
 1. NUL as 0x80 and the final newline: global (today) or only between the
    sources that showed them, as folds?
-2. Should a detected length mismatch (`Content-Length` vs body, with its
-   direction) or an unclosed boundary be recorded on the copy?
-3. Should a copy whose body is a prefix of another's (same valid
-   Message-ID and Date) be recorded as a candidate link to it?
-4. Should a command rebuild each mbox file from its stored copies and
-   framing, and check it against the file's recorded hash?
+2. Should a `prefix-of` copy that stops mid-line be folded into the longer
+   copy's message? Today it is only marked: a short copy can be a prefix of
+   two different longer ones, and a prefix alone doesn't prove one email.
+3. Should copies differing only by a mailing list's footer, or by trailing
+   blank lines, be one message? Today they are separate, and marked
+   `prefix-of`.

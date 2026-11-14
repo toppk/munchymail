@@ -136,6 +136,15 @@ interpretation of them.
 | message | one email however many copies exist; its id (`m1834`) survives Dovecot rewriting its headers |
 | derived | decoded headers, MIME parts, full text, OCR: versioned and rebuildable |
 
+And because every copy is kept with how it was framed, the original mbox
+files can be rebuilt from the archive alone: `mmadm verify-files` rebuilds
+each one and checks it against the hash recorded when it was read.
+
+Damage is noted, not hidden: a copy whose body is shorter than its server
+recorded, a multipart message cut off before its end, or a copy that is
+the start of a longer one is marked as such (`search --mark`), with what
+was measured, so the intact copy, if the archive has one, can be found.
+
 Because storage is deduplicated but history is not, a message seen in nine
 backups is stored once and remembered nine times. When copies differ only in
 the headers a mail server adds, they are still one message; when an export
@@ -170,8 +179,6 @@ munchymail already keeps, searches and exports a lifetime of mail. Next:
 
 - **Every folder at once:** IMAP NOTIFY, so mail filed by server-side rules
   into any folder arrives as quickly as INBOX mail.
-- **Damage noted on each copy:** truncated or inconsistent copies marked as
-  such, and linked to a complete copy where one exists.
 - **Rules that can be replayed:** classification as rules over the whole
   history, not one-time moves, with every result naming the rule that made it.
 - **New mailboxes from old mail:** reconstructed folders exported as Maildir or

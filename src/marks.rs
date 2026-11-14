@@ -108,7 +108,9 @@ fn lf(b: &[u8]) -> Vec<u8> {
 /// Mark `prefix-of` on the shorter of copy `artifact_id` and each other mail
 /// copy with the same valid Message-ID and Date whose body identity differs,
 /// when one body (line endings read alike, nothing else) is a strict, non-empty
-/// prefix of the other: likely a truncated copy of the longer one. Copies
+/// prefix of the other. The detail says how the shorter ends: mid-line (a sign
+/// of truncation), at a line the longer continues past (e.g. a mailing list's
+/// footer added to one delivery), or short only of newlines. Copies
 /// already in one message (joined by identity or a fold) are not compared.
 /// Caller owns the transaction.
 pub async fn prefix_candidates(store: &Store, artifact_id: i64) -> Result<u64> {
@@ -171,13 +173,22 @@ pub async fn prefix_candidates(store: &Store, artifact_id: i64) -> Result<u64> {
             (&theirs, &mine)
         };
         if !s.is_empty() && s.len() < l.len() && l.starts_with(s) {
+            let rest = &l[s.len()..];
+            let how = if rest.iter().all(|&c| c == b'\n') {
+                format!("the longer has only {} more newline(s)", rest.len())
+            } else if s.ends_with(b"\n") {
+                let lines = rest.iter().filter(|&&c| c == b'\n').count().max(1);
+                format!("the longer continues with {lines} more line(s)")
+            } else {
+                "this body stops mid-line".to_string()
+            };
             record(
                 store,
                 short,
                 &[Mark {
                     name: "prefix-of",
                     detail: format!(
-                        "copy {long}: this body is its first {short_len} of {long_len} bytes (line endings read alike)"
+                        "copy {long}: this body is its first {short_len} of {long_len} bytes (line endings read alike); {how}"
                     ),
                 }],
             )
@@ -248,10 +259,22 @@ pub async fn backfill(store: &Store) -> Result<Option<(u64, u64)>> {
         candidates.push(r.get::<i64>(0)?);
     }
     drop(rows);
-    let mut prefixes = 0;
+
     for id in candidates {
-        prefixes += prefix_candidates(store, id).await?;
+        prefix_candidates(store, id).await?;
     }
+    // Each pair is compared from both sides; count the marks, not the comparisons.
+    let mut rows = c
+        .query(
+            "SELECT count(*) FROM copy_mark WHERE mark = 'prefix-of'",
+            (),
+        )
+        .await?;
+    let prefixes = match rows.next().await? {
+        Some(r) => r.get::<i64>(0)? as u64,
+        None => 0,
+    };
+    drop(rows);
     c.execute(
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('marks_version', ?1)",
         (VERSION.to_string(),),
