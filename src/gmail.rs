@@ -327,6 +327,17 @@ pub async fn sync(store: &Store, address: &str, jobs: usize, takeouts: &[i64]) -
         })
         .collect();
     let total = work.len();
+    // Nothing touched since the checkpoint: advance it, and record no run.
+    if !stats.full && resumed.is_none() && work.is_empty() {
+        store
+            .conn
+            .execute(
+                "UPDATE gmail_state SET history_id = ?2, synced_at = ?3 WHERE origin_id = ?1",
+                (origin_id, covered.as_str(), now()),
+            )
+            .await?;
+        return Ok(stats);
+    }
 
     let run_id = match resumed {
         Some((run, _)) => {

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, fmt};
@@ -24,6 +24,7 @@ use munchymail::message::{TextSource, sanitize};
 use munchymail::query::{Filter, sieve_to_like};
 use munchymail::report::{self, Key};
 use munchymail::store::{Store, now};
+use munchymail::sync;
 use munchymail::takeout::{self, Linker};
 use munchymail::text::{self, TextQuery};
 use munchymail::util::{hex, iso, ymd, ymd_hm};
@@ -62,9 +63,12 @@ fn effect(command: &str) -> Option<(&'static str, &'static str)> {
             "write",
             "data/ (mail, Gmail's labels and history); only reads Gmail",
         ),
-        "origin add" | "origin role" | "origin rename" | "origin retire" | "origin move" => {
-            ("write", "the origin table in data/")
-        }
+        "origin add" | "origin role" | "origin rename" | "origin retire" | "origin move"
+        | "origin resume" => ("write", "the origin table in data/"),
+        "sync" => (
+            "sync",
+            "data/: new mail from live origins, as the service's timer fetches it; sources are only read",
+        ),
         "import" => (
             "write",
             "data/; reads the origins' mail under a shared lock, never writes it",
@@ -157,8 +161,8 @@ impl Program {
                 ),
                 (
                     "About the archive",
-                    "Counts, and every command described for scripts and agents.",
-                    &["overview", "accounts", "stats", "describe"],
+                    "How fresh it is, counts, and every command described for scripts and agents.",
+                    &["overview", "sync", "accounts", "stats", "describe"],
                 ),
             ],
             Program::Admin => &[
@@ -700,6 +704,16 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Fetch new mail from every live origin now.
+    ///
+    /// What the service does on its own every few minutes, done at once and
+    /// waited for, e.g. before starting work. Only adds mail; sources are
+    /// only read. Without --account, every account.
+    Sync {
+        /// JSON Lines: one `origin` record each, with what arrived or what went wrong.
+        #[arg(long)]
+        json: bool,
+    },
     /// Run a read-only SQL query.
     ///
     /// Prints rows tab-separated.
@@ -923,6 +937,11 @@ enum OriginCmd {
     ///
     /// After the files were moved; history is kept.
     Move { label: String, root: PathBuf },
+    /// Let the service check an origin it stopped checking.
+    ///
+    /// It stops when an origin needs someone, e.g. a revoked Google sign-in;
+    /// fix that first. `munchymail overview` says why.
+    Resume { label: String },
     /// List origins and when each was last imported.
     List,
 }
@@ -1203,9 +1222,12 @@ async fn overview(root: &Path, stores: &Stores, json: bool, out: &mut impl Write
         let origins = query_rows(
             &store,
             "SELECT g.label, g.root,
-                    (SELECT max(finished_at) FROM import_run r WHERE r.origin_id = g.origin_id),
-                    g.retired_at, g.role
-             FROM origin g ORDER BY g.retired_at IS NOT NULL, g.label",
+                    max(coalesce((SELECT max(finished_at) FROM import_run r
+                                  WHERE r.origin_id = g.origin_id), 0),
+                        coalesce(s.checked_at, 0)),
+                    g.retired_at, g.role, s.stopped_at, s.problem, s.retry_at, s.failures
+             FROM origin g LEFT JOIN sync_state s ON s.origin_id = g.origin_id
+             ORDER BY g.retired_at IS NOT NULL, g.label",
             vec![],
         )
         .await?;
@@ -1216,9 +1238,12 @@ async fn overview(root: &Path, stores: &Stores, json: bool, out: &mut impl Write
                     serde_json::json!({
                         "label": text(&r[0]),
                         "gmail": text(&r[1]).starts_with("gmail:"),
-                        "last_import": int(&r[2]).map(iso),
+                        "last_import": int(&r[2]).filter(|&t| t > 0).map(iso),
                         "retired": int(&r[3]).map(iso),
                         "role": (!text(&r[4]).is_empty()).then(|| text(&r[4])),
+                        "stopped": int(&r[5]).map(iso),
+                        "problem": (!text(&r[6]).is_empty()).then(|| text(&r[6])),
+                        "retry_at": int(&r[7]).map(iso),
                     })
                 })
                 .collect();
@@ -1246,7 +1271,7 @@ async fn overview(root: &Path, stores: &Stores, json: bool, out: &mut impl Write
             } else {
                 "imported"
             };
-            let when = match int(&r[2]) {
+            let when = match int(&r[2]).filter(|&t| t > 0) {
                 Some(t) => format!("{verb} {} UTC ({})", ymd_hm(t), ago(t)),
                 None => format!("never {verb}"),
             };
@@ -1255,7 +1280,25 @@ async fn overview(root: &Path, stores: &Stores, json: bool, out: &mut impl Write
                 r if r.is_empty() => "no role".to_string(),
                 r => r,
             };
-            writeln!(out, "  {label:<width$}  {role:<8}  {when}{retired}")?;
+            let trouble = match (int(&r[5]), int(&r[7])) {
+                (Some(_), _) => format!(
+                    "\n  {:width$}  stopped: {}; then `mmadm origin resume {label}`",
+                    "",
+                    text(&r[6])
+                ),
+                (None, Some(t)) => format!(
+                    "\n  {:width$}  failing ({} tries), next try {}: {}",
+                    "",
+                    int(&r[8]).unwrap_or(0),
+                    ymd_hm(t),
+                    text(&r[6])
+                ),
+                _ => String::new(),
+            };
+            writeln!(
+                out,
+                "  {label:<width$}  {role:<8}  {when}{retired}{trouble}"
+            )?;
         }
         writeln!(out)?;
     }
@@ -1526,6 +1569,15 @@ async fn origin(store: &Store, cmd: OriginCmd, out: &mut impl Write) -> Result<(
                     Config::origin_header(address, &new),
                 )?;
             }
+        }
+        OriginCmd::Resume { label } => {
+            store.begin().await?;
+            let found = munchymail::sync::resume(store, &label).await?;
+            store.commit().await?;
+            if !found {
+                bail!("no origin labelled {label:?}; `mmadm origin list` lists them");
+            }
+            writeln!(out, "origin {label} will be checked again")?;
         }
         OriginCmd::Retire { label, undo } => {
             store.begin().await?;
@@ -3056,15 +3108,64 @@ fn serve_cmd(data: &Path) -> Result<()> {
     munchymail::util::private_dir(data)?;
     let root = data.canonicalize()?;
     let listener = serve::bind(&socket)?;
-    let stores = Stores::Served(Mutex::default());
+    let stores = Arc::new(Stores::Served(Mutex::default()));
     for a in account::list(&root)? {
         pollster::block_on(stores.open(&root.join(&a)))?;
         info!(account = a.as_str(), "opened");
     }
-    let writes = Mutex::new(());
+    let writes = Arc::new(Mutex::new(()));
+    {
+        let (root, stores, writes) = (root.clone(), stores.clone(), writes.clone());
+        std::thread::spawn(move || keep_current(&root, &stores, &writes));
+    }
     serve::serve(listener, root.clone(), move |req, reply| {
         handle(&root, &stores, &writes, req, reply)
     })
+}
+
+/// The service's timer: check each live Gmail origin when it is due. A
+/// failure nothing can fix without someone ends the service with status 78.
+fn keep_current(root: &Path, stores: &Stores, writes: &Mutex<()>) {
+    loop {
+        std::thread::sleep(Duration::from_secs(30));
+        let Err(e) = keep_current_once(root, stores, writes) else {
+            continue;
+        };
+        if sync::classify(&e) == sync::Failure::Systemic {
+            error!("{e:#}; stopping until someone looks (exit 78)");
+            std::process::exit(78);
+        }
+        warn!("keeping mail current: {e:#}");
+    }
+}
+
+fn keep_current_once(root: &Path, stores: &Stores, writes: &Mutex<()>) -> Result<()> {
+    for a in account::list(root)? {
+        let store = pollster::block_on(stores.open(&root.join(&a)))?;
+        let t = now();
+        for live in pollster::block_on(sync::live(&store))? {
+            // mbox trees are imported on request until they are watched.
+            if !live.gmail || !live.due(t) {
+                continue;
+            }
+            let _turn = writes.lock().unwrap_or_else(PoisonError::into_inner);
+            let origin = live.label.as_str();
+            match pollster::block_on(sync_origin(&store, &live)) {
+                Ok(0) => {}
+                Ok(n) => info!(account = a.as_str(), origin, new = n, "fetched new mail"),
+                Err((e, sync::Failure::Systemic)) => return Err(e),
+                Err((e, sync::Failure::Origin)) => error!(
+                    account = a.as_str(),
+                    origin,
+                    "stopped checking it: {e:#}; fix that, then `mmadm origin resume {origin}`"
+                ),
+                Err((e, sync::Failure::Transient)) => {
+                    warn!(account = a.as_str(), origin, "will retry: {e:#}")
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn run(mut cli: Cli, stores: &Stores, out: &mut impl Write) -> Result<()> {
@@ -3077,6 +3178,7 @@ async fn run(mut cli: Cli, stores: &Stores, out: &mut impl Write) -> Result<()> 
             | Cmd::Account(_)
             | Cmd::Accounts { .. }
             | Cmd::Overview { .. }
+            | Cmd::Sync { .. }
     );
     if per_account && cli.account.is_none() && account::list(&cli.data)?.len() > 1 {
         if let Cmd::Search {
@@ -3140,6 +3242,10 @@ async fn run(mut cli: Cli, stores: &Stores, out: &mut impl Write) -> Result<()> 
         overview(&cli.data, stores, json, out).await?;
         return Ok(out.flush()?);
     }
+    if let Cmd::Sync { json } = cli.cmd {
+        sync_now(&cli.data, stores, cli.account.as_deref(), json, out).await?;
+        return Ok(out.flush()?);
+    }
     if let Cmd::Ocr { limit, jobs } = cli.cmd {
         let t = Instant::now();
         let cpus = std::thread::available_parallelism().map_or(2, |n| n.get());
@@ -3177,6 +3283,177 @@ async fn run(mut cli: Cli, stores: &Stores, out: &mut impl Write) -> Result<()> 
     r.and(settled)
 }
 
+/// Import `labels`, or every unretired mbox origin; the new copies per origin.
+async fn import(store: &Store, mut labels: Vec<String>) -> Result<Vec<(String, u64)>> {
+    let mut added = Vec::new();
+    if labels.is_empty() {
+        for r in query_rows(
+            store,
+            "SELECT label FROM origin WHERE retired_at IS NULL AND root NOT LIKE 'gmail:%'
+                 ORDER BY origin_id",
+            vec![],
+        )
+        .await?
+        {
+            labels.push(text(&r[0]));
+        }
+    }
+    let config = Config::load()?;
+    let variants = labels
+        .iter()
+        .map(|l| config.mbox(account_address(store), l))
+        .collect::<Result<Vec<_>>>()?;
+    for (label, variant) in labels.into_iter().zip(variants) {
+        let t = Instant::now();
+        let mut imp = Importer::new(store, &label, variant).await?;
+        if config.is_takeout(account_address(store), &label)? {
+            imp.takeout_of = takeout::gmail_origin(store, account_address(store)).await?;
+        }
+        imp.run().await?;
+        let s = &imp.stats;
+        info!(
+            origin = label.as_str(),
+            takeout_linked = s.takeout.total(),
+            takeout_unmatched = s.takeout.unmatched.len(),
+            files = s.files,
+            unchanged = s.known_files,
+            not_mbox = s.skipped,
+            messages = s.messages,
+            new_artifacts = s.new_artifacts,
+            bytes = s.bytes,
+            elapsed = ?t.elapsed(),
+            "import finished"
+        );
+        added.push((label.clone(), s.new_artifacts));
+        let t = Instant::now();
+        changes::record_since_previous(store, imp.origin_id, imp.run_id).await?;
+        info!(elapsed = ?t.elapsed(), "removals recorded");
+    }
+    index(store).await?;
+    let t = Instant::now();
+    store.checkpoint().await?;
+    info!(elapsed = ?t.elapsed(), "wal checkpoint");
+    Ok(added)
+}
+
+/// Check one live origin and record how it went: the new copies, or the
+/// error and what it means.
+async fn sync_origin(
+    store: &Store,
+    live: &sync::Live,
+) -> Result<u64, (anyhow::Error, sync::Failure)> {
+    let r = if live.gmail {
+        gmail_sync(store, 4).await.map(|s| s.new_artifacts)
+    } else {
+        import(store, vec![live.label.clone()])
+            .await
+            .map(|added| added.iter().map(|a| a.1).sum())
+    };
+    let settled = store.settle().await;
+    let fail = |e: anyhow::Error| {
+        let kind = sync::classify(&e);
+        (e, kind)
+    };
+    match r.and_then(|n| settled.map(|()| n)) {
+        Ok(n) => sync::checked(store, live.origin_id)
+            .await
+            .map(|()| n)
+            .map_err(fail),
+        Err(e) => match sync::failed(store, live.origin_id, &e).await {
+            Ok(kind) => Err((e, kind)),
+            Err(recording) => Err(fail(recording)),
+        },
+    }
+}
+
+/// `sync`: check every live origin of `only`, or of every account, now.
+async fn sync_now(
+    root: &Path,
+    stores: &Stores,
+    only: Option<&str>,
+    json: bool,
+    out: &mut impl Write,
+) -> Result<()> {
+    let dirs = match only {
+        Some(a) => vec![account::resolve(root, Some(a))?],
+        None => account::list(root)?.iter().map(|a| root.join(a)).collect(),
+    };
+    let mut failed = 0;
+    for dir in dirs {
+        let store = stores.open(&dir).await?;
+        let address = account_address(&store).to_string();
+        let lives = sync::live(&store).await?;
+        if lives.is_empty() && !json {
+            writeln!(
+                out,
+                "{address}: no live origins (`mmadm origin role LABEL live`)"
+            )?;
+        }
+        for live in &lives {
+            let (new, problem) = match &live.stopped {
+                Some(p) => (
+                    None,
+                    Some(format!(
+                        "stopped: {p}; fix it, then `mmadm origin resume {}`",
+                        live.label
+                    )),
+                ),
+                None => match sync_origin(&store, live).await {
+                    Ok(n) => (Some(n), None),
+                    Err((e, _)) => (None, Some(format!("{e:#}"))),
+                },
+            };
+            failed += problem.is_some() as usize;
+            if json {
+                let v = serde_json::json!({
+                    "type": "origin",
+                    "account": address,
+                    "origin": live.label,
+                    "new": new,
+                    "error": problem,
+                });
+                writeln!(out, "{v}")?;
+            } else {
+                match (new, problem) {
+                    (Some(n), _) => writeln!(out, "{address} {}: {n} new", live.label)?,
+                    (None, Some(p)) => writeln!(out, "{address} {}: {p}", live.label)?,
+                    (None, None) => {}
+                }
+            }
+        }
+    }
+    if failed > 0 {
+        bail!("{failed} origin(s) not synced");
+    }
+    Ok(())
+}
+
+/// Bring the account's Gmail origin up to date, then index what arrived.
+async fn gmail_sync(store: &Store, jobs: usize) -> Result<munchymail::gmail::Stats> {
+    let t = Instant::now();
+    let address = account_address(store).to_string();
+    let takeouts = takeout::origin_ids(store, &Config::load()?.takeouts(&address)?).await?;
+    let s = munchymail::gmail::sync(store, &address, jobs.max(1), &takeouts).await?;
+    let changed = s.fetched + s.relabelled + s.gone > 0;
+    if changed || s.full {
+        info!(
+            full = s.full,
+            fetched = s.fetched,
+            new_artifacts = s.new_artifacts,
+            relabelled = s.relabelled,
+            gone = s.gone,
+            takeout_linked = s.takeout.total(),
+            elapsed = ?t.elapsed(),
+            "gmail sync finished"
+        );
+        index(store).await?;
+        store.checkpoint().await?;
+    } else {
+        debug!(elapsed = ?t.elapsed(), "gmail sync: nothing new");
+    }
+    Ok(s)
+}
+
 async fn with_store(cmd: Cmd, store: &Store, out: &mut impl Write) -> Result<()> {
     let read_txn = matches!(
         cmd,
@@ -3201,70 +3478,10 @@ async fn with_store(cmd: Cmd, store: &Store, out: &mut impl Write) -> Result<()>
         Cmd::Origin(cmd) => origin(store, cmd, out).await?,
         Cmd::Alias(cmd) => alias(store, cmd, out).await?,
         Cmd::Gmail(GmailCmd::Sync { jobs }) => {
-            let t = Instant::now();
-            let address = account_address(store).to_string();
-            let takeouts = takeout::origin_ids(store, &Config::load()?.takeouts(&address)?).await?;
-            let s = munchymail::gmail::sync(store, &address, jobs.max(1), &takeouts).await?;
-            info!(
-                full = s.full,
-                fetched = s.fetched,
-                new_artifacts = s.new_artifacts,
-                relabelled = s.relabelled,
-                gone = s.gone,
-                takeout_linked = s.takeout.total(),
-                elapsed = ?t.elapsed(),
-                "gmail sync finished"
-            );
-            index(store).await?;
-            store.checkpoint().await?;
+            gmail_sync(store, jobs).await?;
         }
-        Cmd::Import { mut labels } => {
-            if labels.is_empty() {
-                for r in query_rows(
-                    store,
-                    "SELECT label FROM origin WHERE retired_at IS NULL AND root NOT LIKE 'gmail:%'
-                     ORDER BY origin_id",
-                    vec![],
-                )
-                .await?
-                {
-                    labels.push(text(&r[0]));
-                }
-            }
-            let config = Config::load()?;
-            let variants = labels
-                .iter()
-                .map(|l| config.mbox(account_address(store), l))
-                .collect::<Result<Vec<_>>>()?;
-            for (label, variant) in labels.into_iter().zip(variants) {
-                let t = Instant::now();
-                let mut imp = Importer::new(store, &label, variant).await?;
-                if config.is_takeout(account_address(store), &label)? {
-                    imp.takeout_of = takeout::gmail_origin(store, account_address(store)).await?;
-                }
-                imp.run().await?;
-                let s = &imp.stats;
-                info!(
-                    origin = label.as_str(),
-                    takeout_linked = s.takeout.total(),
-                    takeout_unmatched = s.takeout.unmatched.len(),
-                    files = s.files,
-                    unchanged = s.known_files,
-                    not_mbox = s.skipped,
-                    messages = s.messages,
-                    new_artifacts = s.new_artifacts,
-                    bytes = s.bytes,
-                    elapsed = ?t.elapsed(),
-                    "import finished"
-                );
-                let t = Instant::now();
-                changes::record_since_previous(store, imp.origin_id, imp.run_id).await?;
-                info!(elapsed = ?t.elapsed(), "removals recorded");
-            }
-            index(store).await?;
-            let t = Instant::now();
-            store.checkpoint().await?;
-            info!(elapsed = ?t.elapsed(), "wal checkpoint");
+        Cmd::Import { labels } => {
+            import(store, labels).await?;
         }
         Cmd::Index => {
             index(store).await?;
@@ -3481,6 +3698,7 @@ async fn with_store(cmd: Cmd, store: &Store, out: &mut impl Write) -> Result<()>
         | Cmd::Account(_)
         | Cmd::Accounts { .. }
         | Cmd::Overview { .. }
+        | Cmd::Sync { .. }
         | Cmd::Gmail(GmailCmd::Auth { .. } | GmailCmd::Status) => {
             unreachable!()
         }

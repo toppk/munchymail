@@ -21,6 +21,7 @@ pub mod serve;
 pub mod sort;
 pub mod source;
 pub mod store;
+pub mod sync;
 pub mod takeout;
 pub mod text;
 pub mod util;

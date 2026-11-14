@@ -1,9 +1,8 @@
-# Keeping mail current (planned)
+# Keeping mail current
 
-Not built yet. Today mail arrives only when someone runs `mmadm import` or
-`mmadm gmail sync`, so `munchymail overview` can be hours or days behind.
-This is the agreed design for the service (`mmadm serve`) to do that work
-itself.
+The service (`mmadm serve`) keeps live origins current itself. Built: Gmail
+every 3 minutes, `munchymail sync`, failure handling. Not yet: watching mbox
+trees; until then they are imported by `sync` or `mmadm import`.
 
 ## Which origins are synced
 
@@ -21,28 +20,34 @@ live and leaves the rest unset.
 
 ## Gmail
 
-- Poll `history.list` every 2–5 minutes; it is cheap when nothing changed,
-  and needs only the read-only scope (Gmail IMAP IDLE would need full
-  access).
-- `munchymail sync` asks the service to poll now, e.g. before an agent
-  starts work; it waits for the run and reports what arrived.
+- The service polls `history.list` every 3 minutes, which needs only the
+  read-only scope (Gmail IMAP IDLE would need full access). When nothing
+  changed it only moves its checkpoint and records no import run.
+- `munchymail sync` checks every live origin at once and waits, e.g. before
+  an agent starts work, and reports what arrived. Its effect is `sync`:
+  agents may run it.
 
-## mbox trees
+## mbox trees (not built)
 
-- inotify on each live origin's files. A change starts a scan once the
-  files have been quiet for 15 seconds, or 2 minutes after the first change
-  at the latest, so a burst of ten new messages is one scan.
-- These scans read only the changed files and never close a presence
-  interval: a message counts as gone only after a complete scan.
-- A full scan of every live origin runs nightly, and is what closes
-  intervals.
+A rescan re-reads every file under Dovecot's shared lock. Measured on a
+5 GB tree: 13 s with nothing new, and the lock on a multi-gigabyte INBOX held
+for 8–9 s, during which Dovecot can't deliver to it. Too slow to run on
+every change, so live mbox origins aren't on the timer. Two ways forward:
+
+- **Tail reads:** inotify with a 15 s settle (2 minutes at most); a file
+  that only grew is read from where it ended, under a short lock; unchanged
+  files aren't opened. These partial scans never record removals; a nightly
+  full scan catches Dovecot's in-place header rewrites and does.
+- **IMAP as the live source**, as the Gmail API is for Gmail: NOTIFY or IDLE
+  says when mail arrives, and only new messages are fetched. The mbox tree
+  then becomes a periodic snapshot, as a Takeout is for Gmail.
 
 ## Failures
 
 | Kind | Example | What the service does |
 |---|---|---|
 | transient | network down, Google 5xx, quota | retries with backoff, up to an hour apart |
-| one origin | token revoked, mailbox path gone | stops syncing that origin and says so in `overview`; `mmadm sync resume LABEL` restarts it |
+| one origin | token revoked, mailbox path gone | stops syncing that origin and says so in `overview`; `mmadm origin resume LABEL` restarts it |
 | systemic | database corrupt or unwritable, disk full | exits with status 78 and stays down |
 
 The unit must then not restart it forever:
@@ -56,8 +61,8 @@ StartLimitBurst=5
 RestartPreventExitStatus=78
 ```
 
-## Unit changes this needs
+## Unit changes
 
-- Only the limits above. Gmail's refreshed access tokens stay in memory, so
+- Only the limits above, in `contrib/munchymail.service`. Gmail's refreshed access tokens stay in memory, so
   the sign-in in `~/.config/munchymail/creds` is only read, and the live
   mbox trees are already readable (`ProtectHome=read-only`).

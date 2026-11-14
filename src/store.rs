@@ -260,6 +260,18 @@ CREATE TABLE IF NOT EXISTS removal (
     PRIMARY KEY (artifact_id, path, last_seen_run, gone_run)
 );
 CREATE INDEX IF NOT EXISTS removal_gone ON removal (gone_run);
+
+-- the service's keeping of each live origin current (sync.rs)
+CREATE TABLE IF NOT EXISTS sync_state (
+    origin_id INTEGER PRIMARY KEY,
+    checked_at INTEGER,
+    tried_at INTEGER,
+    failures INTEGER NOT NULL DEFAULT 0,
+    retry_at INTEGER,
+    -- set when the origin needs someone: `mmadm sync resume` clears it
+    stopped_at INTEGER,
+    problem TEXT
+);
 ";
 
 /// Whether `stmt` is `ALTER TABLE t ADD COLUMN c` for a column `t` already

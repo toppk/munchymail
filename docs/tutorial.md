@@ -21,6 +21,7 @@ changes something (`write`).
 
 ```
 munchymail overview     # each account's size, and when its mail was last imported or synced
+munchymail sync         # fetch new mail from live origins now, and wait for it
 munchymail accounts     # the accounts and the addresses each sends from
 ```
 ```
@@ -265,3 +266,10 @@ With `mmadm serve` running (normally as a systemd user unit), every
 command of either program goes to it. Reads then run alongside a long import or OCR run
 instead of waiting for it. Nothing changes in how commands are typed.
 Without the service, each command opens the database itself.
+
+The service also keeps live origins current: it checks Gmail every few
+minutes (watching mbox trees is still to come). When an origin needs someone,
+such as a revoked Google sign-in, it stops checking that origin and
+`munchymail overview` says why; fix it, then `mmadm origin resume LABEL`. A
+failure nothing can fix without someone, such as a full disk, stops the
+service with exit status 78, and the unit leaves it stopped.

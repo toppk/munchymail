@@ -1,6 +1,9 @@
 # ~/.config/systemd/user/munchymail.service; `just install` fills in its install prefix.
 [Unit]
 Description=munchymail mail archive (CLI requests over a Unix socket)
+# Status 78 means a failure no restart fixes (corrupt database, full disk): stay down.
+StartLimitIntervalSec=10min
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -10,6 +13,7 @@ RuntimeDirectoryMode=0700
 Environment=MUNCHYMAIL_LOG=munchymail=info,warn
 Restart=on-failure
 RestartSec=5
+RestartPreventExitStatus=78
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
