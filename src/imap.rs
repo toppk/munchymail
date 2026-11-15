@@ -166,6 +166,18 @@ fn password(command: &[String]) -> Result<SecretString> {
 
 /// Log in, and ENABLE QRESYNC when the server has it.
 fn connect(s: &Settings) -> Result<(ImapClientStd, Vec<Capability<'static>>)> {
+    let (mut client, caps) = login(s)?;
+    if caps.contains(&Capability::QResync) {
+        client
+            .enable(Vec1::from(
+                imap_codec::imap_types::extensions::enable::CapabilityEnable::try_from("QRESYNC")?,
+            ))
+            .context("ENABLE QRESYNC")?;
+    }
+    Ok((client, caps))
+}
+
+fn login(s: &Settings) -> Result<(ImapClientStd, Vec<Capability<'static>>)> {
     let opts = ImapClientStdConnectOptions {
         tls: Tls {
             server: s.server_cert.clone().map(|cert| TlsServer { cert }),
@@ -180,21 +192,14 @@ fn connect(s: &Settings) -> Result<(ImapClientStd, Vec<Capability<'static>>)> {
         })),
         ..ImapClientStdConnectOptions::default()
     };
-    let (mut client, caps) = ImapClientStd::connect(&s.url, opts)
-        .with_context(|| format!("logging in to {} as {}", s.url, s.user))?;
-    if caps.contains(&Capability::QResync) {
-        client
-            .enable(Vec1::from(
-                imap_codec::imap_types::extensions::enable::CapabilityEnable::try_from("QRESYNC")?,
-            ))
-            .context("ENABLE QRESYNC")?;
-    }
-    Ok((client, caps))
+    ImapClientStd::connect(&s.url, opts)
+        .with_context(|| format!("logging in to {} as {}", s.url, s.user))
 }
 
 /// Watch the INBOX with IDLE on a connection of its own; read-only (EXAMINE).
 pub fn watch_inbox(s: &Settings) -> Result<ImapMailboxWatchStream> {
-    let (client, caps) = connect(s)?;
+    // The watch sends its own ENABLE; a second one may leave QRESYNC out of ENABLED.
+    let (client, caps) = login(s)?;
     let opts = ImapMailboxWatchStreamOptions {
         shutdown_poll: Duration::from_secs(30),
         ..ImapMailboxWatchStreamOptions::default()
