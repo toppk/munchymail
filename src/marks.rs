@@ -12,7 +12,7 @@ use crate::store::{Store, now};
 
 /// The detectors' version; marks they set name it in `source`, and a new
 /// version replaces them (`meta` key `marks_version`).
-pub const VERSION: i64 = 1;
+pub const VERSION: i64 = 2;
 
 fn source() -> String {
     format!("munchymail marks v{VERSION}")
@@ -38,7 +38,8 @@ fn value(field: &[u8]) -> String {
 
 /// What one copy's own bytes show:
 /// - `content-length`: a `Content-Length` field (an mbox server's record of
-///   the body it saved) that disagrees with the body stored;
+///   the body it saved) that disagrees with the body stored, line endings
+///   read as stored and as LF;
 /// - `unclosed-boundary`: a multipart body whose outer boundary is never
 ///   closed (`--boundary--`): truncation, or a sender that built it wrongly.
 pub fn detect(header: &[u8], body: &[u8]) -> Vec<Mark> {
@@ -50,8 +51,10 @@ pub fn detect(header: &[u8], body: &[u8]) -> Vec<Mark> {
             .map(|f| value(f))
     };
     let mut out = Vec::new();
+    // A copy served with CRLF line endings keeps the field its LF mbox wrote.
     if let Some(n) = first("content-length").and_then(|v| v.trim().parse::<usize>().ok())
         && n != body.len()
+        && n != lf(body).len()
     {
         let way = if body.len() < n { "shorter" } else { "longer" };
         out.push(Mark {
@@ -298,6 +301,7 @@ mod tests {
                 .collect()
         };
         assert!(names("Content-Length: 5\n\n", "hello").is_empty());
+        assert!(names("Content-Length: 6\r\n\r\n", "a\r\nb\r\nc\r\n").is_empty());
         let m = detect(b"Content-Length: 9\n\n", b"hello");
         assert_eq!(m[0].name, "content-length");
         assert!(m[0].detail.contains("shorter"));

@@ -613,18 +613,21 @@ Each copy is checked as it is stored: a `Content-Length` its body doesn't
 match (`content-length`), a multipart body never closed
 (`unclosed-boundary`), or a body that is the start of another copy of the
 same message (`prefix-of`, saying whether it stops mid-line). `read` lists
-them; `search --mark NAME` (or `--mark '*'`) finds them.
+them; `search --mark NAME` (or `--mark '*'`) finds them, and
+`--mark NAME:PATTERN` matches the detail too, e.g. `--mark prefix-of:mid-line`.
 
 ### verify-files: rebuild an origin's mbox files
 
 ```
-mmadm verify-files ORIGIN
+mmadm verify-files ORIGIN [--path PATTERN] [--out DIR]
 ```
 
 Rebuilds every mbox file the origin was read from, using only the stored
 copies, their `From ` lines and separators (re-quoted for mboxrd), and
 checks each against the SHA-256 recorded at import. The source files are
-not read.
+not read. `--path` picks files (e.g. `INBOX`); `--out` also writes the
+rebuilt files into a directory, for trying something on a copy of a
+mailbox without touching the mailbox.
 
 ```
 $ munchymail removals --folder Sent -n 1

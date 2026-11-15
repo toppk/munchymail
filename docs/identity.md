@@ -224,7 +224,7 @@ is mail, which message it is in, or which copy is shown:
 
 | Mark | Set when | Detail |
 |---|---|---|
-| `content-length` | the copy has a `Content-Length` field and the body isn't that long | both numbers, and whether the body is shorter or longer |
+| `content-length` | the copy has a `Content-Length` field and the body isn't that long, line endings read as stored or as LF (a copy served with CRLF keeps the field its mbox wrote) | both numbers, and whether the body is shorter or longer |
 | `unclosed-boundary` | a `multipart/*` body never has `--<boundary>--` | the boundary |
 | `prefix-of` | another mail copy with the same valid Message-ID and Date, in another message, has a body that this one's is a strict prefix of (line endings read alike) | the longer copy, both lengths, and how this one ends: mid-line (a sign of truncation), at a line the longer continues past (often a mailing list's footer on one delivery), or short only of newlines |
 

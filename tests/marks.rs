@@ -76,6 +76,8 @@ fn copies_are_marked_and_files_rebuild() {
         assert_eq!(marked(&store, "unclosed-boundary").await, [2]);
         assert_eq!(marked(&store, "prefix-of").await, [4]);
         assert_eq!(marked(&store, "*").await, [1, 2, 4]);
+        assert_eq!(marked(&store, "prefix-of:mid-line").await, [4]);
+        assert!(marked(&store, "prefix-of:*more line*").await.is_empty());
         let m = api::read(&store, Ref::Copy(4)).await.unwrap();
         assert_eq!(m.marks.len(), 1);
         assert!(
@@ -103,7 +105,9 @@ fn copies_are_marked_and_files_rebuild() {
 
         // Both files rebuild byte for byte, mboxrd quoting included.
         for label in ["a", "b"] {
-            let r = munchymail::verify::origin(&store, label).await.unwrap();
+            let r = munchymail::verify::origin(&store, label, None, None)
+                .await
+                .unwrap();
             assert_eq!(
                 (r.files, r.failures.len()),
                 (1, 0),
@@ -111,6 +115,15 @@ fn copies_are_marked_and_files_rebuild() {
                 r.failures
             );
         }
+        // The rebuilt file can be written out, and is the file read.
+        let out = dir.join("rebuilt");
+        munchymail::verify::origin(&store, "b", Some("INBOX"), Some(&out))
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read(out.join("INBOX")).unwrap(),
+            fs::read(b.join("INBOX")).unwrap()
+        );
         // A framing change is caught.
         store
             .conn
@@ -120,7 +133,9 @@ fn copies_are_marked_and_files_rebuild() {
             )
             .await
             .unwrap();
-        let r = munchymail::verify::origin(&store, "a").await.unwrap();
+        let r = munchymail::verify::origin(&store, "a", None, None)
+            .await
+            .unwrap();
         assert_eq!(r.failures.len(), 1);
     });
     fs::remove_dir_all(&dir).unwrap();

@@ -286,9 +286,13 @@ impl Filter {
             sets.push(Set::Messages(t.messages()?));
         }
         for m in &self.marks {
+            // NAME:PATTERN also matches the mark's detail.
+            let (name, detail) = m.split_once(':').unwrap_or((m, "*"));
             sets.push(Set::Sql(
-                "SELECT artifact_id FROM copy_mark WHERE mark LIKE ? ESCAPE '\\'".into(),
-                vec![sieve_to_like(m).into()],
+                "SELECT artifact_id FROM copy_mark
+                 WHERE mark LIKE ?1 ESCAPE '\\' AND detail LIKE ?2 ESCAPE '\\'"
+                    .into(),
+                vec![sieve_to_like(name).into(), sieve_to_like(detail).into()],
             ));
         }
         if self.folder.is_some() || self.origin.is_some() || self.current {

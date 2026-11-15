@@ -2,6 +2,10 @@
 //! against the file's recorded SHA-256: the stored copies, re-quoted as the
 //! file's format quoted them, between their `From ` lines and separators.
 
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
+
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
@@ -23,8 +27,15 @@ pub struct Report {
     pub failures: Vec<Failure>,
 }
 
-/// Rebuild every mbox file content seen in origin `label`.
-pub async fn origin(store: &Store, label: &str) -> Result<Report> {
+/// Rebuild every mbox file content seen in origin `label` at a path matching
+/// `paths` (Sieve `:matches`), writing each into `out` (as 0600, never over a
+/// file) if given.
+pub async fn origin(
+    store: &Store,
+    label: &str,
+    paths: Option<&str>,
+    out: Option<&Path>,
+) -> Result<Report> {
     let c = &store.conn;
     let mut rows = c
         .query("SELECT origin_id FROM origin WHERE label = ?1", (label,))
@@ -55,13 +66,20 @@ pub async fn origin(store: &Store, label: &str) -> Result<Report> {
         ));
     }
     drop(rows);
+    if let Some(p) = paths {
+        contents.retain(|c| crate::query::sieve_match(p, &c.5));
+    }
     if contents.is_empty() {
-        bail!("origin {label:?} has no recorded mbox files");
+        bail!("origin {label:?} has no recorded mbox files to rebuild");
     }
     let mut report = Report::default();
     for (content_id, hash, length, format, preamble, path) in contents {
         report.files += 1;
-        let why = match rebuild(store, content_id, &format, preamble).await? {
+        let mut file = match out {
+            Some(dir) => Some(create(dir, &path, content_id)?),
+            None => None,
+        };
+        let why = match rebuild(store, content_id, &format, preamble, file.as_mut()).await? {
             Err(why) => Some(why),
             Ok((len, _)) if len != length => {
                 Some(format!("rebuilt {len} bytes, the file had {length}"))
@@ -83,12 +101,31 @@ pub async fn origin(store: &Store, label: &str) -> Result<Report> {
     Ok(report)
 }
 
+/// A new 0600 file for `path` in `dir`, named for its content if `path` is taken.
+fn create(dir: &Path, path: &str, content_id: i64) -> Result<std::io::BufWriter<std::fs::File>> {
+    let mut target = dir.join(path);
+    if target.exists() {
+        target = dir.join(format!("{path}.content-{content_id}"));
+    }
+    if let Some(parent) = target.parent() {
+        crate::util::private_dir(parent)?;
+    }
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&target)
+        .with_context(|| format!("creating {}", target.display()))?;
+    Ok(std::io::BufWriter::new(f))
+}
+
 /// The rebuilt file's length and SHA-256, or why it can't be rebuilt.
 async fn rebuild(
     store: &Store,
     content_id: i64,
     format: &str,
     preamble: i64,
+    mut out: Option<&mut std::io::BufWriter<std::fs::File>>,
 ) -> Result<std::result::Result<(u64, [u8; 32]), String>> {
     let variant = Variant::parse(format).with_context(|| format!("unknown format {format}"))?;
     if preamble > 0 {
@@ -134,8 +171,14 @@ async fn rebuild(
             &separator[..],
         ] {
             h.update(piece);
+            if let Some(w) = out.as_mut() {
+                w.write_all(piece)?;
+            }
             len += piece.len() as u64;
         }
+    }
+    if let Some(w) = out {
+        w.flush()?;
     }
     Ok(Ok((len, h.finalize().into())))
 }

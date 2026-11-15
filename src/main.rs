@@ -80,7 +80,10 @@ fn effect(command: &str) -> Option<(&'static str, &'static str)> {
         ),
         "export" => ("write", "data/exports/NAME.tgz, or the -o path"),
         "record-removals" => ("write", "the removal table in data/"),
-        "verify-files" => ("read", "data/ only: stored copies and how they were framed"),
+        "verify-files" => (
+            "read",
+            "data/ only: stored copies and how they were framed; --out writes the rebuilt files there",
+        ),
         "sql" => ("read", "a read-only connection: writes are refused"),
         "diff" | "scan" => ("read", "the named files; no database"),
         "describe" => ("read", "nothing; no database"),
@@ -788,6 +791,12 @@ enum Cmd {
     VerifyFiles {
         /// Origin label, as in `origin list`.
         origin: String,
+        /// Only files at paths matching this Sieve :matches pattern, e.g. INBOX.
+        #[arg(long, value_name = "PATTERN")]
+        path: Option<String>,
+        /// Also write the rebuilt files into this directory (0600; existing files are never replaced).
+        #[arg(long, value_name = "DIR")]
+        out: Option<std::path::PathBuf>,
     },
     /// Messages that left a path, newest first.
     Removals {
@@ -1019,8 +1028,9 @@ struct FilterArgs {
     #[arg(long, value_name = "PATTERN")]
     subject: Option<String>,
     /// A copy munchymail noted something about, e.g. content-length,
-    /// unclosed-boundary, prefix-of, or '*' for any; repeatable (all must match).
-    #[arg(long, value_name = "MARK")]
+    /// unclosed-boundary, prefix-of, or '*' for any; MARK:PATTERN also matches
+    /// its detail, e.g. 'prefix-of:mid-line'; repeatable (all must match).
+    #[arg(long, value_name = "MARK[:PATTERN]")]
     mark: Vec<String>,
     /// Path within an origin where a copy was ever found, e.g. 'lists/*'.
     #[arg(long, value_name = "PATTERN")]
@@ -3969,8 +3979,13 @@ async fn with_store(cmd: Cmd, store: &Store, out: &mut impl Write) -> Result<()>
             moved,
             limit,
         } => removals(store, folder, moved, limit, out).await?,
-        Cmd::VerifyFiles { origin } => {
-            let r = munchymail::verify::origin(store, &origin).await?;
+        Cmd::VerifyFiles {
+            origin,
+            path,
+            out: dir,
+        } => {
+            let r =
+                munchymail::verify::origin(store, &origin, path.as_deref(), dir.as_deref()).await?;
             writeln!(
                 out,
                 "{origin}: {} of {} files rebuilt byte for byte ({} bytes)",

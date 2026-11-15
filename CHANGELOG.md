@@ -4,6 +4,21 @@ Every deployment is a new version: at least a new patch, and a new minor
 when the database schema changes. Upgrading to a new schema is one-way;
 keep a copy of the data directory to roll back (`docs/install.md`).
 
+## 0.3.1
+
+- `content-length` no longer marks a copy whose body matches the field
+  once its line endings are read as LF: copies served with CRLF (the Gmail
+  API, IMAP) keep the field their mbox wrote. On a real archive this
+  removed 56 false marks and kept the 16 real ones.
+- `search --mark NAME:PATTERN` matches a mark's detail too, e.g.
+  `--mark prefix-of:mid-line` for copies cut short.
+- `mmadm verify-files --path PATTERN --out DIR` rebuilds chosen files and
+  writes them out (0600, never over a file), so a change to a mailbox can
+  be tried on a copy rebuilt from the archive.
+
+Upgrading: no schema change. The first `index`, import or sync re-marks
+every copy under the new detector (about a minute for 460,000 copies).
+
 ## 0.3.0: damage noted, files proven
 
 munchymail now says what it notices about each copy, and can prove that
