@@ -144,6 +144,9 @@ Damage is noted, not hidden: a copy whose body is shorter than its server
 recorded, a multipart message cut off before its end, or a copy that is
 the start of a longer one is marked as such (`search --mark`), with what
 was measured, so the intact copy, if the archive has one, can be found.
+Once its owner has judged a copy damaged (`mmadm copy damaged`), it leaves
+search and the indexes but is still kept and readable, with the reason and
+the copy that repaired it.
 
 Because storage is deduplicated but history is not, a message seen in nine
 backups is stored once and remembered nine times. When copies differ only in

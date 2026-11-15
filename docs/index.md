@@ -26,7 +26,9 @@ otherwise); `data/` below means that directory. Command usage is in `README.md`.
 | `copy_mark` | What munchymail noticed about a copy (`marks.rs`): `mark` (`content-length`, `unclosed-boundary`, `prefix-of`), `detail` (what was measured), `source` (the detector version, e.g. `munchymail marks v1`; later a person), `set_at`. Never changes whether a copy is mail or which message it is in. Set at import and once per detector version (`meta` key `marks_version`). |
 | `imap_flags` | Each IMAP message's flags when first fetched and at every change, with `seen_at`. |
 | `gmail_labels` | Each Gmail message's label ids (`UNREAD`, `STARRED`, categories, user labels) when first fetched and at every change, with `seen_at`; messages stored before it start from their labels then (`meta` key `gmail_label_history`). |
-| (`artifact.kind`) | munchymail's classification of a copy that isn't mail; NULL for mail. `folder-data`: Dovecot's "FOLDER INTERNAL DATA" placeholder (subject plus `X-IMAP`/`X-IMAPbase`), set at import and once for older copies (`meta` key `copy_kinds`). The rule: such copies are kept byte for byte and readable by id (`read` says what they are), and left out of every listing, count, report and index (no `header`, `part` or text rows); `stats` reports them as "of which not mail". Observations about a copy (damage and the like) go in `copy_mark`: they don't change whether it is mail. |
+| (`artifact.kind`) | Why a copy isn't mail; NULL for mail. `folder-data`: munchymail's classification of Dovecot's "FOLDER INTERNAL DATA" placeholder (subject plus `X-IMAP`/`X-IMAPbase`), set at import and once for older copies (`meta` key `copy_kinds`); never changed by hand. `damaged`: the owner's judgement (`mmadm copy damaged`), recorded in `copy_kind_change`. The rule for both: such copies are kept byte for byte and readable by id (`read` says what they are), and left out of every listing, count, report and index (no `header`, `part` or text rows; a message's preferred copy is a mail copy while it has one); `stats` reports them as "of which not mail", per kind. Observations about a copy go in `copy_mark`: they don't change whether it is mail, and damaged copies keep theirs. |
+| `copy_kind_change` | Every change a person made to a copy's `kind`, newest last: `kind` (NULL when cleared), `reason`, `source` (`owner`), `set_at`. |
+| `copy_link` | How a person said one copy relates to another: `artifact_id` was `relation` `other_id` (`repaired-from`: built to replace it), with `note`, `source`, `set_at`. `read` shows it on both copies. |
 | `gmail_message` | Gmail's record of each message of the `gmail` origin: Gmail id, the artifact of its raw bytes, thread id, `internal_date` (receipt time), current label ids, and `gone_at` when Gmail deleted it (the artifact stays). |
 | `gmail_label` | Gmail's label ids and names per origin. |
 | `gmail_state` | The sync checkpoint: Gmail history id up to which every change is stored, and the run that stored it. |
@@ -34,13 +36,13 @@ otherwise); `data/` below means that directory. Command usage is in `README.md`.
 | `text_forget` | Messages removed because their copies joined another; `index` drops them from `data/text/`. |
 | `removal` | A copy last seen at `path` in `last_seen_run` and absent in `gone_run`; `moved_to` is where it turned up, NULL if nowhere new. Filled by `import` (per origin), by each Gmail or IMAP run (from the presence rows it closed), and `record-removals`. |
 
-`meta.schema_version` is 11. Opening an older database upgrades it in the
+`meta.schema_version` is 12. Opening an older database upgrades it in the
 opening transaction (`MIGRATIONS` in `store.rs`: 1 → 2 adds
 `origin.retired_at`; 2 → 3 adds `removal` and `file_sighting_run`, which
 `SCHEMA` creates; 3 → 4 adds `artifact.msg_id` and fills `message` from
 existing artifacts, about 2 s for 262k; `LATE_SCHEMA` then indexes it;
 4 → 5 adds `message.parts_version`/`parts_problem`, after which `import` or
-`index` fills `part`; 5 → 6 adds `message.text_version`; 8 → 9 renames the `mbox` file format to `dovecot`; 9 → 10 adds `origin.role` and makes Gmail origins live); a newer or unknown version refuses to open.
+`index` fills `part`; 5 → 6 adds `message.text_version`; 8 → 9 renames the `mbox` file format to `dovecot`; 9 → 10 adds `origin.role` and makes Gmail origins live; 10 → 11 adds `message.key`, `merged_into`, `split_from` and `artifact.kind`; 11 → 12 adds `copy_kind_change` and `copy_link`, which `SCHEMA` creates); a newer or unknown version refuses to open.
 
 ## Performance rules
 

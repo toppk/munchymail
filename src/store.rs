@@ -15,14 +15,14 @@ use crate::util::hex;
 /// Objects at most this size live inline in SQLite.
 pub const INLINE_MAX: usize = 16 * 1024;
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 
 /// How long a `connect`ed connection waits for another's write to finish.
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Upgrades from the previous version; index `i` brings version `i + 1` to `i + 2`.
 /// New tables and indexes need no entry: `SCHEMA` creates them if missing.
-const MIGRATIONS: [&str; 10] = [
+const MIGRATIONS: [&str; 11] = [
     "ALTER TABLE origin ADD COLUMN retired_at INTEGER",
     "",
     "ALTER TABLE artifact ADD COLUMN msg_id INTEGER;
@@ -43,6 +43,7 @@ const MIGRATIONS: [&str; 10] = [
      ALTER TABLE message ADD COLUMN merged_into INTEGER;
      ALTER TABLE message ADD COLUMN split_from INTEGER;
      ALTER TABLE artifact ADD COLUMN kind TEXT;",
+    "",
 ];
 
 /// Indexes on columns a migration may have just added.
@@ -294,6 +295,30 @@ CREATE TABLE IF NOT EXISTS copy_mark (
     PRIMARY KEY (artifact_id, mark, detail)
 );
 CREATE INDEX IF NOT EXISTS copy_mark_name ON copy_mark (mark);
+
+-- Every change to a copy's artifact.kind made by a person, newest last; kind
+-- NULL when it was cleared.
+CREATE TABLE IF NOT EXISTS copy_kind_change (
+    artifact_id INTEGER NOT NULL,
+    kind TEXT,
+    reason TEXT NOT NULL,
+    source TEXT NOT NULL,
+    set_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS copy_kind_change_artifact ON copy_kind_change (artifact_id);
+
+-- How one copy relates to another, as a person said: e.g. copy artifact_id
+-- was 'repaired-from' copy other_id.
+CREATE TABLE IF NOT EXISTS copy_link (
+    artifact_id INTEGER NOT NULL,
+    relation TEXT NOT NULL,
+    other_id INTEGER NOT NULL,
+    note TEXT,
+    source TEXT NOT NULL,
+    set_at INTEGER NOT NULL,
+    PRIMARY KEY (artifact_id, relation, other_id)
+);
+CREATE INDEX IF NOT EXISTS copy_link_other ON copy_link (other_id);
 
 -- Each Gmail message's label ids (UNREAD, STARRED, user labels) as first seen
 -- and at every change.

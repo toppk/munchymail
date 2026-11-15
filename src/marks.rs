@@ -2,6 +2,8 @@
 //! such as signs of damage. A mark never changes whether a copy is mail
 //! (`artifact.kind`), which message it is in, or which copy is shown; it is
 //! evidence for a person to weigh, and states what was measured, not a verdict.
+//! Copies a person called damaged keep theirs; copies munchymail classified
+//! as not mail have none.
 
 use anyhow::Result;
 use tracing::info;
@@ -13,6 +15,9 @@ use crate::store::{Store, now};
 /// The detectors' version; marks they set name it in `source`, and a new
 /// version replaces them (`meta` key `marks_version`).
 pub const VERSION: i64 = 2;
+
+/// SQL condition on copy `a`: it is checked (not one munchymail classified as not mail).
+const CHECKED: &str = "a.kind IS NOT 'folder-data'";
 
 fn source() -> String {
     format!("munchymail marks v{VERSION}")
@@ -120,11 +125,13 @@ pub async fn prefix_candidates(store: &Store, artifact_id: i64) -> Result<u64> {
     let c = &store.conn;
     let mut rows = c
         .query(
-            "SELECT b.artifact_id FROM artifact a JOIN artifact b
+            &format!(
+                "SELECT b.artifact_id FROM artifact a JOIN artifact b
                ON b.message_id = a.message_id AND b.date IS a.date AND b.body_hash <> a.body_hash
               AND b.msg_id IS NOT a.msg_id
              WHERE a.artifact_id = ?1 AND a.message_id IS NOT NULL
-               AND a.kind IS NULL AND b.kind IS NULL",
+               AND {CHECKED} AND b.kind IS NOT 'folder-data'"
+            ),
             (artifact_id,),
         )
         .await?;
@@ -221,7 +228,7 @@ pub async fn backfill(store: &Store) -> Result<Option<(u64, u64)>> {
     let mut copies = Vec::new();
     let mut rows = c
         .query(
-            "SELECT artifact_id, header_hash, body_hash FROM artifact WHERE kind IS NULL ORDER BY artifact_id",
+            &format!("SELECT artifact_id, header_hash, body_hash FROM artifact a WHERE {CHECKED} ORDER BY artifact_id"),
             (),
         )
         .await?;
@@ -249,11 +256,13 @@ pub async fn backfill(store: &Store) -> Result<Option<(u64, u64)>> {
     // Prefix candidates: copies sharing a Message-ID and Date with different bodies.
     let mut rows = c
         .query(
-            "SELECT a.artifact_id FROM artifact a JOIN
-               (SELECT message_id, date FROM artifact WHERE kind IS NULL AND message_id IS NOT NULL
+            &format!(
+                "SELECT a.artifact_id FROM artifact a JOIN
+               (SELECT message_id, date FROM artifact a WHERE {CHECKED} AND message_id IS NOT NULL
                 GROUP BY message_id, date HAVING count(DISTINCT body_hash) > 1) g
                ON g.message_id = a.message_id AND g.date IS a.date
-             WHERE a.kind IS NULL ORDER BY a.artifact_id",
+             WHERE {CHECKED} ORDER BY a.artifact_id"
+            ),
             (),
         )
         .await?;

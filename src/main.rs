@@ -33,7 +33,7 @@ use munchymail::{account, api, export, extract, google, mbox, ocr, parts, serve,
 #[derive(Parser)]
 #[command(
     about = "Offline mail archive: import, dedupe, search",
-    version = concat!(env!("CARGO_PKG_VERSION"), "-", env!("MUNCHYMAIL_COMMIT")),
+    version = VERSION,
     arg_required_else_help = true
 )]
 struct Cli {
@@ -63,6 +63,12 @@ fn effect(command: &str) -> Option<(&'static str, &'static str)> {
             "write",
             "data/ (mail, Gmail's labels and history); only reads Gmail",
         ),
+        "copy damaged" | "copy undamaged" => (
+            "write",
+            "copies' kind and its history in data/, and the indexes that follow it",
+        ),
+        "copy link" => ("write", "the copy_link table in data/"),
+        "copy list" => ("read", READ),
         "origin add" | "origin role" | "origin rename" | "origin retire" | "origin move"
         | "origin resume" => ("write", "the origin table in data/"),
         "sync" => (
@@ -87,6 +93,7 @@ fn effect(command: &str) -> Option<(&'static str, &'static str)> {
         "sql" => ("read", "a read-only connection: writes are refused"),
         "diff" | "scan" => ("read", "the named files; no database"),
         "describe" => ("read", "nothing; no database"),
+        "status" => ("read", "nothing in data/; asks the running service"),
         "serve" => (
             "write",
             "its socket in $XDG_RUNTIME_DIR/munchymail/; runs the commands sent to it",
@@ -176,6 +183,11 @@ impl Program {
                     &["account", "alias", "origin"],
                 ),
                 (
+                    "Judgements",
+                    "What the owner says about stored copies: damaged, and which copy repaired which.",
+                    &["copy"],
+                ),
+                (
                     "Bring mail in",
                     "Mail sources are only read; everything is written to the data root.",
                     &["import", "gmail", "index", "reconcile", "ocr"],
@@ -188,7 +200,7 @@ impl Program {
                 (
                     "Service and internals",
                     "The service, raw SQL, and every command described for scripts.",
-                    &["serve", "sql", "describe"],
+                    &["serve", "status", "sql", "describe"],
                 ),
             ],
         }
@@ -495,6 +507,9 @@ enum Cmd {
     /// Places mail is found: live trees, backups, exports.
     #[command(subcommand)]
     Origin(OriginCmd),
+    /// What the owner says about stored copies: damaged, repaired from.
+    #[command(subcommand)]
+    Copy(CopyCmd),
     /// Import the origins' mbox files.
     ///
     /// Imports every mbox under the given origins, or all origins if none given.
@@ -843,6 +858,16 @@ enum Cmd {
     /// reads run alongside a write; writes take turns. `diff`, `scan`,
     /// `describe` and `gmail auth`/`status` always run on their own.
     Serve,
+    /// This program's version, and the running service's: its version, how
+    /// long it has run, and each live origin's checks.
+    Status {
+        /// One JSON object.
+        #[arg(long)]
+        json: bool,
+        /// Answer as the service (what `status` asks it).
+        #[arg(long, hide = true)]
+        service: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -915,6 +940,53 @@ struct Runs {
     /// Compare recorded path OLD as NEW, e.g. `me=INBOX` across a move; repeatable.
     #[arg(long, value_name = "OLD=NEW")]
     rename: Vec<String>,
+}
+
+#[derive(Subcommand)]
+enum CopyCmd {
+    /// Say copies are damaged: kept as found, readable by id, but left out
+    /// of search, counts, reports and indexes, like anything not mail.
+    ///
+    /// IDs are copy ids or mN for every copy of a message. A later copy of the
+    /// same message, unless it has the same bytes, is mail again.
+    Damaged {
+        #[arg(required = true, value_name = "ID")]
+        ids: Vec<api::Ref>,
+        /// Why, kept with the change.
+        #[arg(long)]
+        reason: String,
+    },
+    /// Take back `damaged`: the copies are mail again and indexed again.
+    Undamaged {
+        #[arg(required = true, value_name = "ID")]
+        ids: Vec<api::Ref>,
+        /// Why, kept with the change.
+        #[arg(long)]
+        reason: String,
+    },
+    /// Record that copy REPAIRED was built to replace each damaged copy.
+    ///
+    /// Shown by `read` on both sides. IDs are copy ids, or mN for every copy
+    /// of a message.
+    Link {
+        /// The repaired copy.
+        repaired: i64,
+        /// The copies it replaces.
+        #[arg(long = "repaired-from", required = true, num_args = 1.., value_name = "ID")]
+        from: Vec<api::Ref>,
+        /// Free text, e.g. where the repair came from.
+        #[arg(long)]
+        note: Option<String>,
+        /// Take the links back instead.
+        #[arg(long)]
+        remove: bool,
+    },
+    /// Copies the owner called damaged, and the links between copies.
+    List {
+        /// JSON Lines, one record per copy or link.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2165,10 +2237,47 @@ async fn read(store: &Store, r: api::Ref, json: bool, out: &mut impl Write) -> R
     if let Some(from) = m.merged_from {
         writeln!(out, "  m{from} was merged into m{}", m.msg)?;
     }
-    if let Some(kind) = &m.kind {
-        writeln!(
+    match m.kind.as_deref() {
+        Some(munchymail::kinds::DAMAGED) => writeln!(
+            out,
+            "  damaged copy, as its owner said (kept as found; left out of search, counts, reports and indexes)"
+        )?,
+        Some(kind) => writeln!(
             out,
             "  not mail: {kind} (a mail store's own record, kept as found; left out of search, counts, reports and indexes)"
+        )?,
+        None => {}
+    }
+    for k in &m.kinds {
+        writeln!(
+            out,
+            "  copy {} is {}, said by the {} {}: {}",
+            k.copy,
+            k.kind,
+            k.source,
+            munchymail::util::iso(k.set_at),
+            sanitize(&k.reason)
+        )?;
+    }
+    for l in &m.links {
+        let (verb, rel) = match (l.relation.as_str(), l.reverse) {
+            (munchymail::kinds::REPAIRED_FROM, false) => ("was repaired from", ""),
+            (munchymail::kinds::REPAIRED_FROM, true) => ("was repaired by", ""),
+            (r, false) => ("is", r),
+            (r, true) => ("is the other side of", r),
+        };
+        let note = l
+            .note
+            .as_deref()
+            .map(|n| format!(": {}", sanitize(n)))
+            .unwrap_or_default();
+        writeln!(
+            out,
+            "  copy {} {verb}{}{rel} copy {} (m{}){note}",
+            l.copy,
+            if rel.is_empty() { "" } else { " " },
+            l.other,
+            l.other_msg
         )?;
     }
     for k in &m.marks {
@@ -2289,6 +2398,119 @@ async fn identities(store: &Store) -> Result<()> {
             version = munchymail::marks::VERSION,
             "copies checked for damage"
         );
+    }
+    Ok(())
+}
+
+/// `copy`: what the owner says about stored copies.
+async fn copy_cmd(store: &Store, cmd: CopyCmd, out: &mut impl Write) -> Result<()> {
+    use munchymail::kinds;
+    let expand = async |ids: &[api::Ref]| -> Result<Vec<i64>> {
+        let mut all = Vec::new();
+        for &r in ids {
+            for c in kinds::copies_of(store, r).await? {
+                if !all.contains(&c) {
+                    all.push(c);
+                }
+            }
+        }
+        Ok(all)
+    };
+    if let CopyCmd::Damaged { reason, .. } | CopyCmd::Undamaged { reason, .. } = &cmd
+        && reason.trim().is_empty()
+    {
+        bail!("--reason can't be empty");
+    }
+    match cmd {
+        CopyCmd::Damaged { ids, reason } => {
+            let copies = expand(&ids).await?;
+            let changed =
+                kinds::set(store, &copies, Some(kinds::DAMAGED), &reason, kinds::OWNER).await?;
+            writeln!(
+                out,
+                "damaged: {} of {} copies changed {changed:?}",
+                changed.len(),
+                copies.len()
+            )?;
+            index(store).await?;
+        }
+        CopyCmd::Undamaged { ids, reason } => {
+            let copies = expand(&ids).await?;
+            let changed = kinds::set(store, &copies, None, &reason, kinds::OWNER).await?;
+            writeln!(
+                out,
+                "mail again: {} of {} copies changed {changed:?}",
+                changed.len(),
+                copies.len()
+            )?;
+            index(store).await?;
+        }
+        CopyCmd::Link {
+            repaired,
+            from,
+            note,
+            remove,
+        } => {
+            let others = expand(&from).await?;
+            let n = kinds::link(
+                store,
+                repaired,
+                kinds::REPAIRED_FROM,
+                &others,
+                note.as_deref(),
+                remove,
+            )
+            .await?;
+            let what = if remove { "removed" } else { "recorded" };
+            writeln!(
+                out,
+                "copy {repaired} repaired-from {others:?}: {n} link(s) {what}"
+            )?;
+        }
+        CopyCmd::List { json } => {
+            for k in kinds::kinds(store, None).await? {
+                if json {
+                    let v = serde_json::json!({
+                        "type": "kind", "copy": k.copy, "message": format!("m{}", k.msg),
+                        "kind": k.kind, "reason": sanitize(&k.reason), "source": k.source,
+                        "set_at": munchymail::util::iso(k.set_at),
+                    });
+                    writeln!(out, "{v}")?;
+                } else {
+                    writeln!(
+                        out,
+                        "{:>8}  m{:<8} {}  {}  {}",
+                        k.copy,
+                        k.msg,
+                        k.kind,
+                        munchymail::util::iso(k.set_at),
+                        sanitize(&k.reason)
+                    )?;
+                }
+            }
+            for l in kinds::links(store, None).await? {
+                if json {
+                    let v = serde_json::json!({
+                        "type": "link", "copy": l.copy, "relation": l.relation, "other": l.other,
+                        "other_message": format!("m{}", l.other_msg),
+                        "note": l.note.as_deref().map(sanitize),
+                        "set_at": munchymail::util::iso(l.set_at),
+                    });
+                    writeln!(out, "{v}")?;
+                } else {
+                    let note = l
+                        .note
+                        .as_deref()
+                        .map(|n| format!("  {}", sanitize(n)))
+                        .unwrap_or_default();
+                    writeln!(
+                        out,
+                        "{:>8}  {} {} (m{}){note}",
+                        l.copy, l.relation, l.other, l.other_msg
+                    )?;
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -2708,7 +2930,8 @@ async fn stats(store: &Store, out: &mut impl Write) -> Result<()> {
         ("artifacts", "SELECT count(*) FROM artifact"),
         (
             "  of which not mail",
-            "SELECT count(*) || coalesce(' (' || group_concat(DISTINCT kind) || ')', '') FROM artifact WHERE kind IS NOT NULL",
+            "SELECT coalesce(sum(n), 0) || coalesce(' (' || group_concat(kind || ' ' || n, ', ') || ')', '')
+             FROM (SELECT kind, count(*) AS n FROM artifact WHERE kind IS NOT NULL GROUP BY kind)",
         ),
         (
             "distinct bodies",
@@ -3167,6 +3390,7 @@ fn runs_alone(cmd: &Cmd) -> bool {
             | Cmd::Scan { .. }
             | Cmd::Describe { .. }
             | Cmd::Serve
+            | Cmd::Status { service: false, .. }
             | Cmd::Gmail(GmailCmd::Auth { .. } | GmailCmd::Status)
     )
 }
@@ -3253,6 +3477,183 @@ fn handle(
     exit_code(r)
 }
 
+/// The running service, for `status`: when it started, and its write turn.
+struct Service {
+    started_at: i64,
+    writes: Arc<Mutex<()>>,
+}
+
+static SERVICE: std::sync::OnceLock<Service> = std::sync::OnceLock::new();
+
+/// Each IDLE watcher's state, by "account origin", for `status`.
+static IDLE: Mutex<std::collections::BTreeMap<String, (String, i64)>> =
+    Mutex::new(std::collections::BTreeMap::new());
+
+fn idle_state(account: &str, origin: &str, state: String) {
+    IDLE.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(format!("{account} {origin}"), (state, now()));
+}
+
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-", env!("MUNCHYMAIL_COMMIT"));
+
+/// `status`: this program's version, then the service's answer.
+fn status(data: &Path, json: bool, out: &mut impl Write) -> Result<()> {
+    let program = Program::current().name();
+    let me = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let Some(socket) = serve::socket() else {
+        bail!("no XDG_RUNTIME_DIR or MUNCHYMAIL_SOCKET: no service to ask");
+    };
+    let mut argv = vec!["status".to_string(), "--service".to_string()];
+    if json {
+        argv.push("--json".into());
+    }
+    let req = serve::Request {
+        argv,
+        cwd: std::env::current_dir()?,
+        account: None,
+        data: data.canonicalize()?,
+        width: listing::width(),
+    };
+    let (mut answer, mut err) = (Vec::new(), Vec::new());
+    let code = serve::forward(&socket, &req, &mut answer, &mut err)?;
+    let service = match code {
+        None => None,
+        Some(0) => Some(Ok(answer)),
+        // A service from before `status` can't answer it.
+        Some(_) => Some(Err(String::from_utf8_lossy(&err)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string())),
+    };
+    if json {
+        let service = match &service {
+            None => serde_json::json!({"running": false}),
+            Some(Ok(a)) => serde_json::from_slice(a)?,
+            Some(Err(e)) => serde_json::json!({"running": true, "version": null, "error": e}),
+        };
+        let v = serde_json::json!({
+            "program": program, "version": VERSION, "path": me,
+            "socket": socket, "service": service,
+        });
+        writeln!(out, "{v}")?;
+    } else {
+        writeln!(out, "{program} {VERSION} ({me})")?;
+        match &service {
+            None => writeln!(
+                out,
+                "service: not running (no service at {})",
+                socket.display()
+            )?,
+            Some(Ok(a)) => {
+                out.write_all(a)?;
+                if !a.starts_with(format!("service {VERSION},").as_bytes()) {
+                    writeln!(out, "versions differ: restart the service to run this one")?;
+                }
+            }
+            Some(Err(e)) => writeln!(
+                out,
+                "service: running at {}, but it can't report its status (older than 0.4.0?): {e}",
+                socket.display()
+            )?,
+        }
+    }
+    if service.is_none() {
+        bail!("the service is not running");
+    }
+    Ok(())
+}
+
+/// `status --service`, run by the service: its version, uptime, and origins.
+async fn service_status(
+    root: &Path,
+    stores: &Stores,
+    json: bool,
+    out: &mut impl Write,
+) -> Result<()> {
+    let s = SERVICE
+        .get()
+        .context("`status --service` is what `status` asks the service; run `mmadm status`")?;
+    let t = now();
+    let busy = s.writes.try_lock().is_err();
+    let idle = IDLE.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    let ago = |at: i64| match t - at {
+        d if d < 120 => format!("{d} s ago"),
+        d if d < 7200 => format!("{} min ago", d / 60),
+        d => format!("{} h ago", d / 3600),
+    };
+    let mut accounts = Vec::new();
+    for a in account::list(root)? {
+        let store = stores.open(&root.join(&a)).await?;
+        let mut origins = Vec::new();
+        for l in sync::live(&store).await? {
+            let watch = idle.get(&format!("{a} {}", l.label)).cloned();
+            origins.push((l, watch));
+        }
+        accounts.push((a, origins));
+    }
+    if json {
+        let v = serde_json::json!({
+            "running": true,
+            "version": VERSION,
+            "pid": std::process::id(),
+            "started_at": munchymail::util::iso(s.started_at),
+            "uptime_s": t - s.started_at,
+            "writing": busy,
+            "accounts": accounts.iter().map(|(a, origins)| serde_json::json!({
+                "account": a,
+                "origins": origins.iter().map(|(l, w)| serde_json::json!({
+                    "origin": l.label,
+                    "checked_at": l.checked_at.map(munchymail::util::iso),
+                    "retry_at": l.retry_at.map(munchymail::util::iso),
+                    "stopped": l.stopped,
+                    "idle": w.as_ref().map(|(state, since)| serde_json::json!({
+                        "state": state, "since": munchymail::util::iso(*since),
+                    })),
+                })).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+        });
+        writeln!(out, "{v}")?;
+        return Ok(());
+    }
+    let up = t - s.started_at;
+    writeln!(
+        out,
+        "service {VERSION}, pid {}, up {}h {:02}m (since {}){}",
+        std::process::id(),
+        up / 3600,
+        up % 3600 / 60,
+        munchymail::util::iso(s.started_at),
+        if busy { ", a write is running" } else { "" }
+    )?;
+    for (a, origins) in &accounts {
+        writeln!(out, "  {a}")?;
+        if origins.is_empty() {
+            writeln!(out, "    no live origins")?;
+        }
+        for (l, w) in origins {
+            let mut line = format!(
+                "    {}: checked {}",
+                l.label,
+                l.checked_at.map_or("never".to_string(), ago)
+            );
+            if let Some(stopped) = &l.stopped {
+                line.push_str(&format!("; STOPPED: {stopped} (`mmadm origin resume`)"));
+            } else if let Some(r) = l.retry_at.filter(|&r| r > t) {
+                line.push_str(&format!("; retrying at {}", munchymail::util::iso(r)));
+            }
+            if let Some((state, since)) = w {
+                line.push_str(&format!("; INBOX IDLE {state} since {}", ago(*since)));
+            }
+            writeln!(out, "{line}")?;
+        }
+    }
+    Ok(())
+}
+
 fn serve_cmd(data: &Path) -> Result<()> {
     let socket = serve::socket().context("no XDG_RUNTIME_DIR or MUNCHYMAIL_SOCKET to listen on")?;
     munchymail::util::private_dir(data)?;
@@ -3264,6 +3665,10 @@ fn serve_cmd(data: &Path) -> Result<()> {
         info!(account = a.as_str(), "opened");
     }
     let writes = Arc::new(Mutex::new(()));
+    let _ = SERVICE.set(Service {
+        started_at: now(),
+        writes: writes.clone(),
+    });
     let nudges = Arc::new(Nudges::default());
     for a in account::list(&root)? {
         let store = pollster::block_on(stores.open(&root.join(&a)))?;
@@ -3337,12 +3742,14 @@ fn watch_inbox(account: &str, live: &sync::Live, nudges: &Nudges) {
         match watching {
             Ok(stream) => {
                 info!(account, origin, "watching INBOX with IDLE");
+                idle_state(account, origin, "watching".into());
                 backoff = Duration::from_secs(60);
                 loop {
                     match stream.recv_timeout(Duration::from_secs(300)) {
                         Ok(Ok(_)) => nudges.nudge(live.origin_id),
                         Ok(Err(e)) => {
                             warn!(account, origin, "IDLE ended: {e:#}");
+                            idle_state(account, origin, format!("ended ({e:#}), reconnecting"));
                             break;
                         }
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -3350,7 +3757,10 @@ fn watch_inbox(account: &str, live: &sync::Live, nudges: &Nudges) {
                     }
                 }
             }
-            Err(e) => warn!(account, origin, "can't watch INBOX, will retry: {e:#}"),
+            Err(e) => {
+                warn!(account, origin, "can't watch INBOX, will retry: {e:#}");
+                idle_state(account, origin, format!("failing ({e:#}), retrying"));
+            }
         }
         std::thread::sleep(backoff);
         backoff = (backoff * 2).min(Duration::from_secs(1800));
@@ -3413,6 +3823,7 @@ async fn run(mut cli: Cli, stores: &Stores, out: &mut impl Write) -> Result<()> 
             | Cmd::Scan { .. }
             | Cmd::Describe { .. }
             | Cmd::Serve
+            | Cmd::Status { .. }
             | Cmd::Account(_)
             | Cmd::Accounts { .. }
             | Cmd::Overview { .. }
@@ -3512,6 +3923,14 @@ async fn run(mut cli: Cli, stores: &Stores, out: &mut impl Write) -> Result<()> 
     }
     if let Cmd::Serve = cli.cmd {
         return serve_cmd(&cli.data);
+    }
+    if let Cmd::Status { json, service } = cli.cmd {
+        if service {
+            service_status(&cli.data, stores, json, out).await?;
+        } else {
+            status(&cli.data, json, out)?;
+        }
+        return Ok(out.flush()?);
     }
     let store = stores
         .open(&account::resolve(&cli.data, cli.account.as_deref())?)
@@ -3760,6 +4179,7 @@ async fn with_store(cmd: Cmd, store: &Store, out: &mut impl Write) -> Result<()>
     }
     match cmd {
         Cmd::Origin(cmd) => origin(store, cmd, out).await?,
+        Cmd::Copy(cmd) => copy_cmd(store, cmd, out).await?,
         Cmd::Alias(cmd) => alias(store, cmd, out).await?,
         Cmd::Gmail(GmailCmd::Sync { jobs }) => {
             gmail_sync(store, jobs).await?;
@@ -4005,6 +4425,7 @@ async fn with_store(cmd: Cmd, store: &Store, out: &mut impl Write) -> Result<()>
         | Cmd::Ocr { .. }
         | Cmd::Describe { .. }
         | Cmd::Serve
+        | Cmd::Status { .. }
         | Cmd::Account(_)
         | Cmd::Accounts { .. }
         | Cmd::Overview { .. }

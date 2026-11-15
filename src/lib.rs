@@ -11,6 +11,7 @@ pub mod headers;
 pub mod imap;
 pub mod import;
 pub mod key;
+pub mod kinds;
 pub mod listing;
 pub mod locations;
 pub mod marks;

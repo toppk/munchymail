@@ -4,6 +4,26 @@ Every deployment is a new version: at least a new patch, and a new minor
 when the database schema changes. Upgrading to a new schema is one-way;
 keep a copy of the data directory to roll back (`docs/install.md`).
 
+## 0.4.0: the owner's judgements
+
+- **Damaged copies.** `mmadm copy damaged ID... --reason TEXT` (copy ids, or
+  `mN` for every copy of a message) says a copy's bytes are wrong. Like
+  Dovecot's placeholder, it is kept as found and readable by id, and left
+  out of search, counts, reports and indexes; unlike it, the owner set it,
+  and each change is kept with its reason. Its marks stay as the evidence.
+  `copy undamaged` takes it back. A message's preferred copy is a mail copy
+  while it has one.
+- **Repairs.** `mmadm copy link REPAIRED --repaired-from ID...` records which
+  copy replaced which; `read` shows it on both sides, and `copy list` lists
+  every damaged copy and link.
+- **`mmadm status`**: this program's version and the running service's,
+  its uptime, whether a write is running, and each live origin's last
+  check, retry or stop, and INBOX IDLE watch. Says when the versions differ.
+- `stats` counts copies that aren't mail per kind.
+
+Upgrading: the schema moves from 11 to 12 (two new tables; instant). 0.3
+can't open the database afterwards.
+
 ## 0.3.1
 
 - `content-length` no longer marks a copy whose body matches the field

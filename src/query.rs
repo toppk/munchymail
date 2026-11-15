@@ -458,9 +458,13 @@ pub fn count_sql(set: &str) -> String {
 }
 
 /// A message's preferred copy, as SQL over its copies `a` joined to `fold f`:
-/// not folded, then the earliest stored.
-pub const PREFERRED: &str =
-    "coalesce(min(CASE WHEN f.artifact_id IS NULL THEN a.artifact_id END), min(a.artifact_id))";
+/// a mail copy before one that isn't (`artifact.kind`), then not folded, then
+/// the earliest stored.
+pub const PREFERRED: &str = "coalesce(
+    min(CASE WHEN a.kind IS NULL AND f.artifact_id IS NULL THEN a.artifact_id END),
+    min(CASE WHEN a.kind IS NULL THEN a.artifact_id END),
+    min(CASE WHEN f.artifact_id IS NULL THEN a.artifact_id END),
+    min(a.artifact_id))";
 
 /// Replace the copies in TEMP TABLE `table` with one per message: its
 /// preferred copy, whichever of its copies matched. Returns how many rows went.

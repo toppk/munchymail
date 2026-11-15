@@ -246,7 +246,14 @@ root or there is no `XDG_RUNTIME_DIR` (cron, ssh without a session).
 ```
 mmadm serve &                      # until killed; logs to stderr
 munchymail search --text invoice -n 5   # answered by the service
+mmadm status                       # this program's version and the service's
 ```
+
+`mmadm status` prints its own version, then asks the service for its
+version, process id and uptime, whether a write is running, and per live
+origin when it was last checked, whether it is waiting to retry or stopped,
+and the INBOX IDLE watch; `--json` for scripts. It says so when no service
+is running (exit 1), and when the service is a different version.
 
 The service uses its own `MUNCHYMAIL_LOG`, not the client's. It keeps live
 origins current (Gmail and IMAP every 3 minutes, an IMAP INBOX at once through
@@ -615,6 +622,21 @@ match (`content-length`), a multipart body never closed
 same message (`prefix-of`, saying whether it stops mid-line). `read` lists
 them; `search --mark NAME` (or `--mark '*'`) finds them, and
 `--mark NAME:PATTERN` matches the detail too, e.g. `--mark prefix-of:mid-line`.
+
+### copy: what the owner says about stored copies
+
+```
+mmadm copy damaged ID... --reason TEXT
+mmadm copy undamaged ID... --reason TEXT
+mmadm copy link REPAIRED --repaired-from ID... [--note TEXT] [--remove]
+mmadm copy list [--json]
+```
+
+IDs are copy ids, or `mN` for every copy of a message. A damaged copy is
+kept as found and readable by id, but left out of search, counts, reports
+and indexes, like a copy that isn't mail; its marks stay, and every change
+is kept with its reason. `link` records that a copy was built to replace
+damaged ones; `read` shows it on both sides.
 
 ### verify-files: rebuild an origin's mbox files
 

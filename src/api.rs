@@ -267,30 +267,33 @@ async fn message_copies(
     let mut rows = store
         .conn
         .query(
-            "SELECT a.artifact_id, f.artifact_id IS NULL FROM artifact a
-             LEFT JOIN fold f ON f.artifact_id = a.artifact_id
-             WHERE a.msg_id = ?1 ORDER BY a.artifact_id",
+            &format!(
+                "SELECT {} FROM artifact a LEFT JOIN fold f ON f.artifact_id = a.artifact_id
+                 WHERE a.msg_id = ?1",
+                crate::query::PREFERRED
+            ),
+            (msg,),
+        )
+        .await?;
+    let chosen: Option<i64> = rows.next().await?.map(|r| r.get(0)).transpose()?;
+    drop(rows);
+    let mut rows = store
+        .conn
+        .query(
+            "SELECT artifact_id FROM artifact WHERE msg_id = ?1 ORDER BY artifact_id",
             (msg,),
         )
         .await?;
     let mut ids = Vec::new();
-    let mut primary = Vec::new();
     while let Some(r) = rows.next().await? {
         ids.push(r.get::<i64>(0)?);
-        primary.push(r.get::<i64>(1)? != 0);
     }
     drop(rows);
     let mut all = Vec::new();
     for &id in &ids {
         locations::merge(&mut all, sightings.of(id).await?);
     }
-    let Some(chosen) = ids
-        .iter()
-        .zip(&primary)
-        .find(|&(_, &p)| p)
-        .map(|(&id, _)| id)
-        .or(ids.first().copied())
-    else {
+    let Some(chosen) = chosen else {
         bail!("no message m{msg}; `search --json` lists message ids")
     };
     Ok((ids, chosen, all))
@@ -375,6 +378,10 @@ pub struct Message {
     pub locations: Vec<Location>,
     /// What munchymail noticed about each of the message's copies (`copy_mark`).
     pub marks: Vec<CopyMark>,
+    /// Kinds a person set on the message's copies (e.g. damaged), and why.
+    pub kinds: Vec<crate::kinds::KindNote>,
+    /// Links a person made between its copies and others (e.g. repaired-from).
+    pub links: Vec<crate::kinds::LinkNote>,
     /// From the SHA-256 of the whole message, which includes headers our own
     /// server added, so a sender can't predict it to fake an end marker.
     pub nonce: String,
@@ -427,6 +434,8 @@ pub async fn read(store: &Store, r: Ref) -> Result<Message> {
     let s = load(store, id).await?;
     let (copies, _, all) = message_copies(store, &mut sightings, s.msg).await?;
     let marks = marks_of(store, &copies).await?;
+    let kinds = crate::kinds::kinds(store, Some(&copies)).await?;
+    let links = crate::kinds::links(store, Some(&copies)).await?;
     let locations = match r {
         Ref::Message(_) => all,
         Ref::Copy(_) => sightings.of(id).await?,
@@ -442,6 +451,8 @@ pub async fn read(store: &Store, r: Ref) -> Result<Message> {
         kind: s.kind,
         copies,
         marks,
+        kinds,
+        links,
         date: s.date,
         message_id: s.message_id,
         subject: s.subject,
@@ -529,6 +540,16 @@ impl Message {
             "locations": self.locations.iter().map(location_json).collect::<Vec<_>>(),
             "marks": self.marks.iter().map(|m| json!({
                 "copy": m.copy, "mark": m.mark, "detail": m.detail, "source": m.source,
+            })).collect::<Vec<_>>(),
+            "kinds": self.kinds.iter().map(|k| json!({
+                "copy": k.copy, "kind": k.kind, "reason": sanitize(&k.reason),
+                "source": k.source, "set_at": opt_time(Some(k.set_at)),
+            })).collect::<Vec<_>>(),
+            "links": self.links.iter().map(|l| json!({
+                "copy": l.copy,
+                "relation": l.relation, "reverse": l.reverse,
+                "other": l.other, "other_message": Ref::Message(l.other_msg).to_string(),
+                "note": l.note.as_deref().map(sanitize), "set_at": opt_time(Some(l.set_at)),
             })).collect::<Vec<_>>(),
             "problem": self.decoded.problem,
             "untrusted": true,

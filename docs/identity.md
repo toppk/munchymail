@@ -105,7 +105,10 @@ of five things, all of which must match:
 Dovecot's "FOLDER INTERNAL DATA" placeholder, which only holds a folder's
 UID state, is stored like any copy but classified as not mail
 (`artifact.kind` = `folder-data`): readable by id, and left out of every
-listing, count, report and index. Dovecot's per-message
+listing, count, report and index. A copy its owner knows is damaged
+(`mmadm copy damaged`, `artifact.kind` = `damaged`) follows the same rule,
+keeps its marks, and can point to the copy that repaired it (`mmadm copy
+link REPAIRED --repaired-from ID`). Dovecot's per-message
 bookkeeping fields (`Status`, `X-Status`, `X-Keywords`, `X-UID`,
 `Content-Length`, `X-IMAPbase`) stay in the stored bytes and are left out of
 `read`'s header list.
