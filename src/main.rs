@@ -3670,6 +3670,7 @@ fn serve_cmd(data: &Path) -> Result<()> {
         writes: writes.clone(),
     });
     let nudges = Arc::new(Nudges::default());
+    munchymail::imap::keep_workers();
     for a in account::list(&root)? {
         let store = pollster::block_on(stores.open(&root.join(&a)))?;
         for live in pollster::block_on(sync::live(&store))? {

@@ -13,6 +13,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -27,8 +28,8 @@ use imap_codec::imap_types::{
     status::{StatusDataItem, StatusDataItemName},
 };
 use io_imap::client::{
-    ImapClient, ImapClientStd, ImapClientStdConnectOptions, ImapMailboxWatchStream,
-    ImapMailboxWatchStreamOptions,
+    ImapClient, ImapClientError, ImapClientStd, ImapClientStdConnectOptions,
+    ImapMailboxWatchStream, ImapMailboxWatchStreamOptions,
 };
 use io_imap::rfc3501::{examine::ImapMailboxExamineOptions, fetch::ImapMessageFetchOptions};
 use io_sasl::{mechanism::Sasl, rfc4616::plain::SaslPlainCreds};
@@ -293,14 +294,120 @@ async fn dirty(store: &Store, origin_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Past this a kept connection nears Dovecot's fixed 30-minute inactivity
+/// logout, so it is logged out rather than reused.
+const WORKER_IDLE: Duration = Duration::from_secs(25 * 60);
+
+/// Connections kept between syncs, by account and origin; `None` until
+/// [`keep_workers`], so a one-off sync logs out as it ends.
+static WORKERS: Mutex<Option<HashMap<String, Worker>>> = Mutex::new(None);
+
+struct Worker {
+    client: ImapClientStd,
+    caps: Vec<Capability<'static>>,
+    used: Instant,
+}
+
+/// Keep each origin's connection from one sync to the next, as the service does.
+pub fn keep_workers() {
+    workers().get_or_insert_default();
+}
+
+fn workers() -> MutexGuard<'static, Option<HashMap<String, Worker>>> {
+    WORKERS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The kept connection for `key`, unless it sat idle too long.
+fn take_worker(key: &str) -> Option<Worker> {
+    let mut worker = workers().as_mut()?.remove(key)?;
+    if worker.used.elapsed() < WORKER_IDLE {
+        return Some(worker);
+    }
+    let _ = worker.client.logout();
+    None
+}
+
+/// Keep `worker` for the next sync, or log it out when connections aren't kept.
+fn put_worker(key: String, mut worker: Worker, selected: bool) {
+    let keeping = workers().is_some();
+    // A folder left selected would have its updates arrive mid-command next time.
+    let clear = !selected
+        || worker.caps.contains(&Capability::Unselect) && worker.client.unselect().is_ok();
+    if keeping
+        && clear
+        && let Some(kept) = workers().as_mut()
+    {
+        worker.used = Instant::now();
+        // Two syncs of one origin at once each had a connection; keep one.
+        if let Some(mut other) = kept.insert(key, worker) {
+            let _ = other.client.logout();
+        }
+        return;
+    }
+    let _ = worker.client.logout();
+}
+
+/// Whether `e` means the connection itself is gone (a BYE, EOF or I/O error).
+fn lost(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<ImapClientError>()
+            .is_some_and(ImapClientError::is_connection_lost)
+    })
+}
+
 /// Bring IMAP origin `label` up to date: every folder whose STATUS moved.
+///
+/// A kept connection found gone (the server's inactivity logout, a network
+/// drop) is replaced and the sync run once more; that is safe, since a folder's
+/// state advances only after its messages are stored.
 pub async fn sync(store: &Store, account: &str, label: &str) -> Result<Stats> {
-    let t = Instant::now();
     let origin_id = origin_id(store, label).await?;
     let settings = Settings::load(&Config::load()?, account, label)?;
-    let (mut client, caps) = connect(&settings)?;
-    let qresync = caps.contains(&Capability::QResync);
+    let key = format!("{account}\n{label}");
+    let kept = take_worker(&key);
+    let reused = kept.is_some();
+    let mut worker = match kept {
+        Some(worker) => worker,
+        None => Worker::connect(&settings)?,
+    };
+    let mut result = sync_with(store, &settings, origin_id, &mut worker).await;
+    if reused && result.as_ref().is_err_and(lost) {
+        info!(
+            origin = label,
+            "the kept IMAP connection was gone; reconnecting"
+        );
+        worker = Worker::connect(&settings)?;
+        result = sync_with(store, &settings, origin_id, &mut worker).await;
+    }
+    let (stats, selected) = result?;
+    put_worker(key, worker, selected);
+    record_run(store, origin_id).await?;
+    Ok(stats)
+}
+
+impl Worker {
+    fn connect(s: &Settings) -> Result<Self> {
+        let (client, caps) = connect(s)?;
+        Ok(Self {
+            client,
+            caps,
+            used: Instant::now(),
+        })
+    }
+}
+
+/// [`sync`] on `worker`'s connection; also says whether a folder is left selected.
+async fn sync_with(
+    store: &Store,
+    settings: &Settings,
+    origin_id: i64,
+    worker: &mut Worker,
+) -> Result<(Stats, bool)> {
+    let t = Instant::now();
+    let qresync = worker.caps.contains(&Capability::QResync);
+    let client = &mut worker.client;
     let mut stats = Stats::default();
+    let mut selected = false;
 
     let mut stored: HashMap<String, State> = HashMap::new();
     let mut rows = store
@@ -420,6 +527,7 @@ pub async fn sync(store: &Store, account: &str, label: &str) -> Result<Stats> {
             .examine(mailbox.clone(), ImapMailboxExamineOptions { parameters })
             .with_context(|| format!("EXAMINE {name}"))?
             .data;
+        selected = true;
         let validity = now_state.uid_validity as i64;
         let gone_before = stats.gone;
 
@@ -642,9 +750,7 @@ pub async fn sync(store: &Store, account: &str, label: &str) -> Result<Stats> {
             .await?;
         store.commit().await?;
     }
-    let _ = client.logout();
-    record_run(store, origin_id).await?;
-    Ok(stats)
+    Ok((stats, selected))
 }
 
 /// Record `flags` as the message's flags from now on, unless they already are.
