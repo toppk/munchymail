@@ -4,6 +4,14 @@ Every deployment is a new version: at least a new patch, and a new minor
 when the database schema changes. Upgrading to a new schema is one-way;
 keep a copy of the data directory to roll back (`docs/install.md`).
 
+## 0.4.2
+
+- `search` prints `more results: add --after CURSOR` on stderr after the
+  page, piped or not; it came before the rows, and only at a terminal.
+- `search --count` notes on stderr when it counted copies of fewer
+  messages, e.g. `that counts copies; they are 68 messages (--unique)`.
+- `read` names its save command for what it is: `show ID --raw > FILE.eml`.
+
 ## 0.4.1
 
 - The service keeps each IMAP origin's sync connection open between
