@@ -4,6 +4,14 @@ Every deployment is a new version: at least a new patch, and a new minor
 when the database schema changes. Upgrading to a new schema is one-way;
 keep a copy of the data directory to roll back (`docs/install.md`).
 
+## 0.4.1
+
+- The service keeps each IMAP origin's sync connection open between
+  checks instead of logging in every few minutes. One idle for 25 minutes
+  is replaced (Dovecot logs out at 30), and one found gone is reconnected
+  and the sync rerun.
+- The INBOX watch sends its own ENABLE, so QRESYNC is listed in its reply.
+
 ## 0.4.0: the owner's judgements
 
 - **Damaged copies.** `mmadm copy damaged ID... --reason TEXT` (copy ids, or
