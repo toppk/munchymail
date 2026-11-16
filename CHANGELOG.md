@@ -4,6 +4,16 @@ Every deployment is a new version: at least a new patch, and a new minor
 when the database schema changes. Upgrading to a new schema is one-way;
 keep a copy of the data directory to roll back (`docs/install.md`).
 
+## 0.4.3
+
+- `read mN --text`: only the headers and text, for filing one message as
+  text; it has no untrusted wrapper, so all of it is the sender's.
+- The service logs out its kept IMAP sync connections when it stops.
+- An IMAP origin's `keep_minutes` (default 25; 0 keeps none) sets how long
+  an idle sync connection is kept.
+- QRESYNC counts as on only when the server's ENABLED lists it, and STATUS
+  asks for HIGHESTMODSEQ only from a server with CONDSTORE.
+
 ## 0.4.2
 
 - `search` prints `more results: add --after CURSOR` on stderr after the
