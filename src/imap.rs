@@ -20,6 +20,7 @@ use anyhow::{Context, Result, bail};
 use imap_codec::imap_types::{
     command::SelectParameter,
     core::Vec1,
+    extensions::enable::CapabilityEnable,
     fetch::{MacroOrMessageDataItemNames, MessageDataItem, MessageDataItemName},
     flag::{FlagFetch, FlagNameAttribute},
     mailbox::{ListMailbox, Mailbox},
@@ -65,6 +66,8 @@ pub struct Settings {
     server_cert: Option<PathBuf>,
     /// Folder names to sync, a trailing `*` matching any rest; None for all.
     folders: Option<Vec<String>>,
+    /// How long the service keeps an idle sync connection; zero keeps none.
+    keep: Duration,
 }
 
 impl Settings {
@@ -113,8 +116,17 @@ impl Settings {
                     .with_context(|| format!("{section} folders must be a list of strings"))?,
             ),
         };
+        let keep = match t.get("keep_minutes") {
+            None => DEFAULT_KEEP,
+            Some(v) => v
+                .as_integer()
+                .and_then(|m| u64::try_from(m).ok())
+                .map(|m| Duration::from_secs(m * 60))
+                .with_context(|| format!("{section} keep_minutes must be a whole number"))?,
+        };
         Ok(Settings {
             folders,
+            keep,
             url,
             user: need("user")?,
             password_command,
@@ -165,17 +177,21 @@ fn password(command: &[String]) -> Result<SecretString> {
     Ok(SecretString::from(line.to_string()))
 }
 
-/// Log in, and ENABLE QRESYNC when the server has it.
-fn connect(s: &Settings) -> Result<(ImapClientStd, Vec<Capability<'static>>)> {
+/// Log in, and ENABLE QRESYNC when the server has it; also whether it is on.
+fn connect(s: &Settings) -> Result<(ImapClientStd, Vec<Capability<'static>>, bool)> {
     let (mut client, caps) = login(s)?;
+    let mut qresync = false;
     if caps.contains(&Capability::QResync) {
-        client
-            .enable(Vec1::from(
-                imap_codec::imap_types::extensions::enable::CapabilityEnable::try_from("QRESYNC")?,
-            ))
+        let enabled = client
+            .enable(Vec1::from(CapabilityEnable::try_from("QRESYNC")?))
             .context("ENABLE QRESYNC")?;
+        // RFC 5161 §3.2: what ENABLED leaves out, a bare OK included, is not enabled.
+        qresync = enabled
+            .iter()
+            .flatten()
+            .any(|c| c.to_string().eq_ignore_ascii_case("QRESYNC"));
     }
-    Ok((client, caps))
+    Ok((client, caps, qresync))
 }
 
 fn login(s: &Settings) -> Result<(ImapClientStd, Vec<Capability<'static>>)> {
@@ -296,7 +312,7 @@ async fn dirty(store: &Store, origin_id: i64) -> Result<()> {
 
 /// Past this a kept connection nears Dovecot's fixed 30-minute inactivity
 /// logout, so it is logged out rather than reused.
-const WORKER_IDLE: Duration = Duration::from_secs(25 * 60);
+const DEFAULT_KEEP: Duration = Duration::from_secs(25 * 60);
 
 /// Connections kept between syncs, by account and origin; `None` until
 /// [`keep_workers`], so a one-off sync logs out as it ends.
@@ -305,6 +321,7 @@ static WORKERS: Mutex<Option<HashMap<String, Worker>>> = Mutex::new(None);
 struct Worker {
     client: ImapClientStd,
     caps: Vec<Capability<'static>>,
+    qresync: bool,
     used: Instant,
 }
 
@@ -313,16 +330,28 @@ pub fn keep_workers() {
     workers().get_or_insert_default();
 }
 
+/// Log out every kept connection and keep no more, as the service stops.
+pub fn logout_workers() {
+    let kept = workers().take();
+    for (_, mut worker) in kept.into_iter().flatten() {
+        let _ = worker.client.logout();
+    }
+}
+
 fn workers() -> MutexGuard<'static, Option<HashMap<String, Worker>>> {
     WORKERS.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The kept connection for `key`, unless it sat idle too long.
-fn take_worker(key: &str) -> Option<Worker> {
+/// The kept connection for `key`, unless it sat idle `keep` or longer.
+fn take_worker(key: &str, keep: Duration) -> Option<Worker> {
     let mut worker = workers().as_mut()?.remove(key)?;
-    if worker.used.elapsed() < WORKER_IDLE {
+    if worker.used.elapsed() < keep {
         return Some(worker);
     }
+    info!(
+        "replacing an IMAP connection idle {:?}",
+        worker.used.elapsed()
+    );
     let _ = worker.client.logout();
     None
 }
@@ -364,7 +393,7 @@ pub async fn sync(store: &Store, account: &str, label: &str) -> Result<Stats> {
     let origin_id = origin_id(store, label).await?;
     let settings = Settings::load(&Config::load()?, account, label)?;
     let key = format!("{account}\n{label}");
-    let kept = take_worker(&key);
+    let kept = take_worker(&key, settings.keep);
     let reused = kept.is_some();
     let mut worker = match kept {
         Some(worker) => worker,
@@ -380,17 +409,22 @@ pub async fn sync(store: &Store, account: &str, label: &str) -> Result<Stats> {
         result = sync_with(store, &settings, origin_id, &mut worker).await;
     }
     let (stats, selected) = result?;
-    put_worker(key, worker, selected);
+    if settings.keep.is_zero() {
+        let _ = worker.client.logout();
+    } else {
+        put_worker(key, worker, selected);
+    }
     record_run(store, origin_id).await?;
     Ok(stats)
 }
 
 impl Worker {
     fn connect(s: &Settings) -> Result<Self> {
-        let (client, caps) = connect(s)?;
+        let (client, caps, qresync) = connect(s)?;
         Ok(Self {
             client,
             caps,
+            qresync,
             used: Instant::now(),
         })
     }
@@ -404,7 +438,9 @@ async fn sync_with(
     worker: &mut Worker,
 ) -> Result<(Stats, bool)> {
     let t = Instant::now();
-    let qresync = worker.caps.contains(&Capability::QResync);
+    let qresync = worker.qresync;
+    // STATUS HIGHESTMODSEQ needs CONDSTORE (RFC 7162 §3.1.8); QRESYNC implies it.
+    let modseq = qresync || worker.caps.contains(&Capability::CondStore);
     let client = &mut worker.client;
     let mut stats = Stats::default();
     let mut selected = false;
@@ -478,16 +514,18 @@ async fn sync_with(
     }
 
     let mut art = Artifacts::new(store).await?;
+    let items: &[StatusDataItemName] = if modseq {
+        &[
+            StatusDataItemName::UidValidity,
+            StatusDataItemName::UidNext,
+            StatusDataItemName::HighestModSeq,
+        ]
+    } else {
+        &[StatusDataItemName::UidValidity, StatusDataItemName::UidNext]
+    };
     for (name, mailbox) in &folders {
         let status = client
-            .status(
-                mailbox.clone(),
-                Cow::Borrowed(&[
-                    StatusDataItemName::UidValidity,
-                    StatusDataItemName::UidNext,
-                    StatusDataItemName::HighestModSeq,
-                ]),
-            )
+            .status(mailbox.clone(), Cow::Borrowed(items))
             .with_context(|| format!("STATUS {name}"))?
             .data;
         let mut now_state = State {

@@ -3698,7 +3698,36 @@ async fn service_status(
     Ok(())
 }
 
+/// On SIGTERM or SIGINT, log out the kept IMAP connections, then exit; called
+/// before any thread starts, so every thread inherits the blocked signals.
+fn stop_on_signal() {
+    // SAFETY: sigset_t is plain data, filled in by sigemptyset/sigaddset.
+    let set = unsafe {
+        let mut set = std::mem::zeroed::<libc::sigset_t>();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::sigaddset(&mut set, libc::SIGINT);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        set
+    };
+    std::thread::spawn(move || {
+        let mut sig = 0;
+        // SAFETY: waits on the signals blocked above.
+        unsafe { libc::sigwait(&set, &mut sig) };
+        info!(signal = sig, "stopping");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            munchymail::imap::logout_workers();
+            let _ = tx.send(());
+        });
+        // A server that doesn't answer mustn't hold up the stop.
+        let _ = rx.recv_timeout(Duration::from_secs(5));
+        std::process::exit(0);
+    });
+}
+
 fn serve_cmd(data: &Path) -> Result<()> {
+    stop_on_signal();
     let socket = serve::socket().context("no XDG_RUNTIME_DIR or MUNCHYMAIL_SOCKET to listen on")?;
     munchymail::util::private_dir(data)?;
     let root = data.canonicalize()?;

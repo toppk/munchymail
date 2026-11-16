@@ -28,12 +28,13 @@ Roughly in priority order within each section. Phases refer to
 - [ ] The live Dovecot origin over IMAP (io-imap): IDLE on INBOX, a
       3-minute QRESYNC check of the other folders; the mbox tree becomes an
       occasional snapshot. NOTIFY once imap-codec and io-imap support it.
-  - [ ] LOGOUT on service shutdown (SIGTERM) for the kept sync connection
-        and the IDLE watch; today Dovecot logs both as "Connection closed".
-  - [ ] Test the 25-minute retirement of a kept sync connection (an
-        injectable clock or idle limit), never yet seen live.
-  - [ ] Decide QRESYNC from the ENABLED reply, not the advertised
-        capabilities (as io-imap d758ddb does); a bare OK means not enabled.
+  - [x] LOGOUT on service shutdown (SIGTERM) for the kept sync connection.
+  - [ ] LOGOUT for the IDLE watch too: io-imap's watch stream, closed,
+        returns at its next read timeout without DONE or LOGOUT (upstream).
+  - [x] The kept connection's idle limit is `keep_minutes` (default 25),
+        tested live with 1.
+  - [x] QRESYNC from the ENABLED reply, not the advertised capabilities;
+        STATUS asks HIGHESTMODSEQ only with CONDSTORE.
 - [ ] OCR after import in the service, rather than by hand.
 - [ ] Web UI and Android over HTTP with auth, through `src/api.rs`; the
       socket is same-user only and runs any command.

@@ -53,6 +53,9 @@ client_key = "~/.config/munchymail/creds/imap.key.pem"
 server_cert = "/etc/pki/my-ca.pem"
 # Optional: only these folders; a trailing * matches the rest of a name.
 # folders = ["INBOX", "lists/*"]
+# Optional: the service keeps its sync connection between checks, replaced
+# once idle this long (default 25; Dovecot logs out at 30); 0 logs in each time.
+# keep_minutes = 25
 ```
 
 - Read-only: folders are opened with EXAMINE and messages fetched with
