@@ -405,6 +405,7 @@ Both print counts and percentages of the matching messages.
 munchymail read m1234          # a message: locations, attachments, then headers and text body
 munchymail read 227617         # one stored copy, and only its locations
 munchymail read m1234 --json   # one object: all decoded headers, text, attachments, locations
+munchymail read m1234 --text > m1234.txt   # just the headers and text, to file; no untrusted wrapper
 munchymail attachment m1234 2 > file.pdf   # attachment 2's decoded bytes; refuses a terminal
 munchymail show m1234 --raw    # show takes a message id too: the copy read shows
 ```
