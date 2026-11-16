@@ -1760,12 +1760,12 @@ impl Listing {
     }
 }
 
-/// Tell a person at a terminal how to get the next page; scripts use `--json`'s
-/// `page` record, so a pipe doesn't get the hint mixed into its output.
-fn more(cursor: &str) {
-    if listing::width().is_some() {
-        info!("more results: add --after {cursor}");
-    }
+/// Say on stderr, after the page, how to get the next one; `--json` has its
+/// `page` record instead.
+fn more(out: &mut impl Write, cursor: &str) -> Result<()> {
+    out.flush()?;
+    info!("more results: add --after {cursor}");
+    Ok(())
 }
 
 /// `search --columns` and how address columns show.
@@ -1877,6 +1877,17 @@ async fn search(
         let set = api::matching(store, &filter, unique).await?;
         let rows = query_rows(store, &munchymail::query::count_sql(set), vec![]).await?;
         writeln!(out, "{}", text(&rows[0][0]))?;
+        if !unique {
+            let set = api::matching(store, &filter, true).await?;
+            let msgs = query_rows(store, &munchymail::query::count_sql(set), vec![]).await?;
+            if text(&msgs[0][0]) != text(&rows[0][0]) {
+                out.flush()?;
+                info!(
+                    "that counts copies; they are {} messages (--unique)",
+                    text(&msgs[0][0])
+                );
+            }
+        }
         return Ok(());
     }
     let part = Part {
@@ -1891,7 +1902,7 @@ async fn search(
     if listing == Listing::Json {
         writeln!(out, "{}", api::page_json(n, next.as_deref()))?;
     } else if let Some(c) = next {
-        more(&c);
+        more(out, &c)?;
     }
     Ok(())
 }
@@ -1987,8 +1998,23 @@ async fn search_all(
     }
     let r = async {
         if count {
-            for (a, _, _, n) in &parts {
+            let (mut msgs, mut differ) = (Vec::new(), false);
+            for (a, store, f, n) in &parts {
                 writeln!(out, "{n:>7}  {a}")?;
+                if let (false, Some(f)) = (unique, f) {
+                    let set = api::matching(store, f, true).await?;
+                    let rows =
+                        query_rows(store, &munchymail::query::count_sql(set), vec![]).await?;
+                    differ |= text(&rows[0][0]) != n.to_string();
+                    msgs.push(format!("{a} {}", text(&rows[0][0])));
+                }
+            }
+            if differ {
+                out.flush()?;
+                info!(
+                    "that counts copies; as messages (--unique): {}",
+                    msgs.join(", ")
+                );
             }
             return Ok(());
         }
@@ -2055,7 +2081,7 @@ async fn search_all(
         if listing == Listing::Json {
             writeln!(out, "{}", api::page_json(shown, cursor.as_deref()))?;
         } else if let Some(c) = cursor {
-            more(&c);
+            more(out, &c)?;
         }
         Ok(())
     }
@@ -2229,7 +2255,7 @@ async fn read(store: &Store, r: api::Ref, json: bool, out: &mut impl Write) -> R
     };
     writeln!(
         out,
-        "message m{}, {date}, copy {id} of {}, {} bytes (exact bytes: munchymail{acct} show {id} --raw)",
+        "message m{}, {date}, copy {id} of {}, {} bytes (as a .eml: munchymail{acct} show {id} --raw > FILE.eml)",
         m.msg,
         m.copies.len(),
         m.raw_bytes

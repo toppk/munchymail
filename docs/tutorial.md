@@ -58,8 +58,8 @@ munchymail search -n 10
 The `who` column shows the other side of each message: `→` and the
 recipients of mail you sent, `←` and the sender of mail you received. The
 first number is the copy id. Results are newest first, in pages of `-n`
-(default 50). At a terminal, stderr says `more results: add --after CURSOR`
-when there are more; scripts get the cursor from `--json`'s `page` record.
+(default 50). When there are more, stderr says `more results: add --after
+CURSOR` after the page; with `--json` it is in the `page` record.
 
 Filters can be combined, and all of them must match:
 

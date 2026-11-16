@@ -14,6 +14,8 @@ Roughly in priority order within each section. Phases refer to
 - [ ] Text inside zips (documents in a zip part); the `.docm`/`.xlsm` here
       are macro-only droppers with no text.
 - [ ] `--text` ranking (`--sort relevance`); today results stay newest first.
+- [ ] `read mN --text`: decoded headers and body without the untrusted
+      wrapper, for filing one message as text (`show mN --raw` is the .eml).
 - [ ] `read mN --attachment K`: extracted text (untrusted-wrapped); the
       original bytes are `attachment mN K`.
 - [ ] 7z/rar member names (only zip is listed today); nested zips.

@@ -320,8 +320,8 @@ in the others.
 
 Results come in pages of `-n` (1 to 1000, default 50), newest first by
 `Date:` with ties broken by id, so pages are stable. When there are more,
-the next cursor is logged to stderr (`more results: add --after CURSOR`)
-when stdout is a terminal; otherwise only `--json` carries it.
+the next cursor is logged to stderr after the page (`more results: add
+--after CURSOR`); `--json` carries it in its `page` record instead.
 `--json` prints JSON Lines: one `{"type":"message",...}` record per message
 (copy `id`, `message` id, date, Message-ID, From, To, subject, a
 160-character snippet of the
